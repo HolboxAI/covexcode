@@ -249,7 +249,7 @@ fn wrap_single(name: &str) -> Result<PathBuf, String> {
 
 /// Where `publish` last put a given path, so publishing it again updates the
 /// same link instead of minting a new one -- the same file, the same slot,
-/// same shape as `session.rs`'s `~/.boxcode/sessions/`: a plain file the
+/// same shape as `session.rs`'s `~/.covexcode/sessions/`: a plain file the
 /// user can delete to forget, not a database.
 fn registry_path() -> Option<PathBuf> {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
