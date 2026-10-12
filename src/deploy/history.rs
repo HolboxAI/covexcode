@@ -1,5 +1,5 @@
 //! What was deployed, where, and whether it worked --
-//! `~/.boxcode/deployments.jsonl`, one line per finished deployment.
+//! `~/.covexcode/deployments.jsonl`, one line per finished deployment.
 //!
 //! Deliberately the same shape as `usage.rs`: append-only JSONL in the same
 //! directory, every failure swallowed, a corrupt line skipped rather than

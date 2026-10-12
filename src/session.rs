@@ -1,4 +1,4 @@
-//! Session persistence -- `~/.boxcode/sessions/<stamp>.jsonl`, one file per
+//! Session persistence -- `~/.covexcode/sessions/<stamp>.jsonl`, one file per
 //! conversation, one JSON line per message, plus a header line naming the
 //! workspace it belongs to.
 //!
