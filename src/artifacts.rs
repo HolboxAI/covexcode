@@ -809,7 +809,7 @@ pub async fn publish(path: &Path, endpoint: &str) -> Result<Published, String> {
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
-        .user_agent(concat!("boxcode/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("covexcode/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("could not build an HTTP client: {e}"))?;
 
