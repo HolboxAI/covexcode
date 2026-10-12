@@ -205,7 +205,7 @@ $fakeHome = Join-Path ([System.IO.Path]::GetTempPath()) "boxcode-ps1-test-home-$
 Remove-Item -Recurse -Force $fakeHome -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $fakeHome | Out-Null
 $env:USERPROFILE = $fakeHome
-$idFile = Join-Path $fakeHome '.boxcode\device_id'
+$idFile = Join-Path $fakeHome '.covexcode\device_id'
 
 $env:BOXCODE_TELEMETRY_URL = 'off'
 Send-InstallPing -Version '9.9.9'
@@ -321,7 +321,7 @@ Remove-Item -Recurse -Force $realPythonHome -ErrorAction SilentlyContinue
 # real Windows python.exe this OS could never execute anyway.
 $fallbackHome = Join-Path ([System.IO.Path]::GetTempPath()) "boxcode-ps1-fallback-$PID"
 Remove-Item -Recurse -Force $fallbackHome -ErrorAction SilentlyContinue
-$fakeEmbeddedDir = Join-Path $fallbackHome '.boxcode\python'
+$fakeEmbeddedDir = Join-Path $fallbackHome '.covexcode\python'
 New-Item -ItemType Directory -Force -Path $fakeEmbeddedDir | Out-Null
 $fakePythonExe = Join-Path $fakeEmbeddedDir 'python.exe'
 # On Unix (this test's actual host, whatever the platform under test), a
