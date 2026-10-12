@@ -60,7 +60,7 @@ fn require_endpoint(endpoint: &str) -> Result<(), String> {
     if endpoint.trim().is_empty() {
         return Err(
             "no errors endpoint is configured. Set `errors_endpoint` under [tools] in \
-             ~/.boxcode/config.toml."
+             ~/.covexcode/config.toml."
                 .to_string(),
         );
     }
