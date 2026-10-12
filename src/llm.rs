@@ -519,7 +519,7 @@ async fn run(
         // The most likely cause of a 400 the moment file tools ship is an
         // endpoint that does not implement tool calling, so name the fix.
         let hint = if status == reqwest::StatusCode::BAD_REQUEST && sent_tools {
-            "\n\nIf this endpoint does not support tool calling, disable file tools:\nset `enabled = false` under [tools] in ~/.boxcode/config.toml."
+            "\n\nIf this endpoint does not support tool calling, disable file tools:\nset `enabled = false` under [tools] in ~/.covexcode/config.toml."
         } else {
             ""
         };
@@ -658,7 +658,7 @@ async fn run(
                 request_id,
                 StreamEvent::Notice(format!(
                     "The reply hit the {max_tokens}-token output cap and was cut off. \
-                     Raise `max_tokens` under [llm] in ~/.boxcode/config.toml, \
+                     Raise `max_tokens` under [llm] in ~/.covexcode/config.toml, \
                      or ask for the work in smaller pieces."
                 )),
             ))

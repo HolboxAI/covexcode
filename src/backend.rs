@@ -445,7 +445,7 @@ pub async fn deploy(
     if endpoint.trim().is_empty() {
         return Err(
             "no backend endpoint is configured. Set `backend_endpoint` under [tools] in \
-             ~/.boxcode/config.toml."
+             ~/.covexcode/config.toml."
                 .to_string(),
         );
     }
