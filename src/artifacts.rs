@@ -786,7 +786,7 @@ pub async fn publish(path: &Path, endpoint: &str) -> Result<Published, String> {
     if endpoint.trim().is_empty() {
         return Err(
             "no artifact endpoint is configured. Set `endpoint` under [artifacts] in \
-             ~/.boxcode/config.toml."
+             ~/.covexcode/config.toml."
                 .to_string(),
         );
     }

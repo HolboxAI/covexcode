@@ -292,7 +292,7 @@ impl HeadlessSession {
                 .send(SessionUpdate::AgentMessageChunk {
                     content: ContentBlock::Text {
                         text: "No API key set. Export BOXCODE_API_KEY or add api_key to \
-                               ~/.boxcode/config.toml."
+                               ~/.covexcode/config.toml."
                             .to_string(),
                     },
                     message_id: None,
