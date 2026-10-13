@@ -8,7 +8,7 @@
 //! outside `Plan::save`.
 //!
 //! Markdown with YAML-ish frontmatter, at the top of the project rather than
-//! under `~/.boxcode`, because a plan is a thing people read, edit by hand,
+//! under `~/.covexcode`, because a plan is a thing people read, edit by hand,
 //! commit, and review before the code exists. A plan nobody can find is a plan
 //! nobody checks the work against.
 //!

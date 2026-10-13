@@ -1,4 +1,4 @@
-//! Optional daily spending limits -- `~/.boxcode/quota.json`.
+//! Optional daily spending limits -- `~/.covexcode/quota.json`.
 //!
 //! Distinct from `usage.rs`, which is the append-only history of what this
 //! install has done and never refuses anything. This is the ceiling: a small

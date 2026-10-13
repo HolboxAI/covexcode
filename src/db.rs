@@ -9,7 +9,7 @@
 //!
 //! The one thing this module owns that `auth.rs` does not: a per-project
 //! secret key, generated and kept entirely on the developer's own machine
-//! (`~/.boxcode/db.json`), never sent to the model. That is deliberate --
+//! (`~/.covexcode/db.json`), never sent to the model. That is deliberate --
 //! see `infra/db/README.md` for the full reasoning, but the short version
 //! is that a key the model never holds is a key that can never end up
 //! embedded in the published page's client-side JS by accident.

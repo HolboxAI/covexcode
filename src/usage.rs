@@ -1,4 +1,4 @@
-//! Local, per-install usage history -- `~/.boxcode/usage.jsonl`, one
+//! Local, per-install usage history -- `~/.covexcode/usage.jsonl`, one
 //! line per completed turn.
 //!
 //! This is the only usage record that exists anywhere. There is no login and
