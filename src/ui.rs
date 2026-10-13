@@ -1628,7 +1628,7 @@ fn tool_approval_parts(
             // The one thing the user cannot work out for themselves: this is not
             // a boxcode tool with known behaviour.
             for wrapped in wrap(
-                "Runs a tool on a configured MCP server. Boxcode cannot tell what it \
+                "Runs a tool on a configured MCP server. Covexcode cannot tell what it \
                  does -- the server decides, and the server supplies its own \
                  description. Treat it as running someone else's code with your \
                  credentials.",

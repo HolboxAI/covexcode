@@ -1015,10 +1015,10 @@ DEPLOYMENT (ask the model, e.g. 'deploy this to Vercel'; see [deploy] in
 
 DAILY LIMITS (optional, off by default -- every limit is 0 = no limit, so this
               only counts until you set one. See [quota] in config.toml):
-    BOXCODE_QUOTA_ENABLED         Set to 0 to disable counting entirely
-    BOXCODE_MAX_REQUESTS_PER_DAY  Requests before prompts are refused
-    BOXCODE_MAX_TOKENS_PER_DAY    Prompt + completion tokens per UTC day
-    BOXCODE_MAX_USD_PER_DAY       Spend per UTC day; needs [quota.pricing]
+    COVEXCODE_QUOTA_ENABLED         Set to 0 to disable counting entirely
+    COVEXCODE_MAX_REQUESTS_PER_DAY  Requests before prompts are refused
+    COVEXCODE_MAX_TOKENS_PER_DAY    Prompt + completion tokens per UTC day
+    COVEXCODE_MAX_USD_PER_DAY       Spend per UTC day; needs [quota.pricing]
                                     entries for the models you use, or cost
                                     cannot be computed and reads as unpriced
 
@@ -1027,7 +1027,7 @@ KEYS:
     Alt/Shift-Enter       New line
     Esc                   Cancel request
     Ctrl-C                Exit (press twice)
-    /exit                 Leave boxcode"
+    /exit                 Leave covexcode"
     );
 }
 
