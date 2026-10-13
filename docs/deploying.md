@@ -244,11 +244,11 @@ rather than inventing a summary — that is what you would actually search for.
 
 ## Deployment history
 
-Every finished attempt is appended to `~/.boxcode/deployments.jsonl` — a plain
+Every finished attempt is appended to `~/.covexcode/deployments.jsonl` — a plain
 file you can read yourself:
 
 ```bash
-cat ~/.boxcode/deployments.jsonl
+cat ~/.covexcode/deployments.jsonl
 ```
 
 It stores the project, path, provider, target, status, URL, timestamp and the
@@ -274,7 +274,7 @@ history_limit = 10        # how many past deployments /deployments prints
   `vercel deploy` on your machine; a build already accepted by Vercel keeps
   going on their side. Cancel it in their dashboard if that matters.
 - **One project per run** — whatever directory the app was launched in.
-  `BOXCODE_WORKSPACE=/path/to/project` points it elsewhere.
+  `COVEXCODE_WORKSPACE=/path/to/project` points it elsewhere.
 - **Windows is best-effort.** Commands route through `cmd /C` there, because
   `vercel`/`netlify`/`npm` are `.cmd` shims that `CreateProcess` will not run
   directly. That path has not been exercised on a real Windows machine.
