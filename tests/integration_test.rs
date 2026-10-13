@@ -1,4 +1,4 @@
-// Basic integration tests for boxcode
+// Basic integration tests for covexcode
 
 #[test]
 fn test_json_parsing() {
