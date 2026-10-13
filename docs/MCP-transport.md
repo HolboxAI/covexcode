@@ -61,8 +61,8 @@ that any particular real server works.
 ## Swapping in a real server
 
 1. Pick a server and find its documented command/URL.
-2. Write the config. User scope (`~/.boxcode/mcp.json`) is auto-approved;
-   workspace scope (`<cwd>/.boxcode/mcp.json`) is withheld unless an `approve`
+2. Write the config. User scope (`~/.covexcode/mcp.json`) is auto-approved;
+   workspace scope (`<cwd>/.covexcode/mcp.json`) is withheld unless an `approve`
    policy is supplied.
 
    ```json
@@ -100,5 +100,5 @@ server rather than at load time. A warning is logged; watch for it.
 ## Why this binary cannot ship
 
 It lives in `src/bin/`, so `cargo build` compiles it, but it is not linked into
-the `boxcode` binary and releases package the `boxcode` executable by name.
+the `covexcode` binary and releases package the `covexcode` executable by name.
 It is test-only: nothing in the shipped code path references it.
