@@ -220,7 +220,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/model", "switch model"),
     ("/login", "sign in with Google in the browser, or show status if linked"),
     ("/logout", "clear the local covexcode.com session and promo key"),
-    ("/init", "write a BOXCODE.md the model reads every session"),
+    ("/init", "write a COVEXCODE.md the model reads every session"),
     ("/resume", "pick up this directory's last session"),
     ("/pull", "switch to a different local project"),
     ("/new", "forget the current conversation"),
@@ -305,7 +305,7 @@ write them down -- the messages above will not be sent again, so anything you \
 leave out is lost. Drop pleasantries, restatements, and anything since \
 superseded.
 
-Before the summary, in a section of its own headed `Proposed BOXCODE.md \
+Before the summary, in a section of its own headed `Proposed COVEXCODE.md \
 updates:`, list any durable, non-obvious project facts from this conversation \
 that are worth keeping past this summary -- a build or test quirk, a wrong \
 assumption you were corrected on, a convention you were told -- and are not \
@@ -314,7 +314,7 @@ nothing in this conversation rises to that bar; do not strain to fill it. \
 No tools are available to you in this request, so only list them here -- do \
 not attempt to call one. They stay in view in the summary that replaces this \
 conversation, so once tools are available again, propose the actual edit to \
-BOXCODE.md through the normal approval, the same as any other file change.
+COVEXCODE.md through the normal approval, the same as any other file change.
 
 Write it as notes to yourself, not as a reply to the user, and do not comment \
 on the act of summarising.";
@@ -1923,7 +1923,7 @@ impl App {
         ));
     }
 
-    /// `/init` -- has the model explore the project and write the `BOXCODE.md`
+    /// `/init` -- has the model explore the project and write the `COVEXCODE.md`
     /// that every later session reads (see `tools::project_memory`). Nothing
     /// special mechanically: it is an ordinary turn with a canned prompt, and
     /// the write lands through the ordinary `write_file` approval.
@@ -1940,13 +1940,13 @@ impl App {
             return;
         }
 
-        let existing = Path::new(&self.workspace_root).join("BOXCODE.md").exists();
+        let existing = Path::new(&self.workspace_root).join("COVEXCODE.md").exists();
         let prompt = if existing {
-            "BOXCODE.md already exists in this project. Read it, then bring it up to date \
+            "COVEXCODE.md already exists in this project. Read it, then bring it up to date \
              against the actual code: fix anything stale, fill real gaps, keep it about a page. \
              Verify claims by reading files before keeping or writing them."
         } else {
-            "Explore this project and write a BOXCODE.md at the project root. It will be \
+            "Explore this project and write a COVEXCODE.md at the project root. It will be \
              injected into your system prompt in every future session here, so write standing \
              notes, not a tour: what the project is in a sentence or two, the layout \
              (directories that matter and what lives in them), how to build, run and test it \
@@ -5935,7 +5935,7 @@ mod tests {
         assert!(!a.compacting, "/init is an ordinary turn, not a compaction");
         let last = a.messages.last().expect("a prompt was queued");
         assert!(last.role == Role::User);
-        assert!(last.content.contains("BOXCODE.md"), "{}", last.content);
+        assert!(last.content.contains("COVEXCODE.md"), "{}", last.content);
         assert!(last.content.contains("verified by reading files"), "{}", last.content);
     }
 
@@ -6068,7 +6068,7 @@ mod tests {
         let sent = a.compaction_history();
         let last = sent.last().expect("an instruction");
         let instruction = last.content.as_deref().unwrap_or("");
-        assert!(instruction.contains("BOXCODE.md"), "{instruction}");
+        assert!(instruction.contains("COVEXCODE.md"), "{instruction}");
         assert!(
             instruction.contains("No tools are available"),
             "must not invite a tool call in a request that carries no schemas: {instruction}"
