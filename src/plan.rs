@@ -13,7 +13,7 @@
 //! nobody checks the work against.
 //!
 //! One file, at a fixed name, and no registry of past plans. The presence of
-//! `plan.md` *is* the state: it is there, so it is the plan, and boxcode picks
+//! `plan.md` *is* the state: it is there, so it is the plan, and covexcode picks
 //! it up. Nothing to list, nothing to select, nothing to remember having
 //! archived. Deleting the file is how you finish with it.
 //!
@@ -26,7 +26,7 @@ use crate::dateutil;
 use std::path::{Path, PathBuf};
 
 /// The plan, relative to the project root. A fixed, visible, obvious name:
-/// someone who has never run boxcode should be able to open the project and
+/// someone who has never run covexcode should be able to open the project and
 /// tell what this is.
 pub const PLAN_FILE: &str = "plan.md";
 
@@ -506,7 +506,7 @@ mod tests {
 
     /// These files are meant to be edited by hand. Someone ticking a box in
     /// their editor, renumbering, or reflowing a step must not produce a file
-    /// boxcode then refuses to read.
+    /// covexcode then refuses to read.
     #[test]
     fn a_hand_edited_file_still_parses() {
         let text = "\

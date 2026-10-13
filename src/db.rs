@@ -1,6 +1,6 @@
 //! A basic per-project database for boxcode-published sites.
 //!
-//! Same identity story as `auth.rs`: a project's id to the rest of boxcode
+//! Same identity story as `auth.rs`: a project's id to the rest of covexcode
 //! *is* the artifact id it already published under
 //! (`artifacts::remembered_id`), never a second id invented here. `query`
 //! sends one SQL statement to the db control-plane (`infra/db/` in this
