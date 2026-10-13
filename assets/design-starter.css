@@ -1,5 +1,5 @@
 /*
-  boxcode design starter -- a restrained token system + a handful of
+  covexcode design starter -- a restrained token system + a handful of
   accessible components, meant to be copied into a new project and then
   DELIBERATELY CHANGED, not shipped as-is.
 
@@ -10,12 +10,12 @@
      both --surface and --surface-raised, in both light and dark.
   2. Replace --font-display and --font-body with a real pairing chosen for
      this subject, not left as the system-font fallback below. The system
-     stack here is an honest, fast default -- it is not "the boxcode font."
+     stack here is an honest, fast default -- it is not "the covexcode font."
   3. Do not reintroduce what this file was written to avoid: a
      purple-to-blue gradient hero, Inter/Space Grotesk left as the final
      choice, emoji as section markers, everything centered, rounded-lg on
      every element, or an accent bar on rounded cards. If the finished page
-     could be mistaken for any other boxcode project, the first two steps
+     could be mistaken for any other covexcode project, the first two steps
      above were skipped.
 
   Structure: :root carries the full light palette (the default any browser
