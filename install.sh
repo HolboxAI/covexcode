@@ -1,12 +1,19 @@
 #!/bin/bash
 set -e
 
+# covexcode installer (macOS / Linux).
+#
+# Primary one-liner:  curl -fsSL https://covexcode.com/install.sh | bash
+# Legacy one-liner:   curl -fsSL https://boxcode.sh/install.sh | bash
+# Both URLs serve this script and install the `covexcode` binary (legacy
+# `boxcode-*` release assets are still accepted as a download fallback).
+
 # Where release assets and checksums are published. Overridable so a fork or
 # an internal mirror can serve its own builds -- mirrors how upgrade.rs lets
-# BOXCODE_UPGRADE_URL_BASE redirect its own fetches.
+# COVEXCODE_UPGRADE_URL_BASE (with BOXCODE_* fallback) redirect its own fetches.
 RELEASE_API_BASE="${COVEXCODE_RELEASE_API_BASE:-${BOXCODE_RELEASE_API_BASE:-https://api.github.com/repos/HolboxAI/covexcode}}"
 
-# Remove any other "boxcode" executable found on $PATH so a stale
+# Remove any other legacy "boxcode" / "tuisample-code" executable on $PATH so a stale
 # build from a previous install can't shadow (or be shadowed by) the one we
 # just installed, regardless of which directory it ended up in.
 # Removes copies of this tool that the shell might resolve to instead of the
@@ -21,7 +28,7 @@ sweep_path_for_stale_copies() {
   for dir in $PATH; do
     IFS="$saved_ifs"
     [ -n "$dir" ] || continue
-    for name in boxcode tuisample-code; do
+    for name in boxcode tuisample-code; do  # pre-rename binary names
       candidate="$dir/$name"
       if [ -f "$candidate" ] && [ "$candidate" != "$installed_at" ]; then
         found=1
@@ -47,19 +54,23 @@ sweep_path_for_stale_copies() {
 # conflicting ID. No other data leaves this machine from here.
 #
 # Defaults to the same endpoint telemetry.rs's DEFAULT_TELEMETRY_URL points
-# at -- keep the two in sync if that ever changes. BOXCODE_TELEMETRY_URL
-# overrides it; note the missing ":" in the substitution below is deliberate,
-# not a typo -- "${VAR-default}" falls back only when the variable is unset,
-# so an explicit BOXCODE_TELEMETRY_URL="" still disables sending rather than
-# silently reverting to the default, matching telemetry.rs's own handling of
-# an explicit blank override. Every failure mode -- no uuidgen, no curl,
-# network down, endpoint unreachable -- is swallowed either way. This must
-# never be able to fail the install itself, so it always backgrounds the
-# request and never lets a failure here reach `set -e`.
+# at -- keep the two in sync if that ever changes. COVEXCODE_TELEMETRY_URL
+# overrides it (BOXCODE_TELEMETRY_URL still accepted). Note the missing ":" in
+# the substitution below is deliberate -- "${VAR-default}" falls back only
+# when the variable is unset, so an explicit empty override still disables
+# sending rather than silently reverting to the default. Every failure mode
+# is swallowed either way; this must never fail the install itself.
 ping_install() {
   local binary="$1"
   local default_url="https://tui-telemetry.dhruvm307.workers.dev"
-  local url="${BOXCODE_TELEMETRY_URL-$default_url}"
+  local url
+  if [ "${COVEXCODE_TELEMETRY_URL+x}" = x ]; then
+    url="$COVEXCODE_TELEMETRY_URL"
+  elif [ "${BOXCODE_TELEMETRY_URL+x}" = x ]; then
+    url="$BOXCODE_TELEMETRY_URL"
+  else
+    url="$default_url"
+  fi
   [ -n "$url" ] || return 0
 
   local state_dir="$HOME/.covexcode"
@@ -117,7 +128,7 @@ PYTHON_STANDALONE_VERSION="3.12.13"
 # this at an unreachable host to exercise the "couldn't get one" path
 # deterministically and without a real download, and lets a fork/mirror
 # serve its own copy.
-PYTHON_STANDALONE_BASE_URL="${BOXCODE_PYTHON_STANDALONE_URL:-https://github.com/astral-sh/python-build-standalone/releases/download}"
+PYTHON_STANDALONE_BASE_URL="${COVEXCODE_PYTHON_STANDALONE_URL:-${BOXCODE_PYTHON_STANDALONE_URL:-https://github.com/astral-sh/python-build-standalone/releases/download}}"
 
 # Maps this script's own os/arch onto python-build-standalone's target
 # triples. Empty output (not an error) for anything it doesn't publish a
@@ -241,7 +252,7 @@ ensure_ddgs_available() {
 
 # Put a binary at $dest, replacing whatever is there.
 #
-# Writing straight over the destination breaks `boxcode --upgrade`: that
+# Writing straight over the destination breaks `covexcode --upgrade`: that
 # runs this script from the very binary being replaced, and on Linux writing to
 # a running executable fails with ETXTBSY. So write a sibling temp file and
 # rename it over the target — rename swaps the inode atomically, leaving the
@@ -269,7 +280,7 @@ install_binary() {
 # was before, only faster when a matching binary exists.
 
 # Maps `uname -s`/`uname -m` onto the asset-name components release.yml uses
-# (`boxcode-$os-$arch`). Isolated in their own functions, rather than
+# (`covexcode-$os-$arch`, with legacy `boxcode-*` fallback). Isolated in their own functions, rather than
 # inlined into main, purely so tests can shadow the `uname` builtin and drive
 # every branch without needing to run on five different machines.
 detect_os() {
@@ -339,7 +350,7 @@ rc_already_has_dir() {
 # This replaces a bare `export PATH="$HOME/.local/bin:$PATH"`, which was the
 # right line and the wrong advice: with no file named, people paste it into
 # the terminal they are standing in. `export` sets a variable in one process,
-# so it dies with that window -- boxcode works until the terminal is closed
+# so it dies with that window -- covexcode works until the terminal is closed
 # and is then "command not found" again, which reads as the install having
 # silently broken rather than as a PATH that was never persisted.
 #
@@ -491,7 +502,7 @@ ARCH_NAME=$(detect_arch)
 
 if [ "$OS_NAME" != "unsupported" ] && [ "$ARCH_NAME" != "unsupported" ]; then
   echo "🔍 Looking for a prebuilt $OS_NAME-$ARCH_NAME binary..."
-  CANDIDATE="$TEMP_DIR/boxcode"
+  CANDIDATE="$TEMP_DIR/covexcode"
   if fetch_prebuilt_binary "$OS_NAME" "$ARCH_NAME" "$CANDIDATE"; then
     BINARY_PATH="$CANDIDATE"
     echo "✓ Downloaded a prebuilt binary — no build required"
@@ -567,7 +578,7 @@ else
     echo "✓ Installed to ~/.local/bin (already in PATH)"
   else
     echo "⚠️  Installed to ~/.local/bin, which is not on your PATH."
-    echo "   Your shell cannot find boxcode until it is. Run this once, then"
+    echo "   Your shell cannot find covexcode until it is. Run this once, then"
     echo "   open a new terminal:"
     echo ""
     print_path_setup_hint "$HOME/.local/bin"
@@ -597,19 +608,19 @@ done
 
 # Confirm the shell actually resolves to what we just installed.
 hash -r 2>/dev/null || true
-RESOLVED=$(command -v boxcode || true)
+RESOLVED=$(command -v covexcode || true)
 if [ -z "$RESOLVED" ]; then
   # "Open a new shell and retry" was true and useless: a new shell changes
   # nothing when the line was never written to a file. Say what to write.
   echo ""
-  echo "⚠️  boxcode is installed at $INSTALLED_AT, but your shell cannot find it."
+  echo "⚠️  covexcode is installed at $INSTALLED_AT, but your shell cannot find it."
   echo "   Run this once, then open a new terminal:"
   echo ""
   print_path_setup_hint "$(dirname "$INSTALLED_AT")"
   echo ""
 elif [ "$RESOLVED" != "$INSTALLED_AT" ]; then
   echo ""
-  echo "⚠️  WARNING: 'boxcode' resolves to $RESOLVED,"
+  echo "⚠️  WARNING: 'covexcode' resolves to $RESOLVED,"
   echo "   but this build was installed to $INSTALLED_AT."
   echo "   Remove the other copy, or fix your PATH order, or you will keep"
   echo "   running the old version."
