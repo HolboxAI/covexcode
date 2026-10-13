@@ -1617,7 +1617,7 @@ h1{background:url(logo.png)}"#;
     }
 
     /// An unrelated sibling directory that merely shares a path prefix
-    /// (`.../boxcode-other`) must not be mistaken for a project nested
+    /// (`.../covexcode-other`) must not be mistaken for a project nested
     /// inside `.../covexcode` -- `Path::starts_with` is component-aware for
     /// exactly this reason, confirmed here rather than assumed.
     #[test]

@@ -46,7 +46,7 @@ pub struct LoginStatus {
     pub endpoint: String,
     pub model: String,
     pub key_prefix: String,
-    pub via_boxcode_proxy: bool,
+    pub via_promo_proxy: bool,
 }
 
 impl LoginStatus {
@@ -64,21 +64,21 @@ impl LoginStatus {
             key.to_string()
         };
         let endpoint = config.llm.endpoint.trim().to_string();
-        let via_boxcode_proxy = is_promo_proxy(&endpoint);
+        let via_promo_proxy = is_promo_proxy(&endpoint);
         Self {
             has_session_token: account_token_path().is_file(),
             email,
             endpoint,
             model: config.llm.model.clone(),
             key_prefix,
-            via_boxcode_proxy,
+            via_promo_proxy,
         }
     }
 
     /// True when this machine has a promo key on llm.covexcode.com (or the
     /// legacy llm.boxcode.sh host) and a device session token.
     pub fn is_signed_in(&self) -> bool {
-        self.has_session_token && self.via_boxcode_proxy && !self.key_prefix.is_empty()
+        self.has_session_token && self.via_promo_proxy && !self.key_prefix.is_empty()
     }
 
     /// Human-readable status for `/login` in the TUI.
@@ -96,7 +96,7 @@ impl LoginStatus {
                  To re-link: /logout, then /login (or exit and run `covexcode login`).",
                 self.endpoint, self.model, self.key_prefix
             )
-        } else if self.via_boxcode_proxy && !self.key_prefix.is_empty() {
+        } else if self.via_promo_proxy && !self.key_prefix.is_empty() {
             format!(
                 "Using the promo LLM proxy, but no device session yet.\n\n\
                  Endpoint: {}\n\

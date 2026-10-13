@@ -1,4 +1,4 @@
-//! A basic per-project database for boxcode-published sites.
+//! A basic per-project database for covexcode-published sites.
 //!
 //! Same identity story as `auth.rs`: a project's id to the rest of covexcode
 //! *is* the artifact id it already published under
