@@ -242,7 +242,7 @@ fn wrap_single(name: &str) -> Result<PathBuf, String> {
          <header><strong>{escaped}</strong><a href=\"{escaped}\" download>download</a></header>\n\
          <iframe src=\"{escaped}\"></iframe>\n"
     );
-    let path = std::env::temp_dir().join(format!("boxcode-artifact-index-{}.html", std::process::id()));
+    let path = std::env::temp_dir().join(format!("covexcode-artifact-index-{}.html", std::process::id()));
     std::fs::write(&path, html).map_err(|e| format!("could not prepare a viewer page: {e}"))?;
     Ok(path)
 }
@@ -1440,7 +1440,7 @@ h1{background:url(logo.png)}"#;
     }
 
     fn temp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("boxcode-artifact-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("covexcode-artifact-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         dir
@@ -1920,7 +1920,7 @@ mod live_check {
     #[tokio::test]
     #[ignore]
     async fn publishes_to_the_real_bucket_and_serves_through_cloudfront() {
-        let dir = std::env::temp_dir().join("boxcode-live-artifact");
+        let dir = std::env::temp_dir().join("covexcode-live-artifact");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("assets")).unwrap();
         std::fs::write(dir.join("index.html"), "<h1>live</h1><script src=assets/app.js></script>").unwrap();

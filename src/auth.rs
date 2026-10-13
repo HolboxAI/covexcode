@@ -94,7 +94,7 @@ mod tests {
     #[tokio::test]
     async fn an_unpublished_path_is_refused_before_any_network_call() {
         crate::config::test_support::with_isolated_home(|| {});
-        let dir = std::env::temp_dir().join(format!("boxcode-auth-unpublished-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("covexcode-auth-unpublished-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let target = dir.join("index.html");
