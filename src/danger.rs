@@ -1335,9 +1335,9 @@ mod tests {
     #[test]
     fn irreversible_gh_operations_always_stop_for_a_decision() {
         for command in [
-            "gh repo delete HolboxAI/boxcode",
-            "gh repo delete HolboxAI/boxcode --yes",
-            "gh repo archive HolboxAI/boxcode",
+            "gh repo delete HolboxAI/covexcode",
+            "gh repo delete HolboxAI/covexcode --yes",
+            "gh repo archive HolboxAI/covexcode",
             "gh release delete v1.1.0",
             "gh issue delete 42",
             "gh gist delete abc123",
@@ -1348,7 +1348,7 @@ mod tests {
             "gh cache delete --all",
             "gh workflow disable release.yml",
             "gh auth logout",
-            "gh api -X DELETE repos/HolboxAI/boxcode",
+            "gh api -X DELETE repos/HolboxAI/covexcode",
             "gh api --method DELETE repos/x/y",
             "gh api --method=POST repos/x/y/issues",
         ] {
@@ -1368,7 +1368,7 @@ mod tests {
             "gh run list --limit 100",
             "gh release list",
             "gh auth status",
-            "gh api repos/HolboxAI/boxcode",
+            "gh api repos/HolboxAI/covexcode",
             "gh api --paginate repos/x/y/commits",
             "gh api -X GET repos/x/y",
         ] {

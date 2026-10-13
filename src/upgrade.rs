@@ -605,7 +605,7 @@ mod tests {
     fn reads_the_version_from_the_package_table() {
         let manifest = "\
 [package]
-name = \"boxcode\"
+name = \"covexcode\"
 version = \"0.3.0\"
 edition = \"2021\"
 ";
@@ -619,7 +619,7 @@ edition = \"2021\"
         // report a dependency's version as the app's.
         let manifest = "\
 [package]
-name = \"boxcode\"
+name = \"covexcode\"
 version = \"0.3.0\"
 
 [dependencies]
@@ -789,7 +789,7 @@ version = \"9.9.9\"
         let marker =
             std::env::temp_dir().join(format!("covexcode-upgrade-test-{}", std::process::id()));
         let installer = format!(
-            "#!/bin/bash\n# stand-in for the boxcode installer\necho ran > \"{}\"\n",
+            "#!/bin/bash\n# stand-in for the covexcode installer\necho ran > \"{}\"\n",
             marker.display()
         );
         let manifest = |version: &str| format!("[package]\nname = \"covexcode\"\nversion = \"{version}\"\n");
@@ -878,7 +878,7 @@ version = \"9.9.9\"
         let _ = std::fs::remove_file(&marker);
         // PowerShell, not batch: `install.ps1` is what actually ships.
         let installer = format!(
-            "# boxcode installer (test stand-in)\nSet-Content -Path '{}' -Value 'ran'\n",
+            "# covexcode installer (test stand-in)\nSet-Content -Path '{}' -Value 'ran'\n",
             marker.display()
         );
         let manifest = "[package]\nname = \"covexcode\"\nversion = \"99.0.0\"\n";
