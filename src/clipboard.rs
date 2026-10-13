@@ -52,7 +52,7 @@ pub fn read_image() -> Option<ImageAttachment> {
 /// reading; leaving a stray is harmless since it lives in the OS temp dir.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn scratch_path(ext: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("boxcode_clip_{}.{}", std::process::id(), ext))
+    std::env::temp_dir().join(format!("covexcode_clip_{}.{}", std::process::id(), ext))
 }
 
 #[cfg(target_os = "macos")]
