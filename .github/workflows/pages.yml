@@ -1,14 +1,15 @@
 name: Pages
 
-# Publishes boxcode.sh: the landing page in `docs/`, plus the two installers
-# from the repo root served at their own paths, so
+# Publishes the landing page in `docs/` plus the two installers from the
+# repo root. GitHub Pages still serves them at boxcode.sh (see docs/CNAME)
+# so the legacy install one-liners keep working:
 #
 #   curl -fsSL https://boxcode.sh/install.sh | bash
 #   irm https://boxcode.sh/install.ps1 | iex
 #
-# fetch exactly the scripts that live at `install.sh`/`install.ps1` on main.
-# They are copied in at deploy time rather than duplicated under `docs/` --
-# a second copy in the tree is a copy that drifts.
+# Primary install URLs in the landing page / README are covexcode.com; both
+# hosts serve scripts that install the `covexcode` binary. Scripts are
+# copied in at deploy time rather than duplicated under `docs/`.
 
 on:
   push:
@@ -51,8 +52,10 @@ jobs:
       - name: Check the installers survived the copy
         run: |
           head -1 _site/install.sh | grep -q '^#!/bin/bash'
-          grep -q 'boxcode' _site/install.ps1
-          grep -q 'boxcode.sh/install.sh' _site/index.html
+          grep -q 'covexcode' _site/install.ps1
+          # Primary install URL is covexcode.com; legacy boxcode.sh note stays.
+          grep -q 'covexcode.com/install.sh' _site/index.html
+          grep -q 'boxcode.sh' _site/index.html
 
       - uses: actions/configure-pages@v5
 
