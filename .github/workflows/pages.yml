@@ -1,15 +1,16 @@
 name: Pages
 
 # Publishes the landing page in `docs/` plus the two installers from the
-# repo root. GitHub Pages still serves them at boxcode.sh (see docs/CNAME)
-# so the legacy install one-liners keep working:
+# repo root. GitHub Pages serves them at covexcode.com (see docs/CNAME),
+# the primary install host:
 #
-#   curl -fsSL https://boxcode.sh/install.sh | bash
-#   irm https://boxcode.sh/install.ps1 | iex
+#   curl -fsSL https://covexcode.com/install.sh | bash
+#   irm https://covexcode.com/install.ps1 | iex
 #
-# Primary install URLs in the landing page / README are covexcode.com; both
-# hosts serve scripts that install the `covexcode` binary. Scripts are
-# copied in at deploy time rather than duplicated under `docs/`.
+# The legacy boxcode.sh one-liners keep working via a DNS redirect from
+# boxcode.sh to covexcode.com, so both hosts install the `covexcode`
+# binary. Scripts are copied in at deploy time rather than duplicated
+# under `docs/`.
 
 on:
   push:
