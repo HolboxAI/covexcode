@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>boxcode — a coding assistant that lives in your terminal</title>
-<meta name="description" content="boxcode is a terminal coding assistant. It reads your files, runs your commands, and asks before every one. Install with a single line.">
+<title>covexcode — a coding assistant that lives in your terminal</title>
+<meta name="description" content="covexcode is a terminal coding assistant. It reads your files, runs your commands, and asks before every one. Install with a single line.">
 <meta name="theme-color" content="#0B0A14" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
 
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://boxcode.sh/">
-<meta property="og:title" content="boxcode">
+<meta property="og:url" content="https://covexcode.com/">
+<meta property="og:title" content="covexcode">
 <meta property="og:description" content="A coding assistant that lives in your terminal. Every command waits for your approval.">
 
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 13 13'%3E%3Crect width='13' height='13' rx='2.8' fill='%230B0A14'/%3E%3Cg fill='%23A78BFA' transform='translate(1.55 2.5) scale(0.76)'%3E%3Crect width='3' height='1.68'/%3E%3Crect x='10' width='3' height='1.68'/%3E%3Crect y='2' width='13' height='1.68'/%3E%3Crect y='4' width='2' height='1.68'/%3E%3Crect x='4' y='4' width='5' height='1.68'/%3E%3Crect x='11' y='4' width='2' height='1.68'/%3E%3Crect y='6' width='13' height='1.68'/%3E%3Crect x='2' y='8' width='3' height='1.68'/%3E%3Crect x='8' y='8' width='3' height='1.68'/%3E%3C/g%3E%3C/svg%3E">
@@ -19,7 +19,7 @@
 
 <style>
 /* ─────────────────────────────────────────────────────────────
-   boxcode.sh
+   covexcode.com (legacy install URL: boxcode.sh)
    Type   : monospace as the display face (the subject is a
             terminal), system grotesque for prose.
    Colour : the app's own identity, lifted from src/theme.rs --
@@ -645,12 +645,12 @@ h1 .cursor {
       <g class="legs"><path d="M2 8H5V8.84H4.5V9.68H2.5V8.84H2Z"/><path d="M8 8H11V8.84H10.5V9.68H8.5V8.84H8Z"/></g>
       <g class="eyes"><rect x="2" y="4" width="2" height="1.68"/><rect x="9" y="4" width="2" height="1.68"/></g>
     </svg>
-    <span>boxcode</span>
+    <span>covexcode</span>
   </a>
   <nav class="nav-links">
-    <a class="ln hide-sm" href="https://github.com/HolboxAI/boxcode#readme">Docs</a>
-    <a class="ln" href="https://github.com/HolboxAI/boxcode/releases">Releases</a>
-    <a class="ln" href="https://github.com/HolboxAI/boxcode">GitHub</a>
+    <a class="ln hide-sm" href="https://github.com/HolboxAI/covexcode#readme">Docs</a>
+    <a class="ln" href="https://github.com/HolboxAI/covexcode/releases">Releases</a>
+    <a class="ln" href="https://github.com/HolboxAI/covexcode">GitHub</a>
   </nav>
 </header>
 
@@ -668,7 +668,7 @@ h1 .cursor {
         <g class="legs"><path d="M2 8H5V8.84H4.5V9.68H2.5V8.84H2Z"/><path d="M8 8H11V8.84H10.5V9.68H8.5V8.84H8Z"/></g>
         <g class="eyes"><rect x="2" y="4" width="2" height="1.68"/><rect x="9" y="4" width="2" height="1.68"/></g>
       </svg>
-      <span>boxcode<span class="cursor" aria-hidden="true"></span></span>
+      <span>covexcode<span class="cursor" aria-hidden="true"></span></span>
     </h1>
 
     <p class="lede rise" style="--d:.2s">
@@ -686,7 +686,7 @@ h1 .cursor {
       <div class="cmd" id="cmdline">
         <div class="cmd-text">
           <span class="sigil" aria-hidden="true" id="sigil">$</span>
-          <code id="cmd-code">curl -fsSL https://boxcode.sh/install.sh | bash</code>
+          <code id="cmd-code">curl -fsSL https://covexcode.com/install.sh | bash</code>
         </div>
         <button class="copy" id="copy" aria-label="Copy install command">
           <span class="stack" aria-hidden="true">
@@ -698,13 +698,14 @@ h1 .cursor {
 
       <p class="note">
         Downloads a checksum-verified prebuilt binary — no Rust toolchain needed.
-        Already installed? <a href="https://github.com/HolboxAI/boxcode#4-update">boxcode --upgrade</a>.
+        Already installed? <a href="https://github.com/HolboxAI/covexcode#4-update">covexcode --upgrade</a>.
+        Still have the old <code>boxcode.sh</code> bookmark? It installs covexcode too.
       </p>
     </div>
    </div>
 
     <div class="term-shell watch" id="term">
-      <div class="term-bar" aria-hidden="true"><i></i><i></i><i></i><span>boxcode</span></div>
+      <div class="term-bar" aria-hidden="true"><i></i><i></i><i></i><span>covexcode</span></div>
 <pre class="term-body" id="term-body"><span class="term-line"><span class="p">❯</span> add a health check endpoint</span>
 <span class="term-line"> </span>
 <span class="term-line">I'll add it to the router and run the tests.</span>
@@ -732,7 +733,7 @@ h1 .cursor {
       <div>
         <h2>Any OpenAI-compatible endpoint</h2>
         <p>Run <code>/provider</code> to pick one and paste a key, or point
-        <code>BOXCODE_ENDPOINT</code> at something self-hosted. Nothing is hardcoded to one vendor.</p>
+        <code>COVEXCODE_ENDPOINT</code> at something self-hosted. Nothing is hardcoded to one vendor.</p>
       </div>
     </article>
 
@@ -749,15 +750,15 @@ h1 .cursor {
 
 <footer class="wrap foot">
   <span>MIT</span>
-  <a class="ln" href="https://github.com/HolboxAI/boxcode">HolboxAI/boxcode</a>
-  <span class="sep">boxcode.sh</span>
+  <a class="ln" href="https://github.com/HolboxAI/covexcode">HolboxAI/covexcode</a>
+  <span class="sep">covexcode.com</span>
 </footer>
 
 <script>
 (function () {
   var COMMANDS = {
-    unix: { sigil: "$",  text: "curl -fsSL https://boxcode.sh/install.sh | bash" },
-    win:  { sigil: ">",  text: "irm https://boxcode.sh/install.ps1 | iex" }
+    unix: { sigil: "$",  text: "curl -fsSL https://covexcode.com/install.sh | bash" },
+    win:  { sigil: ">",  text: "irm https://covexcode.com/install.ps1 | iex" }
   };
 
   var tabs   = Array.prototype.slice.call(document.querySelectorAll(".tab"));
