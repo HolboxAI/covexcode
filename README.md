@@ -43,6 +43,8 @@ OpenAI-compatible LLM endpoint.
 **Install** — macOS/Linux: `curl -fsSL https://covexcode.com/install.sh | bash`
 Windows (PowerShell): `irm https://covexcode.com/install.ps1 | iex`
 
+The old `boxcode.sh` install one-liners still work and install `covexcode`.
+
 Downloads a prebuilt binary (no Rust toolchain needed) and verifies it against
 a published checksum. No prebuilt for your platform? It falls back to
 installing Rust and building from source (macOS/Linux only — on Windows,
@@ -120,7 +122,7 @@ to ask for the same thing.
   detects your framework, builds, and hands back a live URL (or the build
   log, to fix and retry) — all in one approval-gated tool call. Full details:
   [docs/deploying.md](docs/deploying.md).
-- **`BOXCODE.md`** (or `AGENTS.md`) at your project root rides along with
+- **`COVEXCODE.md`** (or `AGENTS.md` / legacy `BOXCODE.md`) at your project root rides along with
   every request — run `/init` to have the model write one. **Sessions**
   persist to `~/.covexcode/sessions/` per directory; `--resume`/`/resume` picks
   up where you left off, even after a crash. **`/compact`** summarizes a long
@@ -160,7 +162,7 @@ to ask for the same thing.
 | `/plan` | Toggle plan mode (research → approve a plan → then it can write) |
 | `/provider` | Pick a provider, then chains into a model picker |
 | `/model` | Re-pick just the model for the current provider |
-| `/init` | Explore the project and write/update `BOXCODE.md` |
+| `/init` | Explore the project and write/update `COVEXCODE.md` |
 | `/resume` | Reload this directory's last session into a fresh conversation |
 | `/pull` | Switch to a different project this machine has published |
 | `/new` | Start a fresh conversation (old one stays on disk for `/resume`) |
@@ -178,7 +180,7 @@ found, and files you edited yourself are never touched. It shows the full list
 and waits for a yes. What it cannot undo, it says so about: shell commands
 (a build, an `npm install`, an `rm`) change the disk in ways no snapshot
 covers, so the confirmation names the commands that ran instead of pretending.
-The window opens when boxcode starts, survives `/compact`, and closes on
+The window opens when covexcode starts, survives `/compact`, and closes on
 `/new`.
 
 ## Configuration
@@ -203,7 +205,7 @@ theme = "auto"        # auto | dark | light — auto-detects your terminal, fall
 clear_on_exit = true  # wipe the conversation off the terminal when you quit.
                       # Clears the scrollback, not just the visible screen — the
                       # same thing `clear` does, with the same consequence:
-                      # anything there before boxcode started goes too. The
+                      # anything there before covexcode started goes too. The
                       # session is still on disk for `--resume` either way.
 ```
 
@@ -258,7 +260,7 @@ chat-completions endpoint.
 
 ```bash
 cargo build --release        # build
-RUST_LOG=debug boxcode       # run with debug logging
+RUST_LOG=debug covexcode     # run with debug logging
 cargo test                   # test
 ```
 
