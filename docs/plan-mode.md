@@ -1,13 +1,13 @@
 # Plan mode
 
-Plan mode makes boxcode read-only until you have seen a plan and said yes to
+Plan mode makes covexcode read-only until you have seen a plan and said yes to
 it. The model reads your files, runs commands that cannot change anything, and
 works out what it would do — then hands you a plan. Nothing happens to your
 project until you approve one.
 
 **When you approve, the plan is written to `plan.md` in your project.** The
 model then works through it step by step, ticking each one off in the file as it
-goes. Next time you open boxcode in that directory, it picks the plan up and
+goes. Next time you open covexcode in that directory, it picks the plan up and
 carries on from where it stopped — no command, nothing to select.
 
 That is the point of the feature: a plan is a **file you own**, not a moment in
@@ -20,7 +20,7 @@ a chat window. The file being there *is* the state. Delete it when you're done.
 
 ## Why
 
-boxcode already asks before every write and every command. Plan mode exists
+covexcode already asks before every write and every command. Plan mode exists
 because that is a weaker guarantee than it sounds like.
 
 Approving actions one at a time tells you *what* is about to happen, never *why*
@@ -62,13 +62,13 @@ Plan mode moves that decision to the front, and then keeps it:
                                             implement, ticking off
                                             each step in the file
                                                      │
-                                   (next time you open boxcode here,
+                                   (next time you open covexcode here,
                                     it carries on automatically)
 ```
 
 ## Using it
 
-**Turn it on** with `/plan`, or start a session in it with `boxcode --plan`.
+**Turn it on** with `/plan`, or start a session in it with `covexcode --plan`.
 
 **Ask for what you want**, as you normally would:
 
@@ -196,7 +196,7 @@ shared counter would be premature. 429 with Retry-After.
 ```
 
 Plain markdown at the top of the project — not hidden under a dot-directory and
-not in `~/.boxcode`. Commit it if you want the approach reviewed before the code
+not in `~/.covexcode`. Commit it if you want the approach reviewed before the code
 exists; add `plan.md` to `.gitignore` if you'd rather not.
 
 **You can edit it by hand.** Reword a step, tick a box, add one, delete one —
@@ -209,7 +209,7 @@ never claim "done" over three unticked steps.
 
 ## Carrying on later
 
-Open boxcode in a project that has a `plan.md` and it is simply used. There is
+Open covexcode in a project that has a `plan.md` and it is simply used. There is
 no command, because there is nothing to choose between — the file is there, so
 it is the plan. The welcome panel says what it found:
 
@@ -225,7 +225,7 @@ every request instead, which is exactly what makes it resumable — it does not
 depend on anything surviving in a chat history.
 
 **Finishing with a plan is deleting the file.** A completed plan is left alone
-(deleting your files is not boxcode's call) but is not followed — you get a note
+(deleting your files is not covexcode's call) but is not followed — you get a note
 on the welcome panel saying it is done, and the model is told nothing about it.
 
 ### Staleness
@@ -271,7 +271,7 @@ instead, so it folds the thing it wanted into the plan rather than retrying.
 
 `cargo build`, `npm test` and `pytest` are refused while planning. They are not
 destructive in any normal sense, but they write to disk, and the guarantee is
-unconditional — a command boxcode cannot vouch for is refused rather than
+unconditional — a command covexcode cannot vouch for is refused rather than
 guessed about. If a build or test run is part of the work, it becomes a step in
 the plan and runs after you approve.
 
