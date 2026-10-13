@@ -1,10 +1,11 @@
-# boxcode installer (Windows PowerShell)
+# covexcode installer (Windows PowerShell)
 #
 # The PowerShell counterpart to install.sh: `curl | bash` doesn't work in
 # native PowerShell (no bash, and `|` pipes objects, not text), so Windows
 # users need their own entry point --
 #   irm https://covexcode.com/install.ps1 | iex
-# is that platform's equivalent one-liner (Invoke-RestMethod | Invoke-Expression).
+# is the primary one-liner. Legacy `irm https://boxcode.sh/install.ps1 | iex`
+# serves this same script and still installs covexcode.exe.
 #
 # Unlike install.sh, there is no source-build fallback here: building Rust on
 # Windows needs the MSVC Build Tools, a much bigger ask than `rustup` alone,
@@ -25,7 +26,7 @@ $ErrorActionPreference = 'Stop'
 # release asset URLs even when /releases/latest JSON succeeds -- which the
 # installer then mis-reports as "no prebuilt binary". Pin TLS 1.2 (needed on
 # older Windows PowerShell 5.1) and send an explicit UA on every call.
-function Enable-BoxcodeTls {
+function Enable-CovexcodeTls {
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     } catch {
@@ -33,14 +34,14 @@ function Enable-BoxcodeTls {
     }
 }
 
-function Invoke-BoxcodeGitHub {
+function Invoke-CovexcodeGitHub {
     param(
         [Parameter(Mandatory)] [string] $Uri,
         [string] $OutFile,
         [string] $Accept = 'application/vnd.github+json',
         [int] $TimeoutSec = 60
     )
-    Enable-BoxcodeTls
+    Enable-CovexcodeTls
     $headers = @{
         'User-Agent' = 'covexcode-install'
         'Accept'     = $Accept
@@ -54,7 +55,7 @@ function Invoke-BoxcodeGitHub {
 
 # Where release assets and checksums are published. Overridable so a fork or
 # an internal mirror can serve its own builds -- mirrors install.sh's own
-# BOXCODE_RELEASE_API_BASE.
+# BOXCODE_RELEASE_API_BASE as a legacy fallback.
 function Get-ReleaseApiBase {
     if ($env:COVEXCODE_RELEASE_API_BASE) {
         return $env:COVEXCODE_RELEASE_API_BASE
@@ -67,7 +68,7 @@ function Get-ReleaseApiBase {
 
 # Ordered list of release asset names to try for this architecture. Native
 # first; on Windows ARM64, the published x86_64 build is a working second
-# choice because WoA emulates it. Without that fallback, `boxcode --upgrade`
+# choice because WoA emulates it. Without that fallback, `covexcode --upgrade`
 # on Snapdragon/Copilot+ PCs fails every release with "no prebuilt binary
 # for windows-arm64" even though a Windows x86_64 binary shipped.
 #
@@ -86,8 +87,8 @@ function Get-WindowsAssetCandidates {
 
 # Place a freshly downloaded binary at the install path, replacing any
 # previous one. See the call site in Main for why a plain Move-Item -Force
-# onto a running boxcode.exe fails on Windows.
-function Install-BoxcodeBinary {
+# onto a running covexcode.exe fails on Windows.
+function Install-CovexcodeBinary {
     param(
         [Parameter(Mandatory)] [string] $Source,
         [Parameter(Mandatory)] [string] $Destination
@@ -178,7 +179,7 @@ function Get-PrebuiltBinary {
         [Parameter(Mandatory)] [string] $Dest
     )
 
-    $release = Invoke-BoxcodeGitHub -Uri "$(Get-ReleaseApiBase)/releases/latest" -TimeoutSec 15
+    $release = Invoke-CovexcodeGitHub -Uri "$(Get-ReleaseApiBase)/releases/latest" -TimeoutSec 15
     $downloadUrl = Get-AssetDownloadUrl -Release $release -AssetName $AssetName
     if (-not $downloadUrl) {
         throw "no '$AssetName' asset in the latest release"
@@ -189,19 +190,19 @@ function Get-PrebuiltBinary {
     # releases/assets API which streams the same bytes with Accept:
     # application/octet-stream.
     try {
-        Invoke-BoxcodeGitHub -Uri $downloadUrl -OutFile $Dest -Accept '*/*' -TimeoutSec 60
+        Invoke-CovexcodeGitHub -Uri $downloadUrl -OutFile $Dest -Accept '*/*' -TimeoutSec 60
     } catch {
         $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
         if (-not $asset -or -not $asset.id) {
             throw $_.Exception.Message
         }
         $apiUrl = "$(Get-ReleaseApiBase)/releases/assets/$($asset.id)"
-        Invoke-BoxcodeGitHub -Uri $apiUrl -OutFile $Dest -Accept 'application/octet-stream' -TimeoutSec 60
+        Invoke-CovexcodeGitHub -Uri $apiUrl -OutFile $Dest -Accept 'application/octet-stream' -TimeoutSec 60
     }
 
     $sumsUrl = Get-AssetDownloadUrl -Release $release -AssetName 'SHA256SUMS.txt'
     if ($sumsUrl) {
-        $sums = Invoke-BoxcodeGitHub -Uri $sumsUrl -Accept '*/*' -TimeoutSec 15
+        $sums = Invoke-CovexcodeGitHub -Uri $sumsUrl -Accept '*/*' -TimeoutSec 15
         $expectedLine = ($sums -split "`n") | Where-Object { $_ -match "\s$([regex]::Escape($AssetName))\s*$" } | Select-Object -First 1
         if ($expectedLine) {
             $expected = ($expectedLine -split '\s+')[0].Trim().ToLowerInvariant()
@@ -224,16 +225,19 @@ $PythonStandaloneVersion = '3.12.13'
 function Get-PythonStandaloneBaseUrl {
     # A function re-evaluated on every call, not a variable fixed once at
     # dot-source time -- same reason Get-ReleaseApiBase above is one: a
-    # test (or a fork) that sets $env:BOXCODE_PYTHON_STANDALONE_URL after
+    # test (or a fork) that sets $env:COVEXCODE_PYTHON_STANDALONE_URL after
     # this file has already been dot-sourced needs that to actually take
-    # effect.
+    # effect. BOXCODE_* remains a legacy fallback.
+    if ($env:COVEXCODE_PYTHON_STANDALONE_URL) {
+        return $env:COVEXCODE_PYTHON_STANDALONE_URL
+    }
     if ($env:BOXCODE_PYTHON_STANDALONE_URL) {
         return $env:BOXCODE_PYTHON_STANDALONE_URL
     }
     return 'https://github.com/astral-sh/python-build-standalone/releases/download'
 }
 
-# Only x86_64 -- release.yml does not build a Windows arm64 boxcode
+# Only x86_64 -- release.yml does not build a Windows arm64 covexcode
 # either, so there is no reason to promise a Windows arm64 Python here.
 function Get-PythonStandaloneTarget {
     param([string] $Arch)
@@ -262,7 +266,7 @@ function Install-EmbeddedPython {
     }
 
     $url = "$(Get-PythonStandaloneBaseUrl)/$PythonStandaloneRelease/cpython-$PythonStandaloneVersion+$PythonStandaloneRelease-$target-install_only_stripped.tar.gz"
-    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) "boxcode-python-$PID"
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) "covexcode-python-$PID"
     Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
     $archive = Join-Path $tmpDir 'python.tar.gz'
@@ -402,7 +406,11 @@ function Send-InstallPing {
     # afterwards), so by the time this function runs, "explicitly blank" and
     # "never touched" are already indistinguishable. `off` is therefore the
     # one reliable way to disable sending on this platform.
-    $override = $env:BOXCODE_TELEMETRY_URL
+    $override = if ($env:COVEXCODE_TELEMETRY_URL) {
+        $env:COVEXCODE_TELEMETRY_URL
+    } else {
+        $env:BOXCODE_TELEMETRY_URL
+    }
     if ($override -and $override.Trim().ToLowerInvariant() -eq 'off') {
         return
     }
@@ -451,8 +459,8 @@ function Main {
     # Defender still has one open — we no longer download to that path.
     Remove-Item -Force (Join-Path $installDir 'covexcode.exe.new') -ErrorAction SilentlyContinue
     # Download to a unique temp name under %TEMP%, not a fixed
-    # `boxcode.exe.new` next to the live binary. Startup `--upgrade` runs
-    # while the current `boxcode.exe` is still alive; a leftover `.new` from a
+    # `covexcode.exe.new` next to the live binary. Startup `--upgrade` runs
+    # while the current `covexcode.exe` is still alive; a leftover `.new` from a
     # previous attempt (or Defender scanning it) stays locked and makes
     # Invoke-WebRequest fail with "being used by another process" — which we
     # used to mis-report as "no prebuilt binary available".
@@ -464,7 +472,8 @@ function Main {
     $lastError = $null
     foreach ($assetName in $candidates) {
         try {
-            if ($assetName -ne "boxcode-windows-$arch.exe") {
+            $native = @("covexcode-windows-$arch.exe", "boxcode-windows-$arch.exe")
+            if ($assetName -notin $native) {
                 Write-Host "  No native $arch build yet; trying $assetName (runs under Windows on ARM emulation)..."
             }
             Get-PrebuiltBinary -AssetName $assetName -Dest $tempDest
@@ -486,13 +495,13 @@ function Main {
         throw 'no prebuilt binary available'
     }
 
-    # Never Move-Item -Force straight onto a live boxcode.exe. PowerShell's
+    # Never Move-Item -Force straight onto a live covexcode.exe. PowerShell's
     # Move-Item refuses that with "Cannot create a file when that file already
     # exists" when the destination is the running upgrade process (startup
-    # prompt / `boxcode --upgrade`). Windows *does* allow renaming a running
+    # prompt / `covexcode --upgrade`). Windows *does* allow renaming a running
     # image aside, then moving the new file into the freed name — same idea as
     # install.sh's rename-over-target for ETXTBSY.
-    Install-BoxcodeBinary -Source $tempDest -Destination $installedAt
+    Install-CovexcodeBinary -Source $tempDest -Destination $installedAt
     Write-Host "Installed to $installedAt"
 
     $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
@@ -504,6 +513,16 @@ function Main {
         $newPath = if ($userPath) { "$userPath;$installDir" } else { $installDir }
         [Environment]::SetEnvironmentVariable('PATH', $newPath, 'User')
         Write-Host "Added $installDir to your PATH (open a new shell for it to take effect)."
+    }
+
+    # Drop the pre-rebrand binary if it still shadows PATH.
+    foreach ($legacyBox in @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\boxcode\boxcode.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\covexcode\boxcode.exe')
+    )) {
+        if ((Test-Path -LiteralPath $legacyBox) -and ($legacyBox -ne $installedAt)) {
+            Remove-Item -Force -LiteralPath $legacyBox -ErrorAction SilentlyContinue
+        }
     }
 
     $resolved = Get-Command covexcode -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -524,7 +543,7 @@ function Main {
         Write-Host "Found the old 'tuisample-code' binary at $($legacy.Source)."
         try {
             Remove-Item -Force $legacy.Source -ErrorAction Stop
-            Write-Host '  Removed it. boxcode replaces it.'
+            Write-Host '  Removed it. covexcode replaces it.'
         } catch {
             Write-Host "  Could not remove it. Delete it yourself: Remove-Item -Force $($legacy.Source)"
         }
@@ -578,12 +597,12 @@ function Main {
     Write-Host ''
     Write-Host 'Next steps:'
     Write-Host '1. Configure your LLM endpoint:'
-    Write-Host '   $env:BOXCODE_ENDPOINT = "https://api.openai.com"'
-    Write-Host '   $env:BOXCODE_MODEL = "gpt-4"'
-    Write-Host '   $env:BOXCODE_API_KEY = "sk-..."'
+    Write-Host '   $env:COVEXCODE_ENDPOINT = "https://api.openai.com"'
+    Write-Host '   $env:COVEXCODE_MODEL = "gpt-4"'
+    Write-Host '   $env:COVEXCODE_API_KEY = "sk-..."'
     Write-Host ''
     Write-Host '2. Open a new shell (so the updated PATH takes effect), then run:'
-    Write-Host '   boxcode'
+    Write-Host '   covexcode'
     Write-Host ''
     Write-Host 'For more info: https://covexcode.com'
 }
