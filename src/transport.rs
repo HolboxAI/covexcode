@@ -347,8 +347,8 @@ impl Router {
                     agent_capabilities: json!({ "session": {}, "mcp": true, "promptCapabilities": { "image": true } }),
                     auth_methods: Vec::new(),
                     agent_info: Some(Implementation {
-                        name: "boxcode".to_string(),
-                        title: Some("boxcode".to_string()),
+                        name: "covexcode".to_string(),
+                        title: Some("covexcode".to_string()),
                         version: crate::VERSION.to_string(),
                     }),
                 };
