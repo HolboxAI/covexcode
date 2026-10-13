@@ -1,6 +1,6 @@
 //! WCAG 2.x contrast-ratio math.
 //!
-//! boxcode has no way to look at a page it just wrote -- no image input
+//! covexcode has no way to look at a page it just wrote -- no image input
 //! reaches the model at all (see `db.rs`'s and `tools.rs`'s own doc comments
 //! on that gap). "Does this look right" is therefore permanently out of
 //! reach for anything that actually requires eyes. Contrast is not one of

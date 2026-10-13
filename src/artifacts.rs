@@ -3,7 +3,7 @@
 //!
 //! The shape is deliberately dull. This process never holds AWS credentials --
 //! shipping them in a binary would hand the bucket to anyone who downloaded
-//! boxcode -- so it POSTs a manifest to a signing endpoint, receives one
+//! covexcode -- so it POSTs a manifest to a signing endpoint, receives one
 //! short-lived presigned `PUT` per file, and uploads directly. The endpoint's
 //! own role can do nothing but write under one prefix, and everything written
 //! there is deleted by a bucket lifecycle rule after two days. So the worst
@@ -281,7 +281,7 @@ fn now_secs() -> u64 {
 ///
 /// `pub(crate)`, not private: `enable_auth` (see `tools.rs`) needs the same
 /// id to provision a project's auth against -- a project's identity to the
-/// rest of boxcode *is* the artifact id it already published under, not a
+/// rest of covexcode *is* the artifact id it already published under, not a
 /// second id invented for this. Deliberately not filtered by `EXPIRY_HOURS`
 /// like `all_local` is: republishing a path whose old link expired should
 /// still reuse that id (see `publish`'s comment on `remembered_id`), it just
@@ -1047,7 +1047,7 @@ mod tests {
     /// Ignored by default: it needs the network and publishes a real (tiny,
     /// 48h) artifact, neither of which belongs in an ordinary `cargo test`.
     /// Run it deliberately with
-    /// `cargo test --bin boxcode publishing_a_vite_dist -- --ignored --nocapture`.
+    /// `cargo test --bin covexcode publishing_a_vite_dist -- --ignored --nocapture`.
     #[tokio::test]
     #[ignore]
     async fn publishing_a_vite_dist_serves_assets_a_browser_can_actually_fetch() {
@@ -1119,7 +1119,7 @@ mod tests {
     /// Ignored by default: it needs the network and two fixed artifact ids.
     /// Both expire 48h after they were published, so a failure here long after
     /// the fact means "the links aged out", not "the code regressed".
-    /// `cargo test --bin boxcode verify_live_against_the_real -- --ignored --nocapture`
+    /// `cargo test --bin covexcode verify_live_against_the_real -- --ignored --nocapture`
     #[tokio::test]
     #[ignore]
     async fn verify_live_against_the_real_broken_and_fixed_pages() {
@@ -1618,7 +1618,7 @@ h1{background:url(logo.png)}"#;
 
     /// An unrelated sibling directory that merely shares a path prefix
     /// (`.../boxcode-other`) must not be mistaken for a project nested
-    /// inside `.../boxcode` -- `Path::starts_with` is component-aware for
+    /// inside `.../covexcode` -- `Path::starts_with` is component-aware for
     /// exactly this reason, confirmed here rather than assumed.
     #[test]
     fn any_published_under_does_not_match_a_sibling_with_a_shared_prefix() {

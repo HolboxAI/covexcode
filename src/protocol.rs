@@ -1,4 +1,4 @@
-//! The wire protocol between `boxcode` and an external client (e.g.
+//! The wire protocol between `covexcode` and an external client (e.g.
 //! `boxcode-ide`) -- the Agent Client Protocol (ACP), v1, over JSON-RPC 2.0
 //! on stdio. Part of P0 (see `boxcode-ide`'s `docs/PLAN.md`, and `agent.rs`'s
 //! own doc comment: "step three of Phase 3 ... turns this trio into the body
@@ -29,7 +29,7 @@
 //! write files or run commands in a client-managed terminal), but are
 //! optional -- `ClientCapabilities.fs`/`.terminal` default to `false`/absent
 //! capabilities, and an agent that never requests them is fully spec-
-//! compliant. `boxcode` already executes its own tools locally
+//! compliant. `covexcode` already executes its own tools locally
 //! (`tools::execute`), which is the same model v2 standardized on for
 //! everyone (v2 deleted the client-delegated fs/terminal surface entirely,
 //! per that schema's own migration notes) -- so there is nothing to gain by
@@ -192,7 +192,7 @@ impl RpcRequest {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtocolVersion(pub u16);
 
-/// The version `boxcode` speaks. `1`, not `2` -- see module docs for why.
+/// The version `covexcode` speaks. `1`, not `2` -- see module docs for why.
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(1);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -243,7 +243,7 @@ pub struct NewSessionRequest {
     #[serde(rename = "additionalDirectories", default)]
     pub additional_directories: Vec<String>,
     /// Required by the v1 schema (`required: ["cwd", "mcpServers"]`) --
-    /// `boxcode` doesn't act as an MCP client yet, so this is always sent
+    /// `covexcode` doesn't act as an MCP client yet, so this is always sent
     /// empty, not omitted.
     #[serde(rename = "mcpServers", default)]
     pub mcp_servers: Vec<serde_json::Value>,
@@ -301,8 +301,8 @@ pub struct PromptResponse {
 /// required `ImageContent` fields -- `annotations`/`uri`/`_meta` are all
 /// optional on the wire and unused here, same minimalism as this module's
 /// existing `ToolCallContent::Image` (the unrelated outbound counterpart:
-/// that one goes from boxcode to the client's UI for a human to look at;
-/// this one comes from the client into a prompt boxcode is about to send
+/// that one goes from covexcode to the client's UI for a human to look at;
+/// this one comes from the client into a prompt covexcode is about to send
 /// to the model).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type")]
@@ -331,7 +331,7 @@ pub enum StopReason {
 // session/cancel
 // ---------------------------------------------------------------------------
 
-// Defined for the ACP wire surface but not yet sent: boxcode cancels a turn
+// Defined for the ACP wire surface but not yet sent: covexcode cancels a turn
 // in-process rather than announcing it, so no `session/cancel` is emitted. The
 // type is kept to match the spec until a client asks for the path.
 #[allow(dead_code)]
@@ -359,7 +359,7 @@ pub struct MessageId(pub String);
 /// working turn loop actually needs. `available_commands_update`,
 /// `current_mode_update`, `config_option_update`, and `session_info_update`
 /// are real, legal ACP variants this module doesn't emit yet; add them when
-/// something in `boxcode` actually needs to report one, rather than
+/// something in `covexcode` actually needs to report one, rather than
 /// speculatively wiring all eleven now.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "sessionUpdate")]
@@ -442,7 +442,7 @@ pub enum ToolCallContent {
     /// Plain whole-file before/after text, not pre-computed hunks: ACP
     /// clients are expected to have their own real diff renderer (VS
     /// Code's `vscode.changes`, for one) and hunk/render it themselves,
-    /// rather than being handed a hunk list shaped for boxcode's own TUI
+    /// rather than being handed a hunk list shaped for covexcode's own TUI
     /// (`crate::diff::FileDiff`, which stays TUI-only).
     #[serde(rename = "diff")]
     Diff {
@@ -452,7 +452,7 @@ pub enum ToolCallContent {
         #[serde(rename = "newText")]
         new_text: String,
         /// Pre-computed hunks so the client can offer per-hunk accept/reject
-        /// without reimplementing boxcode's own diff. `None` when whole-file
+        /// without reimplementing covexcode's own diff. `None` when whole-file
         /// review is the right call instead (CRLF line endings, or a change
         /// too large to review in full without clipping) -- the client then
         /// falls back to the whole-file `oldText`/`newText` above.
@@ -461,20 +461,20 @@ pub enum ToolCallContent {
     },
     /// A `check_in_browser` result -- base64-encoded image bytes for the
     /// client to render (e.g. inline in a chat panel), not something
-    /// boxcode itself interprets. Correction to an earlier version of this
+    /// covexcode itself interprets. Correction to an earlier version of this
     /// comment: `llm.rs`'s `ChatMessage.images` already feeds the same
     /// screenshot to the model separately (see that field's own doc
     /// comment), and `ContentBlock::Image` above now does the same for
     /// client-attached images arriving via `session/prompt` -- this variant
     /// stays purely the human-facing rendering path; it is not, and was
-    /// never meant to become, boxcode's only multimodal path.
+    /// never meant to become, covexcode's only multimodal path.
     #[serde(rename = "image")]
     Image {
         #[serde(rename = "mimeType")]
         mime_type: String,
         data: String,
     },
-    /// An `exit_plan_mode` proposal -- boxcode in plan mode asking the user to
+    /// An `exit_plan_mode` proposal -- covexcode in plan mode asking the user to
     /// approve a plan before it changes anything. Rides the same
     /// `session/request_permission` wire as a file edit, but carries the
     /// proposal (`title`/`summary`/`steps`/`notDoing`) instead of a diff, so a
@@ -537,7 +537,7 @@ pub enum ToolKind {
 }
 
 // ---------------------------------------------------------------------------
-// Plans -- boxcode's Verdict::Progress (plan-step bookkeeping) and
+// Plans -- covexcode's Verdict::Progress (plan-step bookkeeping) and
 // Verdict::Todos (the model's own checklist) both map onto this, as two
 // conceptually separate plans. v1 has no `planId` to keep them apart on the
 // wire (that's a v2 addition) -- see the Plan struct's own doc for how this
@@ -545,7 +545,7 @@ pub enum ToolKind {
 // ---------------------------------------------------------------------------
 
 /// v1's `Plan` has no id -- only one plan can exist per session on the
-/// wire. `boxcode` has two independent bookkeeping concepts
+/// wire. `covexcode` has two independent bookkeeping concepts
 /// (`Verdict::Progress` against an approved plan, `Verdict::Todos` as the
 /// model's own short-term checklist) that would collide if both tried to
 /// emit a `Plan` update. Not resolved by this module: whichever one is
@@ -581,7 +581,7 @@ pub enum PlanEntryStatus {
 }
 
 // ---------------------------------------------------------------------------
-// session/request_permission -- boxcode's Verdict::Ask, on the wire.
+// session/request_permission -- covexcode's Verdict::Ask, on the wire.
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -593,7 +593,7 @@ pub struct RequestPermissionRequest {
     pub options: Vec<PermissionOption>,
 }
 
-// The client's half of `session/request_permission`. boxcode is the server, so
+// The client's half of `session/request_permission`. covexcode is the server, so
 // it would *receive* this rather than send it, and the transport does not yet
 // read a permission decision back over the wire.
 #[allow(dead_code)]
@@ -634,7 +634,7 @@ pub enum RequestPermissionOutcome {
     },
     /// The client reviewed the change hunk-by-hunk and wants only the accepted
     /// hunks applied. `new_text` is the exact file content to write (the
-    /// client's reconstruction from `ToolCallContent::Diff`'s hunks); boxcode
+    /// client's reconstruction from `ToolCallContent::Diff`'s hunks); covexcode
     /// writes it instead of executing the original `write_file`/`edit_file`
     /// call, so rollback and the transcript still describe what actually
     /// landed rather than the model's full intent.
@@ -648,7 +648,7 @@ pub enum RequestPermissionOutcome {
 // ---------------------------------------------------------------------------
 // session/checkInBrowser -- not part of the official ACP v1 schema (the spec
 // has no concept of a browser tab at all), but the same shape as
-// session/request_permission: boxcode sends it mid-turn, needs the client's
+// session/request_permission: covexcode sends it mid-turn, needs the client's
 // answer to continue, and the transport-level deferred-response machinery
 // that `session/request_permission` already proved out applies unchanged.
 // See `headless.rs`'s `BrowserCheckAsk`/`BrowserCheckResult` for the Rust
@@ -677,10 +677,10 @@ pub enum CheckInBrowserOutcome {
     Failed { reason: String },
 }
 
-/// The two standing options `boxcode` offers on every permission request --
+/// The two standing options `covexcode` offers on every permission request --
 /// "allow once" / "reject once" only. `allow_always`/`reject_always`
 /// (remembering the choice) aren't implemented yet; `config.tools.approval`
-/// is `boxcode`'s existing equivalent of "remember my choice" and already
+/// is `covexcode`'s existing equivalent of "remember my choice" and already
 /// applies before a request is ever built (see `approval::verdict_for`), so
 /// there's nothing for an "always" *option on this specific request* to do
 /// that isn't already covered.
@@ -712,7 +712,7 @@ impl From<CheckInBrowserOutcome> for BrowserCheckResult {
 
 // ---------------------------------------------------------------------------
 // session/interactInBrowser -- same non-ACP-spec shape and reasoning as
-// session/checkInBrowser directly above: boxcode sends it mid-turn, needs
+// session/checkInBrowser directly above: covexcode sends it mid-turn, needs
 // the client's answer to continue. A separate request/outcome pair and a
 // separate relay (see `headless.rs`'s `BrowserInteractAsk`/
 // `BrowserInteractResult` and `transport.rs`'s `Router`), not folded into
@@ -854,7 +854,7 @@ pub struct ListChangesResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Conversions from boxcode's internal types
+// Conversions from covexcode's internal types
 // ---------------------------------------------------------------------------
 
 impl From<&InternalToolCall> for ToolCallId {
@@ -951,7 +951,7 @@ impl From<ApiUsage> for SessionUpdate {
         // ApiUsage's prompt/completion split, confirmed against the schema
         // before writing this, not guessed. `used` is the closest available
         // proxy (total tokens spent this turn); `size` has no source in
-        // ApiUsage at all -- boxcode doesn't track the model's context
+        // ApiUsage at all -- covexcode doesn't track the model's context
         // limit anywhere yet, so this is a real gap, not a rounding choice.
         SessionUpdate::UsageUpdate { used: usage.total() as u64, size: 0 }
     }
@@ -969,7 +969,7 @@ pub fn plan_for_todos(items: &[crate::tools::TodoItem]) -> Plan {
                 content: item.content.clone(),
                 // TodoItem has no priority concept; ACP requires one.
                 // Medium is the least presumptive default -- neither
-                // over- nor under-stating urgency for something boxcode
+                // over- nor under-stating urgency for something covexcode
                 // itself never asked the model to rank.
                 priority: PlanEntryPriority::Medium,
                 status: match item.status {
@@ -1224,7 +1224,7 @@ mod tests {
     /// `usage_update` is the boxcode-ide cost meter's data feed, so its exact
     /// wire shape is a contract: `used` is prompt + completion (cache hits are
     /// deliberately *not* added -- a cached token is a discounted prompt token
-    /// already inside `prompt_tokens`), and `size` is still 0 because boxcode
+    /// already inside `prompt_tokens`), and `size` is still 0 because covexcode
     /// does not track the model's context-window limit yet.
     #[test]
     fn an_api_usage_becomes_a_usage_update_with_used_as_total() {

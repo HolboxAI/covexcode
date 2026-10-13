@@ -74,7 +74,7 @@ pub struct BrowserCheckAsk {
 
 /// What the client reports back for one `BrowserCheckAsk`. `Failed` covers
 /// everything that can go wrong on the client's side (no browser tab, CDP
-/// failed, timed out, `url` never loaded) -- boxcode has no way to tell
+/// failed, timed out, `url` never loaded) -- covexcode has no way to tell
 /// those apart from here, only to say the check didn't happen and hand the
 /// model text it can react to, the same posture `ask_permission` already
 /// takes toward "the client disconnected."
@@ -115,7 +115,7 @@ pub enum BrowserInteractResult {
 /// `None` when whole-file review is the right call instead.
 ///
 /// Returns `None` for three distinct reasons, deliberately not conflated:
-/// - **CRLF line endings**: boxcode's diff runs over `str::lines()`, which
+/// - **CRLF line endings**: covexcode's diff runs over `str::lines()`, which
 ///   drops `\r`, so a hunk list cannot be spliced back onto `\r\n` text
 ///   faithfully. The client's whole-file `oldText`/`newText` path handles
 ///   those.
@@ -640,7 +640,7 @@ impl HeadlessSession {
                 Verdict::AutoApprove => {
                     let action = tools::describe_action(call);
                     // `check_in_browser` is the one auto-approved action
-                    // `tools::execute` cannot fulfill at all -- boxcode has
+                    // `tools::execute` cannot fulfill at all -- covexcode has
                     // no browser tab, only an ACP client does. Intercepted
                     // here, before ever reaching the local dispatcher, the
                     // same way `Action::Agent` is intercepted below rather
@@ -763,7 +763,7 @@ impl HeadlessSession {
         // the question is being asked. The whole-file before/after text is
         // what ACP's `Diff` wire shape wants; `diff_hunks_for_review` adds the
         // pre-computed hunk split so a client can offer per-hunk accept/reject
-        // without reimplementing boxcode's diff (see its own doc comment for
+        // without reimplementing covexcode's diff (see its own doc comment for
         // why the hunks are `None` for CRLF or oversized changes).
         let preview = tools::preview_change_text(action, Path::new(self.workspace.root()));
         let partial_path = preview.as_ref().map(|(path, _, _)| path.clone());
@@ -841,7 +841,7 @@ impl HeadlessSession {
 
         if decision.is_allowed() {
             // `interact_in_browser`, like `check_in_browser`, has no local
-            // implementation `tools::execute` can run -- boxcode has no
+            // implementation `tools::execute` can run -- covexcode has no
             // browser tab, only the client does. Intercepted here, after
             // approval, rather than reaching `tools::execute` -- the
             // `AutoApprove` branch above intercepts `CheckInBrowser` at the
@@ -1013,7 +1013,7 @@ impl HeadlessSession {
     }
 
     /// Fulfills a `check_in_browser` call by asking the client to take the
-    /// screenshot -- boxcode itself has no browser tab, only the client
+    /// screenshot -- covexcode itself has no browser tab, only the client
     /// does. Mirrors `ask_permission`'s own shape (send an ask, await one
     /// reply on a fresh `oneshot`) since a `HeadlessSession` only ever has
     /// one of either outstanding at a time.
@@ -1110,7 +1110,7 @@ impl HeadlessSession {
     }
 
     /// Fulfills an `interact_in_browser` call by asking the client to click
-    /// or type into the tab, then screenshot the result -- boxcode itself
+    /// or type into the tab, then screenshot the result -- covexcode itself
     /// has no browser tab, only the client does. Mirrors `check_browser`'s
     /// own shape exactly (send an ask, await one reply on a fresh
     /// `oneshot`) rather than duplicating the timeout/relay reasoning

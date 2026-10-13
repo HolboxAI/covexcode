@@ -1,6 +1,6 @@
 //! Turning an already-published artifact into one with sign-up/sign-in.
 //!
-//! A project's identity to the rest of boxcode is the artifact id it
+//! A project's identity to the rest of covexcode is the artifact id it
 //! already published under (`artifacts::remembered_id`) -- there is no
 //! second, auth-specific id to keep in sync with the first. `provision`
 //! sends that id to the auth control-plane (`infra/auth/` in this repo,
