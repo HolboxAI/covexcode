@@ -20,21 +20,29 @@
 //! that logs each ping to Workers KV and serves a public HTML view of the
 //! aggregate counts at the same URL over GET -- no login collects it, so
 //! nothing here is more sensitive than what that page already shows anyone.
-//! `BOXCODE_TELEMETRY_URL` overrides `DEFAULT_TELEMETRY_URL` below, e.g. to
-//! point a fork or a local test run at a different endpoint. A blank value
-//! either way disables sending entirely -- every function in this module is a
-//! silent no-op in that case, by construction, not by remembering to check a
-//! flag.
+//! `COVEXCODE_TELEMETRY_URL` overrides `DEFAULT_TELEMETRY_URL` below (with
+//! `BOXCODE_TELEMETRY_URL` as a legacy fallback), e.g. to point a fork or a
+//! local test run at a different endpoint. A blank value either way disables
+//! sending entirely -- every function in this module is a silent no-op in that
+//! case, by construction, not by remembering to check a flag.
 
 use crate::dateutil;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const TELEMETRY_URL_ENV: &str = "BOXCODE_TELEMETRY_URL";
 const DEFAULT_TELEMETRY_URL: &str = "https://tui-telemetry.dhruvm307.workers.dev";
 
 fn telemetry_url() -> Option<String> {
-    telemetry_url_given(std::env::var(TELEMETRY_URL_ENV).ok().as_deref())
+    // Prefer COVEXCODE_*; keep BOXCODE_* readable. `std::env::var` (not
+    // `var_os` + empty-as-unset) so an explicit blank still disables sending.
+    let override_url = match std::env::var("COVEXCODE_TELEMETRY_URL") {
+        Ok(v) => Some(v),
+        Err(_) => match std::env::var("BOXCODE_TELEMETRY_URL") {
+            Ok(v) => Some(v),
+            Err(_) => None,
+        },
+    };
+    telemetry_url_given(override_url.as_deref())
 }
 
 /// The actual decision, taking the env override as a plain `Option<&str>`
@@ -60,7 +68,7 @@ fn telemetry_url_given(env_override: Option<&str>) -> Option<String> {
 fn state_dir() -> Option<PathBuf> {
     // Via `config`, not derived here: that is the one place that inherits the
     // pre-rename directory, and a module that builds the path itself would
-    // create `~/.boxcode` first and quietly strand the old one.
+    // create `~/.covexcode` first and quietly strand the old one.
     Some(crate::config::Config::config_dir())
 }
 
