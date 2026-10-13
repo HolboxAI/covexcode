@@ -339,7 +339,7 @@ impl McpClient {
 		let params = json!({
 			"protocolVersion": SUPPORTED_PROTOCOL_VERSIONS[0],
 			"capabilities": {},
-			"clientInfo": { "name": "boxcode", "version": env!("CARGO_PKG_VERSION") },
+			"clientInfo": { "name": "covexcode", "version": env!("CARGO_PKG_VERSION") },
 		});
 		self.request("initialize", params, DEFAULT_TIMEOUT).await
 	}
