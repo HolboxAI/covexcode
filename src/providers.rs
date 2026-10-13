@@ -2,7 +2,7 @@
 /// endpoint..." escape hatch lives alongside this list in app.rs so the tool's
 /// "any OpenAI-compatible endpoint" generality is never limited to this table.
 ///
-/// `Serialize` backs `boxcode --providers-json` (see main.rs), so an ACP
+/// `Serialize` backs `covexcode --providers-json` (see main.rs), so an ACP
 /// client (boxcode-ide) can build its own provider picker from this same
 /// registry instead of hand-copying it into TypeScript, where it would rot
 /// exactly like the old `deepseek-chat` placeholder already did once.
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(env_var_name("openai"), "OPENAI_API_KEY");
     }
 
-    /// `boxcode --providers-json`'s whole reason to exist: an ACP client reads
+    /// `covexcode --providers-json`'s whole reason to exist: an ACP client reads
     /// this instead of hand-copying the table, so it must actually round-trip
     /// as valid, structured JSON with the fields a picker needs.
     #[test]

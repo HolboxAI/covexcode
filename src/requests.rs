@@ -1,7 +1,7 @@
-//! The change-request mailbox for a published boxcode artifact.
+//! The change-request mailbox for a published covexcode artifact.
 //!
 //! Same identity story as `auth.rs`/`db.rs`: a project's id to the rest of
-//! boxcode *is* the artifact id it already published under
+//! covexcode *is* the artifact id it already published under
 //! (`artifacts::remembered_id`), never a second id invented here.
 //!
 //! The other half of this feature is not in this file at all: a small,
@@ -9,11 +9,11 @@
 //! `GET /requests-widget.js`) that a developer adds to their own published
 //! page's HTML with `edit_file` -- one `<script>` tag, no code in this
 //! repo generates or owns it -- so a visitor can leave a plain-English
-//! request without running boxcode themselves. That widget only ever
+//! request without running covexcode themselves. That widget only ever
 //! *submits*; it holds no key and cannot resolve anything, so a request
 //! sitting in the mailbox is not itself an edit. Someone still has to
 //! read it, make the change with the ordinary agent loop, and republish --
-//! this module is only how boxcode fetches what is waiting and marks it
+//! this module is only how covexcode fetches what is waiting and marks it
 //! handled once it has been.
 
 use std::path::Path;

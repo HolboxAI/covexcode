@@ -64,7 +64,7 @@ impl Default for CompactConfig {
     }
 }
 
-/// Whether launching boxcode should notice that a newer release exists.
+/// Whether launching covexcode should notice that a newer release exists.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateConfig {
     /// Check for a newer release on startup, and offer to install it.
@@ -265,7 +265,7 @@ pub struct UiConfig {
     /// what makes the difference between "the conversation is gone" and "the
     /// conversation is one scroll away". That is the same thing `clear` does
     /// on most terminals, and it has the same consequence: anything that was
-    /// in the scrollback *before* boxcode started goes with it. Set this to
+    /// in the scrollback *before* covexcode started goes with it. Set this to
     /// `false` on a terminal whose history you rely on.
     ///
     /// Never applied on the way out of a failure. An error message that
@@ -409,7 +409,7 @@ pub struct ToolsConfig {
     /// A URL rather than a compiled-in constant so a fork, an internal
     /// mirror, or a self-hosted bucket can be pointed at without rebuilding --
     /// and so setting it to "" switches the feature off entirely for anyone
-    /// who would rather boxcode could not publish anything.
+    /// who would rather covexcode could not publish anything.
     #[serde(default = "default_artifact_endpoint")]
     pub artifact_endpoint: String,
     /// Where `deploy_backend` sends a project's source to be hosted as a real

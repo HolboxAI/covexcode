@@ -1167,7 +1167,7 @@ fn render_todo_panel(f: &mut Frame, area: Rect, app: &App) {
 
     let width = inner.width.saturating_sub(2).max(1) as usize;
 
-    // opencode's exact todo markers, adapted to the boxcode palette: a bracketed
+    // opencode's exact todo markers, adapted to the covexcode palette: a bracketed
     // glyph per row -- `[✓]` done, `[•]` in flight, `[ ]` pending -- with the
     // in-flight row picked out in the warning colour and the rest muted, exactly
     // how opencode's `todo-item` styles them.
@@ -1626,7 +1626,7 @@ fn tool_approval_parts(
             }
             lines.push(Line::from(""));
             // The one thing the user cannot work out for themselves: this is not
-            // a boxcode tool with known behaviour.
+            // a covexcode tool with known behaviour.
             for wrapped in wrap(
                 "Runs a tool on a configured MCP server. Covexcode cannot tell what it \
                  does -- the server decides, and the server supplies its own \
