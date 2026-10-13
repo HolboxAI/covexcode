@@ -9,7 +9,7 @@
 //! `GET /errors-beacon.js`) that a developer adds to their own published
 //! page's HTML with `edit_file` -- one `<script>` tag, no code in this repo
 //! generates or owns it -- so a `window.onerror`/`unhandledrejection` in a
-//! real visitor's browser gets reported without anyone running boxcode. The
+//! real visitor's browser gets reported without anyone running covexcode. The
 //! beacon only ever *submits*; it holds no key and cannot resolve anything,
 //! so a reported error sitting in the mailbox is not itself an edit.
 //! Someone still has to read it, fix it with the ordinary agent loop, and
