@@ -1063,7 +1063,7 @@ mod tests {
     /// which silently drops DeepSeek's `default_temperature()` (see
     /// `LlmConfig::effective_temperature`) for every IDE-started session.
     #[test]
-    fn boxcode_provider_env_var_sets_config_llm_provider() {
+    fn covexcode_provider_env_var_sets_config_llm_provider() {
         with_isolated_home(|| {
             for key in ["COVEXCODE_ENDPOINT", "COVEXCODE_MODEL", "COVEXCODE_API_KEY", "COVEXCODE_PROVIDER"] {
                 std::env::remove_var(key);
