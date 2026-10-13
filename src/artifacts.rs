@@ -1625,13 +1625,13 @@ h1{background:url(logo.png)}"#;
         crate::config::test_support::with_isolated_home(|| {
             let dir = temp("published-under-sibling");
             std::fs::create_dir_all(&dir).unwrap();
-            let root = dir.join("boxcode");
-            let sibling = dir.join("boxcode-other");
+            let root = dir.join("covexcode");
+            let sibling = dir.join("covexcode-other");
             std::fs::create_dir_all(&root).unwrap();
             write(&sibling, "todo.html", "hi");
 
             remember(&sibling.join("todo.html"), "zzz99999");
-            assert!(!any_published_under(&root), "boxcode-other is not under boxcode");
+            assert!(!any_published_under(&root), "covexcode-other is not under covexcode");
 
             let _ = std::fs::remove_dir_all(&dir);
         });

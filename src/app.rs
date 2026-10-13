@@ -6021,12 +6021,12 @@ mod tests {
     fn selecting_a_project_in_the_picker_queues_a_relaunch_and_exits() {
         let mut a = app();
         a.overlay = Some(Overlay::ArtifactPicker {
-            items: vec![("/tmp/boxcode1".to_string(), "abc12345".to_string())],
+            items: vec![("/tmp/covexcode1".to_string(), "abc12345".to_string())],
             selected: 0,
         });
         a.handle_key(key(KeyCode::Enter));
 
-        assert_eq!(a.pending_relaunch, Some(std::path::PathBuf::from("/tmp/boxcode1")));
+        assert_eq!(a.pending_relaunch, Some(std::path::PathBuf::from("/tmp/covexcode1")));
         assert!(a.should_exit);
         assert!(a.overlay.is_none(), "the picker itself is done with");
     }

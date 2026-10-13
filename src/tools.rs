@@ -6671,7 +6671,7 @@ mod tests {
     fn read_only_gh_commands_are_recognised() {
         for cmd in [
             "gh repo list --limit 1000",
-            "gh repo view HolboxAI/boxcode --json name,visibility",
+            "gh repo view HolboxAI/covexcode --json name,visibility",
             "gh pr list --state all --limit 500",
             "gh pr view 42",
             "gh pr diff 42",
@@ -6682,10 +6682,10 @@ mod tests {
             "gh workflow list",
             "gh search repos --owner HolboxAI",
             "gh auth status",
-            "gh api repos/HolboxAI/boxcode",
-            "gh api --paginate repos/HolboxAI/boxcode/commits",
-            "gh api -X GET repos/HolboxAI/boxcode",
-            "gh api --method=GET repos/HolboxAI/boxcode",
+            "gh api repos/HolboxAI/covexcode",
+            "gh api --paginate repos/HolboxAI/covexcode/commits",
+            "gh api -X GET repos/HolboxAI/covexcode",
+            "gh api --method=GET repos/HolboxAI/covexcode",
         ] {
             assert!(is_read_only(cmd), "expected read-only: {cmd}");
         }
@@ -6697,9 +6697,9 @@ mod tests {
     #[test]
     fn writing_gh_commands_still_need_approval() {
         for cmd in [
-            "gh repo delete HolboxAI/boxcode",
+            "gh repo delete HolboxAI/covexcode",
             "gh repo create thing --public",
-            "gh repo clone HolboxAI/boxcode",
+            "gh repo clone HolboxAI/covexcode",
             "gh pr merge 42",
             "gh pr close 42",
             "gh pr create --fill",
@@ -6707,8 +6707,8 @@ mod tests {
             "gh release upload v1 file.zip",
             "gh secret set TOKEN",
             "gh auth logout",
-            "gh api -X DELETE repos/HolboxAI/boxcode",
-            "gh api --method POST repos/HolboxAI/boxcode/issues",
+            "gh api -X DELETE repos/HolboxAI/covexcode",
+            "gh api --method POST repos/HolboxAI/covexcode/issues",
             "gh api --method=DELETE repos/x/y",
             "gh api repos/x/y/issues -f title=oops",
             "gh api repos/x/y --input body.json",
