@@ -86,7 +86,7 @@ if (
     Test-Fail "Get-WindowsAssetCandidates(arm64) returned: $($armCandidates -join ', ')"
 }
 
-# --- Install-BoxcodeBinary -----------------------------------------------------
+# --- Install-CovexcodeBinary -----------------------------------------------------
 # Replacing an existing destination must succeed (rename-aside), which is the
 # path `boxcode --upgrade` takes while the old exe is still on disk.
 $replaceDir = Join-Path ([System.IO.Path]::GetTempPath()) "boxcode-ps1-replace-$PID"
@@ -97,15 +97,15 @@ $replaceSrc = Join-Path $replaceDir 'boxcode-new.exe'
 Set-Content -LiteralPath $replaceDest -Value 'old-binary' -NoNewline
 Set-Content -LiteralPath $replaceSrc -Value 'new-binary' -NoNewline
 try {
-    Install-BoxcodeBinary -Source $replaceSrc -Destination $replaceDest
+    Install-CovexcodeBinary -Source $replaceSrc -Destination $replaceDest
     $got = Get-Content -LiteralPath $replaceDest -Raw
     if ($got -eq 'new-binary' -and -not (Test-Path -LiteralPath $replaceSrc)) {
-        Test-Pass 'Install-BoxcodeBinary replaces an existing destination'
+        Test-Pass 'Install-CovexcodeBinary replaces an existing destination'
     } else {
-        Test-Fail "Install-BoxcodeBinary replace failed (content='$got', srcStillThere=$(Test-Path -LiteralPath $replaceSrc))"
+        Test-Fail "Install-CovexcodeBinary replace failed (content='$got', srcStillThere=$(Test-Path -LiteralPath $replaceSrc))"
     }
 } catch {
-    Test-Fail "Install-BoxcodeBinary threw: $($_.Exception.Message)"
+    Test-Fail "Install-CovexcodeBinary threw: $($_.Exception.Message)"
 } finally {
     Remove-Item -Recurse -Force $replaceDir -ErrorAction SilentlyContinue
 }
@@ -117,14 +117,14 @@ $freshDest = Join-Path $freshDir 'covexcode.exe'
 $freshSrc = Join-Path ([System.IO.Path]::GetTempPath()) "boxcode-ps1-fresh-src-$PID.exe"
 Set-Content -LiteralPath $freshSrc -Value 'fresh-binary' -NoNewline
 try {
-    Install-BoxcodeBinary -Source $freshSrc -Destination $freshDest
+    Install-CovexcodeBinary -Source $freshSrc -Destination $freshDest
     if ((Get-Content -LiteralPath $freshDest -Raw) -eq 'fresh-binary') {
-        Test-Pass 'Install-BoxcodeBinary installs when the destination is missing'
+        Test-Pass 'Install-CovexcodeBinary installs when the destination is missing'
     } else {
-        Test-Fail 'Install-BoxcodeBinary fresh install wrote the wrong content'
+        Test-Fail 'Install-CovexcodeBinary fresh install wrote the wrong content'
     }
 } catch {
-    Test-Fail "Install-BoxcodeBinary fresh threw: $($_.Exception.Message)"
+    Test-Fail "Install-CovexcodeBinary fresh threw: $($_.Exception.Message)"
 } finally {
     Remove-Item -Recurse -Force $freshDir -ErrorAction SilentlyContinue
     Remove-Item -Force $freshSrc -ErrorAction SilentlyContinue
@@ -207,7 +207,7 @@ New-Item -ItemType Directory -Force -Path $fakeHome | Out-Null
 $env:USERPROFILE = $fakeHome
 $idFile = Join-Path $fakeHome '.covexcode\device_id'
 
-$env:BOXCODE_TELEMETRY_URL = 'off'
+$env:COVEXCODE_TELEMETRY_URL = 'off'
 Send-InstallPing -Version '9.9.9'
 if (Test-Path $idFile) {
     Test-Fail 'the "off" sentinel should disable sending'
@@ -215,7 +215,8 @@ if (Test-Path $idFile) {
     Test-Pass 'the "off" sentinel disables sending'
 }
 
-$env:BOXCODE_TELEMETRY_URL = 'http://127.0.0.1:1/nowhere'
+Remove-Item Env:\COVEXCODE_TELEMETRY_URL -ErrorAction SilentlyContinue
+$env:COVEXCODE_TELEMETRY_URL = 'http://127.0.0.1:1/nowhere'
 $start = Get-Date
 Send-InstallPing -Version ''
 $elapsed = ((Get-Date) - $start).TotalSeconds
@@ -234,8 +235,22 @@ if ($firstId -eq $secondId) {
     Test-Fail 'device id should not have changed between calls'
 }
 
+# Legacy BOXCODE_TELEMETRY_URL=off still disables when COVEXCODE_* is unset.
+Remove-Item -Recurse -Force $fakeHome -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $fakeHome | Out-Null
+$env:USERPROFILE = $fakeHome
+Remove-Item Env:\COVEXCODE_TELEMETRY_URL -ErrorAction SilentlyContinue
+$env:BOXCODE_TELEMETRY_URL = 'off'
+Send-InstallPing -Version '9.9.9'
+if (Test-Path (Join-Path $fakeHome '.covexcode\device_id')) {
+    Test-Fail 'legacy BOXCODE_TELEMETRY_URL=off should still disable sending'
+} else {
+    Test-Pass 'legacy BOXCODE_TELEMETRY_URL=off still disables sending'
+}
+
 Remove-Item -Recurse -Force $fakeHome -ErrorAction SilentlyContinue
 Remove-Item Env:\BOXCODE_TELEMETRY_URL -ErrorAction SilentlyContinue
+Remove-Item Env:\COVEXCODE_TELEMETRY_URL -ErrorAction SilentlyContinue
 
 # --- Get-PythonStandaloneTarget -------------------------------------------------
 # Deterministic and pure -- no reason for this one to depend on the network
@@ -260,7 +275,7 @@ New-Item -ItemType Directory -Force -Path $badPythonHome | Out-Null
 $env:USERPROFILE = $badPythonHome
 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
 Remove-Item Env:\PROCESSOR_ARCHITEW6432 -ErrorAction SilentlyContinue
-$env:BOXCODE_PYTHON_STANDALONE_URL = 'http://127.0.0.1:1'
+$env:COVEXCODE_PYTHON_STANDALONE_URL = 'http://127.0.0.1:1'
 $start = Get-Date
 if (Install-EmbeddedPython) {
     Test-Fail 'Install-EmbeddedPython should have failed against an unreachable URL'
@@ -278,6 +293,7 @@ if (Test-Path (Get-EmbeddedPythonDir)) {
 } else {
     Test-Pass 'a failed download leaves nothing behind'
 }
+Remove-Item Env:\COVEXCODE_PYTHON_STANDALONE_URL -ErrorAction SilentlyContinue
 Remove-Item Env:\BOXCODE_PYTHON_STANDALONE_URL -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force $badPythonHome -ErrorAction SilentlyContinue
 
@@ -410,7 +426,7 @@ New-Item -ItemType Directory -Force -Path $sandboxAppData | Out-Null
 
 $env:USERPROFILE = $sandboxHome
 $env:LOCALAPPDATA = $sandboxAppData
-$env:BOXCODE_TELEMETRY_URL = 'off'
+$env:COVEXCODE_TELEMETRY_URL = 'off'
 # A normal 64-bit Windows machine reports AMD64 -- without pinning this,
 # Get-Arch reads whatever this machine's own PROCESSOR_ARCHITECTURE
 # actually is, which is unset entirely on Linux/macOS. That would make this
@@ -431,6 +447,7 @@ try {
     Write-Host "SKIP: Main end-to-end test ($_)"
 }
 Remove-Item -Recurse -Force $sandboxHome -ErrorAction SilentlyContinue
+Remove-Item Env:\COVEXCODE_TELEMETRY_URL -ErrorAction SilentlyContinue
 Remove-Item Env:\BOXCODE_TELEMETRY_URL -ErrorAction SilentlyContinue
 Remove-Item Env:\PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue
 
