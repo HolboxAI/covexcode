@@ -23,7 +23,7 @@ fn auth_base() -> String {
         .to_string()
 }
 
-fn boxcode_dir() -> PathBuf {
+fn covexcode_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -32,11 +32,11 @@ fn boxcode_dir() -> PathBuf {
 }
 
 fn account_token_path() -> PathBuf {
-    boxcode_dir().join("account.token")
+    covexcode_dir().join("account.token")
 }
 
 fn account_email_path() -> PathBuf {
-    boxcode_dir().join("account.email")
+    covexcode_dir().join("account.email")
 }
 
 /// Snapshot of the local covexcode.com device-login session (no network).
