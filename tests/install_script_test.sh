@@ -115,7 +115,7 @@ chmod +x "$fake_bin"
 # colon form can't distinguish "unset" from "set to empty".
 BOXCODE_TELEMETRY_URL="" HOME="$fake_home" ping_install "$fake_bin" ||
   fail "ping_install must return 0 even when explicitly disabled"
-[ -f "$fake_home/.boxcode/device_id" ] &&
+[ -f "$fake_home/.covexcode/device_id" ] &&
   fail "an explicitly blank override must disable sending despite a non-blank default"
 
 echo "PASS: ping_install is disabled by an explicit blank BOXCODE_TELEMETRY_URL override"
@@ -131,13 +131,13 @@ start=$(date +%s)
 BOXCODE_TELEMETRY_URL="http://127.0.0.1:1/nowhere" HOME="$fake_home" ping_install "$fake_bin" ||
   fail "ping_install must return 0 even when the endpoint is unreachable"
 elapsed=$(( $(date +%s) - start ))
-[ -f "$fake_home/.boxcode/device_id" ] || fail "device id must be created once enabled"
-[ -s "$fake_home/.boxcode/device_id" ] || fail "device id file must not be empty"
+[ -f "$fake_home/.covexcode/device_id" ] || fail "device id must be created once enabled"
+[ -s "$fake_home/.covexcode/device_id" ] || fail "device id file must not be empty"
 [ "$elapsed" -lt 2 ] || fail "ping_install must not block on the network (took ${elapsed}s)"
 
-first_id=$(cat "$fake_home/.boxcode/device_id")
+first_id=$(cat "$fake_home/.covexcode/device_id")
 BOXCODE_TELEMETRY_URL="http://127.0.0.1:1/nowhere" HOME="$fake_home" ping_install "$fake_bin"
-second_id=$(cat "$fake_home/.boxcode/device_id")
+second_id=$(cat "$fake_home/.covexcode/device_id")
 [ "$first_id" = "$second_id" ] || fail "an existing device id must be reused, not regenerated"
 
 rm -rf "$fake_home"
@@ -366,7 +366,7 @@ unset -f python3
 # behind -- this test's whole point is exercising what happens when
 # uname/curl/etc. genuinely cannot be found, which never even gets reached
 # once an embedded Python already satisfies the check first.
-rm -rf "$HOME/.boxcode/python"
+rm -rf "$HOME/.covexcode/python"
 no_python_dir="$workdir/no-python-path"
 mkdir -p "$no_python_dir"
 out=$(PATH="$no_python_dir" ensure_ddgs_available 2>/dev/null)
@@ -385,7 +385,7 @@ echo "PASS: ensure_ddgs_available fails gracefully, not silently, on a maximally
 # Forced clean slate again, same reason as the test above -- each test
 # clears it independently rather than relying on running right after one
 # that already did, so reordering this file can never quietly break either.
-rm -rf "$HOME/.boxcode/python"
+rm -rf "$HOME/.covexcode/python"
 curated_path_dir="$workdir/no-python3-but-otherwise-normal"
 mkdir -p "$curated_path_dir"
 for tool in uname curl tar gzip mkdir dirname mv rm cp chmod mktemp; do
@@ -425,7 +425,7 @@ echo "PASS: ensure_ddgs_available is a silent no-op when python3 is missing and 
 # perfectly fine thing for this machine to end up with, the same way the
 # ddgs-reinstall test above leaves ddgs genuinely installed rather than
 # reverting it.
-embedded_python_dir="$HOME/.boxcode/python"
+embedded_python_dir="$HOME/.covexcode/python"
 rm -rf "$embedded_python_dir"
 
 real_out=$(PATH="$curated_path_dir" ensure_ddgs_available 2>&1)
