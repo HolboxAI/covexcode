@@ -1,6 +1,6 @@
 [package]
 name = "covexcode"
-version = "1.11.79"
+version = "1.11.80"
 edition = "2021"
 
 [dependencies]

@@ -516,31 +516,31 @@ fn default_python_bin() -> String {
 }
 
 fn default_artifact_endpoint() -> String {
-    "https://boxcode.sh/api/artifact".to_string()
+    "https://covexcode.com/api/artifact".to_string()
 }
 
 fn default_backend_endpoint() -> String {
-    "https://boxcode.sh/api/deploy".to_string()
+    "https://covexcode.com/api/deploy".to_string()
 }
 
 fn default_auth_endpoint() -> String {
-    "https://auth.boxcode.sh/provision".to_string()
+    "https://auth.covexcode.com/provision".to_string()
 }
 
 fn default_db_endpoint() -> String {
     // Same box, same vhost and cert as auth -- see infra/db/README.md for
     // why this never needed a second domain.
-    "https://auth.boxcode.sh/db/query".to_string()
+    "https://auth.covexcode.com/db/query".to_string()
 }
 
 fn default_requests_endpoint() -> String {
     // Same box, same vhost and cert as auth/db -- see infra/requests/README.md.
-    "https://auth.boxcode.sh/requests".to_string()
+    "https://auth.covexcode.com/requests".to_string()
 }
 
 fn default_errors_endpoint() -> String {
     // Same box, same vhost and cert as auth/db/requests -- see infra/errors/README.md.
-    "https://auth.boxcode.sh/errors".to_string()
+    "https://auth.covexcode.com/errors".to_string()
 }
 
 fn default_search_timeout() -> u64 {

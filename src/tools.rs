@@ -762,7 +762,7 @@ pub fn schemas_for(
                                 DELETE, ...) returns {\"changes\": n, \"last_insert_rowid\": n}. \
                                 This tool itself is agent-side only: there is no HTTP endpoint \
                                 for a published page's own JavaScript to run arbitrary SQL \
-                                through -- do not probe auth.boxcode.sh or any other host with \
+                                through -- do not probe auth.covexcode.com or any other host with \
                                 guessed paths looking for one, and do not tell a developer the \
                                 live page can send you SQL to run. If the project has enable_auth \
                                 turned on and this query should be scoped to whoever is signed \
@@ -780,7 +780,7 @@ pub fn schemas_for(
                                 per query you want to expose (name, then sql -- e.g. `SELECT id, \
                                 text FROM todos WHERE user_id = :current_user_id`), then have the \
                                 page's own JS POST {\"project_id\", \"access_token\", \"name\", \
-                                \"params\"} to https://auth.boxcode.sh/db/named-query. That route \
+                                \"params\"} to https://auth.covexcode.com/db/named-query. That route \
                                 needs no project key at all -- verified purely by the visitor's \
                                 own access_token, same as enable_auth's other endpoints -- and it \
                                 will only ever run a query you already registered this way, never \
@@ -838,7 +838,7 @@ pub fn schemas_for(
                                 that access_token around (e.g. localStorage) -- db_query accepts \
                                 it too, to scope a query to whoever is signed in without trusting \
                                 a user id the client merely claims. A signed-in visitor can also \
-                                upload an image: POST https://auth.boxcode.sh/uploads with \
+                                upload an image: POST https://auth.covexcode.com/uploads with \
                                 {\"project_id\",\"access_token\",\"content_type\",\"content_length\"} \
                                 (content_type must be image/png, image/jpeg, image/gif or \
                                 image/webp; content_length is the file's exact byte size, capped \
@@ -850,7 +850,7 @@ pub fn schemas_for(
                                 signed-in visitor; there is no anonymous upload path. A signed-in \
                                 visitor can also read or write their own data: POST \
                                 {\"project_id\",\"access_token\",\"name\",\"params\"} to \
-                                https://auth.boxcode.sh/db/named-query -- but only for a query \
+                                https://auth.covexcode.com/db/named-query -- but only for a query \
                                 you already registered with db_query first (see that tool's own \
                                 description for how); the page's own JS can never send this \
                                 endpoint SQL directly. This \
@@ -885,10 +885,10 @@ pub fn schemas_for(
                                 with publish_artifact first, same as enable_auth/db_query. To let \
                                 visitors leave requests, add this exact tag to the published HTML \
                                 with edit_file, then publish_artifact again: <script \
-                                src=\"https://auth.boxcode.sh/requests-widget.js\" \
+                                src=\"https://auth.covexcode.com/requests-widget.js\" \
                                 data-project=\"<the artifact id>\"></script>. To start receiving \
                                 error reports, add this one instead: <script \
-                                src=\"https://auth.boxcode.sh/errors-beacon.js\" \
+                                src=\"https://auth.covexcode.com/errors-beacon.js\" \
                                 data-project=\"<the artifact id>\"></script>. Neither needs a \
                                 separate 'enable' tool -- they are just script tags like any other, \
                                 and both can be present at once. Each result has an id and, for a \
