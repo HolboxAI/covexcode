@@ -32,8 +32,8 @@ signed in and no network**: providers describe commands rather than running
 them, and `service.rs` is a pure state machine fed canned `CommandOutput`s.
 
 ```bash
-cargo test --bin boxcode deploy      # everything under src/deploy/
-cargo test --bin boxcode detect      # framework detection only
+cargo test --bin covexcode deploy      # everything under src/deploy/
+cargo test --bin covexcode detect      # framework detection only
 ```
 
 What is covered:
@@ -41,7 +41,7 @@ What is covered:
 | Area | Where |
 | --- | --- |
 | The v1.0.0 state migration: nothing lost, nothing mixed | `paths::tests` |
-| `BOXCODE_*` / deprecated `TUISAMPLE_*` precedence | `paths::tests` |
+| `COVEXCODE_*` over legacy `BOXCODE_*` / deprecated `TUISAMPLE_*` precedence | `paths::tests` |
 | Project/framework detection, ordering, build+output defaults | `deploy::detect` |
 | CLI detection: present, missing, present-but-broken | `deploy::cli` |
 | Install command judged by the `danger` guardrails | `deploy::cli` |
@@ -66,7 +66,7 @@ or `netlify`. Nothing in `cargo test` reaches the network or deploys anything.
 
 ### 2. System Requirements Tests
 - ✅ Cargo/Rust must be installed
-- ✅ Config directory can be created (~/.boxcode)
+- ✅ Config directory can be created (~/.covexcode)
 - ✅ Env var format validation
 
 **These will SKIP if requirements aren't met** (not failures)
@@ -85,12 +85,12 @@ Before testing, you need:
 cargo build --release
 
 # Set environment variables
-export BOXCODE_ENDPOINT=https://api.openai.com
-export BOXCODE_MODEL=gpt-4
-export BOXCODE_API_KEY=sk-...
+export COVEXCODE_ENDPOINT=https://api.openai.com
+export COVEXCODE_MODEL=gpt-4
+export COVEXCODE_API_KEY=sk-...
 
 # Run the application
-./target/release/boxcode
+./target/release/covexcode
 ```
 
 #### Expected Behavior
@@ -104,7 +104,7 @@ export BOXCODE_API_KEY=sk-...
 ### 4. Install Script Testing
 ```bash
 # This requires Cargo to be installed
-bash <(curl -fsSL https://boxcode.sh/install.sh)
+bash <(curl -fsSL https://covexcode.com/install.sh)
 ```
 
 **Error: "Rust/Cargo not found"?**
@@ -122,7 +122,7 @@ npm create vite@latest . -- --template react
 npm install
 
 # Point the app at it and launch
-BOXCODE_WORKSPACE=/tmp/deploy-demo boxcode
+COVEXCODE_WORKSPACE=/tmp/deploy-demo covexcode
 ```
 
 Then ask it: `deploy this to vercel`. Approve the prompt, and walk the panel:
@@ -141,7 +141,7 @@ Worth checking by hand, since no test can:
 4. **Secrets.** Add an environment variable with a recognisable value, deploy,
    then check it appears nowhere:
    ```bash
-   grep -r "your-test-value" ~/.boxcode/    # must find nothing
+   grep -r "your-test-value" ~/.covexcode/    # must find nothing
    ```
 
 ## CI/CD Tests
@@ -150,7 +150,7 @@ GitHub Actions runs:
 - `cargo test --all` - Unit tests
 - `cargo clippy` - Linter suggestions
 
-**Status:** View at https://github.com/HolboxAI/boxcode/actions
+**Status:** View at https://github.com/HolboxAI/covexcode/actions
 
 ## What's NOT Tested Automatically
 - A real deployment to Vercel or Netlify (needs an account and a live network)
@@ -167,11 +167,11 @@ across terminal sizes from 1×1 upward.
 | Error | Cause | Fix |
 |-------|-------|-----|
 | "Rust/Cargo not found" | Rust not installed | Install from https://rustup.rs/ |
-| "Could not connect to endpoint" | LLM endpoint invalid | Check BOXCODE_ENDPOINT env var |
-| "Authentication failed" | Invalid API key | Check BOXCODE_API_KEY env var |
-| "Cannot find model" | Model name typo | Check BOXCODE_MODEL env var |
-| "No project directory" when deploying | `[tools] enabled = false` | Enable tools, or set `BOXCODE_WORKSPACE` |
-| "nothing to build or serve" | No `package.json` and no `index.html` | Launch boxcode from the project directory |
+| "Could not connect to endpoint" | LLM endpoint invalid | Check COVEXCODE_ENDPOINT env var |
+| "Authentication failed" | Invalid API key | Check COVEXCODE_API_KEY env var |
+| "Cannot find model" | Model name typo | Check COVEXCODE_MODEL env var |
+| "No project directory" when deploying | `[tools] enabled = false` | Enable tools, or set `COVEXCODE_WORKSPACE` |
+| "nothing to build or serve" | No `package.json` and no `index.html` | Launch covexcode from the project directory |
 | CLI "installed but is not working" | Broken global npm install | `npm install -g vercel` again, or check `vercel --version` by hand |
 
 ## Adding New Tests
