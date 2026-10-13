@@ -291,7 +291,7 @@ impl HeadlessSession {
             let _ = updates
                 .send(SessionUpdate::AgentMessageChunk {
                     content: ContentBlock::Text {
-                        text: "No API key set. Export BOXCODE_API_KEY or add api_key to \
+                        text: "No API key set. Export COVEXCODE_API_KEY or add api_key to \
                                ~/.covexcode/config.toml."
                             .to_string(),
                     },
