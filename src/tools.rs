@@ -134,10 +134,12 @@ const MAX_GREP_CONTEXT: u32 = 5;
 const MAX_GREP_LINE_CHARS: usize = 250;
 
 /// Files read from the project root into every request's system prompt --
-/// standing instructions the user (or `/init`) maintains. `BOXCODE.md` is
-/// this app's own; `AGENTS.md` is the convention other coding tools read and
+/// standing instructions the user (or `/init`) maintains. `COVEXCODE.md` is
+/// this app's own; `BOXCODE.md` is the pre-rename file, still read so a project
+/// that already carries one keeps working; `AGENTS.md` is the convention other
+/// coding tools read and
 /// write, honoured so a project already carrying one works here unchanged.
-pub const MEMORY_FILES: &[&str] = &["BOXCODE.md", "AGENTS.md"];
+pub const MEMORY_FILES: &[&str] = &["COVEXCODE.md", "BOXCODE.md", "AGENTS.md"];
 
 /// Ceiling on how much of one memory file reaches the prompt. These notes are
 /// resent with every request for the rest of every session, so an unbounded
@@ -1645,7 +1647,7 @@ pub fn system_prompt(
          turns up something durable and non-obvious about this project -- a build or test \
          quirk that will bite the next session too, a wrong assumption you had to be \
          corrected on, a convention you were told that is not written down above -- propose \
-         adding it with {EDIT_FILE} or {WRITE_FILE} on BOXCODE.md, the same way you would \
+         adding it with {EDIT_FILE} or {WRITE_FILE} on COVEXCODE.md, the same way you would \
          propose any other change, through the normal approval. This is not a habit to keep \
          up on every turn: most work does not surface anything worth writing down, and \
          nudging a routine fix or a one-off detail in there just adds noise the next session \
@@ -6851,7 +6853,7 @@ mod tests {
         assert_ne!(system_prompt(&ws, &cfg, cfg.max_steps, Mode::Normal), first);
     }
 
-    /// BOXCODE.md and AGENTS.md ride along on every request when present, and
+    /// COVEXCODE.md and AGENTS.md ride along on every request when present, and
     /// leave no trace at all when absent.
     #[test]
     fn the_system_prompt_carries_the_project_memory_files() {
@@ -6860,14 +6862,21 @@ mod tests {
         let without = system_prompt(&ws, &cfg, 0, Mode::Normal);
         assert!(!without.contains("PROJECT NOTES"), "{without}");
 
-        std::fs::write(ws.root().join("BOXCODE.md"), "Run `cargo test` before committing.\n")
+        std::fs::write(ws.root().join("COVEXCODE.md"), "Run `cargo test` before committing.\n")
             .unwrap();
         std::fs::write(ws.root().join("AGENTS.md"), "The API layer lives in src/api.\n").unwrap();
         let with = system_prompt(&ws, &cfg, 0, Mode::Normal);
-        assert!(with.contains("PROJECT NOTES from BOXCODE.md"), "{with}");
+        assert!(with.contains("PROJECT NOTES from COVEXCODE.md"), "{with}");
         assert!(with.contains("Run `cargo test` before committing."), "{with}");
         assert!(with.contains("PROJECT NOTES from AGENTS.md"), "{with}");
         assert!(with.contains("The API layer lives in src/api."), "{with}");
+
+        // A pre-rename BOXCODE.md is still read alongside COVEXCODE.md so an
+        // existing project does not silently lose its standing instructions.
+        std::fs::write(ws.root().join("BOXCODE.md"), "Legacy notes.\n").unwrap();
+        let legacy = system_prompt(&ws, &cfg, 0, Mode::Normal);
+        assert!(legacy.contains("PROJECT NOTES from BOXCODE.md"), "{legacy}");
+        assert!(legacy.contains("Legacy notes."), "{legacy}");
     }
 
     /// The memory is resent with every request, so a runaway file is capped
@@ -6875,7 +6884,7 @@ mod tests {
     #[test]
     fn an_oversized_memory_file_is_clipped_not_sent_whole() {
         let (_dir, ws, cfg) = fixture();
-        std::fs::write(ws.root().join("BOXCODE.md"), "x".repeat(100_000)).unwrap();
+        std::fs::write(ws.root().join("COVEXCODE.md"), "x".repeat(100_000)).unwrap();
         let prompt = system_prompt(&ws, &cfg, 0, Mode::Normal);
         assert!(prompt.contains("truncated"), "{prompt}");
         assert!(prompt.len() < 60_000, "the whole file went through: {}", prompt.len());
@@ -6886,12 +6895,12 @@ mod tests {
     #[test]
     fn an_empty_memory_file_is_ignored() {
         let (_dir, ws, cfg) = fixture();
-        std::fs::write(ws.root().join("BOXCODE.md"), "   \n\n").unwrap();
+        std::fs::write(ws.root().join("COVEXCODE.md"), "   \n\n").unwrap();
         let prompt = system_prompt(&ws, &cfg, 0, Mode::Normal);
         assert!(!prompt.contains("PROJECT NOTES"), "{prompt}");
     }
 
-    /// Nothing today prompts the model to update BOXCODE.md mid-session when
+    /// Nothing today prompts the model to update COVEXCODE.md mid-session when
     /// it learns something durable -- /init is the only writer. The system
     /// prompt should nudge it to propose an update through the normal
     /// edit_file/write_file approval, and should do so whether or not a
@@ -6900,7 +6909,7 @@ mod tests {
     fn the_system_prompt_nudges_self_updating_project_memory() {
         let (_dir, ws, cfg) = fixture();
         let prompt = system_prompt(&ws, &cfg, 0, Mode::Normal);
-        assert!(prompt.contains("BOXCODE.md"), "{prompt}");
+        assert!(prompt.contains("COVEXCODE.md"), "{prompt}");
         assert!(prompt.contains(EDIT_FILE), "{prompt}");
         assert!(prompt.contains(WRITE_FILE), "{prompt}");
     }
