@@ -242,7 +242,7 @@ function Get-PythonStandaloneTarget {
 }
 
 function Get-EmbeddedPythonDir {
-    Join-Path $env:USERPROFILE '.boxcode\python'
+    Join-Path $env:USERPROFILE '.covexcode\python'
 }
 
 # Downloads and extracts a self-contained Python for machines with no system
@@ -372,7 +372,7 @@ function Install-Ddgs {
 # Anonymous "an install happened" ping -- the PowerShell counterpart to
 # install.sh's ping_install and telemetry.rs's own `active` ping, which this
 # binary hasn't run yet to send. A random id in
-# $env:USERPROFILE\.boxcode\device_id labels this machine, not the
+# $env:USERPROFILE\.covexcode\device_id labels this machine, not the
 # person running it, and is the same file/format telemetry.rs itself reads
 # and reuses later rather than generating a second, conflicting id.
 #
@@ -412,7 +412,7 @@ function Send-InstallPing {
     }
 
     try {
-        $stateDir = Join-Path $env:USERPROFILE '.boxcode'
+        $stateDir = Join-Path $env:USERPROFILE '.covexcode'
         New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
         $idFile = Join-Path $stateDir 'device_id'
         if (-not (Test-Path $idFile) -or -not (Get-Content $idFile -Raw -ErrorAction SilentlyContinue)) {

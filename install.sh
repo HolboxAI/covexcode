@@ -41,7 +41,7 @@ sweep_path_for_stale_copies() {
 
 # Fire a single, best-effort "an install happened" ping -- the bash-side
 # counterpart to telemetry.rs's `active` ping, which this binary hasn't run
-# yet to send. Anonymous: a random ID written to $HOME/.boxcode/device_id
+# yet to send. Anonymous: a random ID written to $HOME/.covexcode/device_id
 # that labels this machine, not the person running it -- the same file
 # telemetry.rs reads and reuses on later runs rather than generating a second,
 # conflicting ID. No other data leaves this machine from here.
@@ -62,7 +62,7 @@ ping_install() {
   local url="${BOXCODE_TELEMETRY_URL-$default_url}"
   [ -n "$url" ] || return 0
 
-  local state_dir="$HOME/.boxcode"
+  local state_dir="$HOME/.covexcode"
   local id_file="$state_dir/device_id"
   mkdir -p "$state_dir" 2>/dev/null || return 0
 
@@ -138,7 +138,7 @@ python_standalone_target() {
 # install.sh ever having to edit config.toml -- see embedded_python_path()
 # there.
 embedded_python_dir() {
-  echo "$HOME/.boxcode/python"
+  echo "$HOME/.covexcode/python"
 }
 
 # Downloads and extracts a self-contained Python into embedded_python_dir,
@@ -165,7 +165,7 @@ install_embedded_python() {
 
   # Extracted into $tmp -- the same directory the archive itself just
   # downloaded into, and NOT $(dirname "$dir") directly. $dir is always
-  # ".../.boxcode/python", so $(dirname "$dir")/python always
+  # ".../.covexcode/python", so $(dirname "$dir")/python always
   # equals $dir itself; extracting straight there and then trying to `mv`
   # the result onto $dir would be moving a path onto itself, which mv
   # correctly refuses ("cannot move to a subdirectory of itself") -- caught
