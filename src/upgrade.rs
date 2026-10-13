@@ -217,7 +217,7 @@ async fn run_for(force: bool, windows: bool) -> Result<(), Box<dyn Error>> {
     let script = fetch_installer(&client, windows).await?;
 
     let script_path = std::env::temp_dir().join(format!(
-        "boxcode-install-{}.{}",
+        "covexcode-install-{}.{}",
         std::process::id(),
         installer_extension(windows)
     ));
@@ -234,7 +234,7 @@ async fn run_for(force: bool, windows: bool) -> Result<(), Box<dyn Error>> {
             let interpreter = interpreter_name(windows);
             Err(format!(
                 "--upgrade needs `{interpreter}` on PATH, and it wasn't found. \
-                 Reinstall manually: https://github.com/HolboxAI/boxcode"
+                 Reinstall manually: https://github.com/HolboxAI/covexcode"
             )
             .into())
         }
@@ -364,10 +364,13 @@ async fn fetch_installer(client: &reqwest::Client, windows: bool) -> Result<Stri
 /// `#`-prefixed comment line instead; either way, a real installer body and
 /// stray HTML/JSON are trivially told apart.
 fn looks_like_installer(body: &str, windows: bool) -> bool {
+    // Accept either brand string: new installers say covexcode, and legacy
+    // boxcode.sh copies / older cached scripts still say boxcode.
+    let branded = body.contains("covexcode") || body.contains("boxcode");
     if windows {
-        body.trim_start().starts_with('#') && body.contains("boxcode")
+        body.trim_start().starts_with('#') && branded
     } else {
-        body.starts_with("#!") && body.contains("boxcode")
+        body.starts_with("#!") && branded
     }
 }
 
@@ -447,7 +450,7 @@ mod tests {
     /// A scratch directory of this test's own, so the cases here cannot see
     /// each other's cache file.
     fn cache_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("boxcode-upd-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("covexcode-upd-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         dir
@@ -689,6 +692,7 @@ version = \"9.9.9\"
 
     #[test]
     fn only_a_real_installer_reaches_bash() {
+        assert!(looks_like_installer("#!/bin/bash\ninstall covexcode\n", false));
         assert!(looks_like_installer("#!/bin/bash\ninstall boxcode\n", false));
         // What a captive portal or an error page would return.
         assert!(!looks_like_installer("<html><body>Sign in to continue</body></html>", false));
@@ -703,6 +707,7 @@ version = \"9.9.9\"
     /// a captive-portal page or an error blob to PowerShell instead.
     #[test]
     fn only_a_real_installer_reaches_powershell() {
+        assert!(looks_like_installer("# covexcode installer\nWrite-Host 'hi'\n", true));
         assert!(looks_like_installer("# boxcode installer\nWrite-Host 'hi'\n", true));
         assert!(!looks_like_installer("<html><body>Sign in to continue</body></html>", true));
         assert!(!looks_like_installer("404: Not Found", true));
@@ -782,12 +787,12 @@ version = \"9.9.9\"
     #[tokio::test]
     async fn upgrade_end_to_end() {
         let marker =
-            std::env::temp_dir().join(format!("boxcode-upgrade-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("covexcode-upgrade-test-{}", std::process::id()));
         let installer = format!(
             "#!/bin/bash\n# stand-in for the boxcode installer\necho ran > \"{}\"\n",
             marker.display()
         );
-        let manifest = |version: &str| format!("[package]\nname = \"boxcode\"\nversion = \"{version}\"\n");
+        let manifest = |version: &str| format!("[package]\nname = \"covexcode\"\nversion = \"{version}\"\n");
         let ran = || marker.exists();
         let reset = || {
             let _ = std::fs::remove_file(&marker);
@@ -859,7 +864,7 @@ version = \"9.9.9\"
             return;
         };
 
-        let shim_dir = std::env::temp_dir().join(format!("boxcode-pwsh-shim-{}", std::process::id()));
+        let shim_dir = std::env::temp_dir().join(format!("covexcode-pwsh-shim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&shim_dir);
         std::fs::create_dir_all(&shim_dir).expect("create shim dir");
         let shim_path = shim_dir.join("powershell.exe");
@@ -869,17 +874,17 @@ version = \"9.9.9\"
         std::fs::copy(&real_interpreter, &shim_path).expect("copy shim");
 
         let marker =
-            std::env::temp_dir().join(format!("boxcode-upgrade-windows-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("covexcode-upgrade-windows-test-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         // PowerShell, not batch: `install.ps1` is what actually ships.
         let installer = format!(
             "# boxcode installer (test stand-in)\nSet-Content -Path '{}' -Value 'ran'\n",
             marker.display()
         );
-        let manifest = "[package]\nname = \"boxcode\"\nversion = \"99.0.0\"\n";
+        let manifest = "[package]\nname = \"covexcode\"\nversion = \"99.0.0\"\n";
         let base = serve_repo(manifest.to_string(), installer).await;
 
-        let script_path = std::env::temp_dir().join(format!("boxcode-install-{}.ps1", std::process::id()));
+        let script_path = std::env::temp_dir().join(format!("covexcode-install-{}.ps1", std::process::id()));
         // Mirrors fetch_installer's download, minus the HTTP round trip --
         // the point of this test is proving the *interpreter invocation*
         // works for real, which fetch_installer's own logic already has
