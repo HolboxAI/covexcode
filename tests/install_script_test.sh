@@ -105,20 +105,29 @@ fake_home=$(mktemp -d)
 fake_bin="$workdir/fake-binary"
 cat > "$fake_bin" <<'EOF'
 #!/bin/bash
-echo "boxcode 9.9.9"
+echo "covexcode 9.9.9"
 EOF
 chmod +x "$fake_bin"
 
 # An explicit blank override disables sending -- even though the default is
-# now a real, non-blank endpoint. This is "${VAR-default}" (no colon) rather
-# than "${VAR:-default}" specifically so this case is reachable at all: the
-# colon form can't distinguish "unset" from "set to empty".
-BOXCODE_TELEMETRY_URL="" HOME="$fake_home" ping_install "$fake_bin" ||
+# now a real, non-blank endpoint. COVEXCODE_* wins; BOXCODE_* remains a
+# legacy alias for the same "unset vs explicitly blank" distinction.
+COVEXCODE_TELEMETRY_URL="" HOME="$fake_home" ping_install "$fake_bin" ||
   fail "ping_install must return 0 even when explicitly disabled"
 [ -f "$fake_home/.covexcode/device_id" ] &&
   fail "an explicitly blank override must disable sending despite a non-blank default"
 
-echo "PASS: ping_install is disabled by an explicit blank BOXCODE_TELEMETRY_URL override"
+echo "PASS: ping_install is disabled by an explicit blank COVEXCODE_TELEMETRY_URL override"
+
+# Legacy BOXCODE_TELEMETRY_URL="" still disables when COVEXCODE_* is unset.
+rm -rf "$fake_home"
+mkdir -p "$fake_home"
+unset COVEXCODE_TELEMETRY_URL
+BOXCODE_TELEMETRY_URL="" HOME="$fake_home" ping_install "$fake_bin" ||
+  fail "legacy blank BOXCODE_TELEMETRY_URL must still disable sending"
+[ -f "$fake_home/.covexcode/device_id" ] &&
+  fail "legacy blank BOXCODE_TELEMETRY_URL must not create a device id"
+echo "PASS: ping_install still honors legacy blank BOXCODE_TELEMETRY_URL"
 
 # Enabled, but pointing at nothing reachable: must still return success and
 # must still create the device id (idempotently, for install.sh's own use and
@@ -128,7 +137,7 @@ echo "PASS: ping_install is disabled by an explicit blank BOXCODE_TELEMETRY_URL 
 rm -rf "$fake_home"
 mkdir -p "$fake_home"
 start=$(date +%s)
-BOXCODE_TELEMETRY_URL="http://127.0.0.1:1/nowhere" HOME="$fake_home" ping_install "$fake_bin" ||
+COVEXCODE_TELEMETRY_URL="http://127.0.0.1:1/nowhere" HOME="$fake_home" ping_install "$fake_bin" ||
   fail "ping_install must return 0 even when the endpoint is unreachable"
 elapsed=$(( $(date +%s) - start ))
 [ -f "$fake_home/.covexcode/device_id" ] || fail "device id must be created once enabled"
@@ -136,7 +145,7 @@ elapsed=$(( $(date +%s) - start ))
 [ "$elapsed" -lt 2 ] || fail "ping_install must not block on the network (took ${elapsed}s)"
 
 first_id=$(cat "$fake_home/.covexcode/device_id")
-BOXCODE_TELEMETRY_URL="http://127.0.0.1:1/nowhere" HOME="$fake_home" ping_install "$fake_bin"
+COVEXCODE_TELEMETRY_URL="http://127.0.0.1:1/nowhere" HOME="$fake_home" ping_install "$fake_bin"
 second_id=$(cat "$fake_home/.covexcode/device_id")
 [ "$first_id" = "$second_id" ] || fail "an existing device id must be reused, not regenerated"
 
@@ -531,22 +540,22 @@ echo "$out" | grep -qF ">> $hint_home/.zshrc" ||
 echo "PASS: an existing PATH line is recognised in every spelling people actually write"
 
 # The test that matters: run the printed command exactly as a user would, then
-# open a genuinely new shell and see whether boxcode is found.
+# open a genuinely new shell and see whether covexcode is found.
 if command -v zsh &> /dev/null; then
   e2e_home=$(mktemp -d)
   mkdir -p "$e2e_home/.local/bin"
-  printf '#!/bin/bash\necho ran\n' > "$e2e_home/.local/bin/boxcode"
-  chmod +x "$e2e_home/.local/bin/boxcode"
+  printf '#!/bin/bash\necho ran\n' > "$e2e_home/.local/bin/covexcode"
+  chmod +x "$e2e_home/.local/bin/covexcode"
 
   printed=$(HOME="$e2e_home" SHELL=/bin/zsh print_path_setup_hint "$e2e_home/.local/bin")
   # Exactly what a user copies: the command, without the display indent.
   HOME="$e2e_home" eval "$(echo "$printed" | sed 's/^ *//')"
 
-  found=$(HOME="$e2e_home" zsh -i -c 'command -v boxcode' 2>/dev/null || true)
+  found=$(HOME="$e2e_home" zsh -i -c 'command -v covexcode' 2>/dev/null || true)
   rm -rf "$e2e_home"
   [ -n "$found" ] ||
-    fail "the printed command did not actually put boxcode on PATH in a new shell"
-  echo "PASS: the printed command really does make boxcode findable in a new terminal"
+    fail "the printed command did not actually put covexcode on PATH in a new shell"
+  echo "PASS: the printed command really does make covexcode findable in a new terminal"
 else
   echo "SKIP: PATH hint end-to-end test (no zsh on this machine)"
 fi
