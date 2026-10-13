@@ -696,7 +696,7 @@ pub fn schemas_for(
             "function": {
                 "name": DEPLOY_BACKEND,
                 "description": "Host this project's backend as a real, running server on \
-                                boxcode's own infrastructure, at a URL under the same domain as \
+                                covexcode's own infrastructure, at a URL under the same domain as \
                                 the published frontend. Requires the path to have been published \
                                 with publish_artifact first -- the backend is served at \
                                 /api/<project id>/, which only exists once the project does. \
@@ -724,7 +724,7 @@ pub fn schemas_for(
                                 or requirements.txt -- do not commit node_modules, and do not \
                                 expect a local .env to travel; local secrets are never uploaded. \
                                 (4) There is a small number of these running at once across \
-                                everyone using boxcode. A refusal saying the limit is reached is \
+                                everyone using covexcode. A refusal saying the limit is reached is \
                                 a real answer, not a retryable error. \
                                 \
                                 Deploying takes a few minutes: the source is uploaded, \
@@ -1353,7 +1353,7 @@ pub fn subagent_system_prompt(workspace: &Workspace, steps_used: usize, max_step
         "This is a Unix-like system: use `ls`, `cat`, `grep`, `find`."
     };
     format!(
-        "You are a read-only research subagent inside boxcode, a terminal coding assistant. \
+        "You are a read-only research subagent inside covexcode, a terminal coding assistant. \
          A larger agent delegated one task to you; it sees ONLY your final message, never \
          your tool calls or their output, so your last message must be a self-contained \
          report: findings with file paths (and line numbers where they matter), not a \
@@ -1382,7 +1382,7 @@ pub fn subagent_system_prompt(workspace: &Workspace, steps_used: usize, max_step
 /// model must have exactly right.
 fn inline_edit_system_prompt(workspace: &Workspace) -> String {
     format!(
-        "You are boxcode's inline edit assistant, working in {}. You help rewrite a region of \
+        "You are covexcode's inline edit assistant, working in {}. You help rewrite a region of \
          one file; you do not run shell commands.\n\n\
          Tools:\n\
          - {READ_FILE}(path, offset, limit): read a file, or a slice of a big one.\n\
@@ -1423,7 +1423,7 @@ pub fn system_prompt(
 ) -> String {
     if steps_used >= config.max_steps {
         return format!(
-            "You are boxcode, a terminal coding assistant working in {}.\n\
+            "You are covexcode, a terminal coding assistant working in {}.\n\
              You have used up this turn's command budget. Answer the user now, in text, \
              from what you have already seen. Do not ask to run anything else.",
             workspace.root().display()
@@ -1472,7 +1472,7 @@ pub fn system_prompt(
     };
 
     let mut prompt = format!(
-        "You are boxcode, a terminal coding assistant.\n\n\
+        "You are covexcode, a terminal coding assistant.\n\n\
          Working directory: {}\n\
          Operating system: {os} — shell commands run through `{shell_name} {shell_flag}`\n\n\
          Tools:\n\
@@ -1777,7 +1777,7 @@ pub fn turn_status(
     // a reply to.
     (!status.is_empty()).then(|| {
         format!(
-            "[boxcode status — automatic, not typed by the user. \
+            "[covexcode status — automatic, not typed by the user. \
              Do not reply to this block; act on it.]{status}"
         )
     })
@@ -2384,7 +2384,7 @@ pub fn action_risk(action: &Action, workspace_root: &Path) -> danger::Risk {
             "uploads these files to a public URL anyone with the link can open".to_string(),
         ),
         Action::DeployBackend { .. } => danger::Risk::Dangerous(
-            "uploads this project's source and RUNS it as a live server on boxcode's host, \
+            "uploads this project's source and RUNS it as a live server on covexcode's host, \
              reachable by anyone with the link"
                 .to_string(),
         ),
@@ -2407,7 +2407,7 @@ pub fn action_risk(action: &Action, workspace_root: &Path) -> danger::Risk {
         // switched off entirely.
         Action::InteractInBrowser { .. } => danger::Risk::Dangerous(
             "acts inside the browser tab's current session -- a click or typed text uses \
-             whatever login/cookie state is already there, and boxcode cannot see what it will \
+             whatever login/cookie state is already there, and covexcode cannot see what it will \
              actually do until after it happens"
                 .to_string(),
         ),
@@ -2416,7 +2416,7 @@ pub fn action_risk(action: &Action, workspace_root: &Path) -> danger::Risk {
         // What the tool does is decided by the server, so there is nothing here
         // to reason about -- only the name of what will run.
         Action::Mcp { server, tool, .. } => danger::Risk::Dangerous(format!(
-            "calls {tool} on the MCP server {server} -- boxcode cannot tell what a \
+            "calls {tool} on the MCP server {server} -- covexcode cannot tell what a \
              server's tool does, and the server supplies its own description"
         )),
         // Reads and writes are already confined to the workspace by
@@ -2528,7 +2528,7 @@ pub fn plan_mode_block(action: &Action) -> Option<String> {
         // an MCP tool does is not knowable from its name, so there is no safe
         // subset to allow.
         Action::Mcp { server, tool, .. } => Some(format!(
-            "MCP tool {server}:{tool} is not available while planning — boxcode \
+            "MCP tool {server}:{tool} is not available while planning — covexcode \
              cannot tell what a server's tool does, and plan mode does not ask."
         )),
     }
