@@ -240,7 +240,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // one nobody can verify.
     if migrating {
         app.startup_notices.push(
-            "Renamed to boxcode: your settings and history moved into ~/.covexcode."
+            "Renamed to covexcode: your settings and history moved into ~/.covexcode."
                 .to_string(),
         );
     }
