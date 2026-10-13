@@ -181,7 +181,7 @@ mod tests {
     #[tokio::test]
     async fn an_unpublished_path_is_refused_before_any_network_call() {
         let dir =
-            std::env::temp_dir().join(format!("boxcode-errors-unpublished-{}", std::process::id()));
+            std::env::temp_dir().join(format!("covexcode-errors-unpublished-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let target = dir.join("index.html");
