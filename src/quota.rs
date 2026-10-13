@@ -225,7 +225,7 @@ pub fn evaluate(quota: &DailyQuota, config: &QuotaConfig) -> Verdict {
         return Verdict::Blocked(format!(
             "Daily limit reached — {}. Resets in {} (UTC midnight).\n\
              Type /quota override to keep going today, or raise the limit under [quota] in \
-             ~/.boxcode/config.toml.",
+             ~/.covexcode/config.toml.",
             spent.join("; "),
             time_until_utc_midnight()
         ));

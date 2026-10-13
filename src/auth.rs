@@ -43,7 +43,7 @@ pub async fn provision(path: &Path, endpoint: &str) -> Result<Provisioned, Strin
     if endpoint.trim().is_empty() {
         return Err(
             "no auth endpoint is configured. Set `auth_endpoint` under [tools] in \
-             ~/.boxcode/config.toml."
+             ~/.covexcode/config.toml."
                 .to_string(),
         );
     }
