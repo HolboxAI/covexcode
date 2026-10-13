@@ -2,7 +2,7 @@
 //! ACP JSON-RPC off stdin, dispatches to sessions, writes responses and
 //! `session/update`/`session/request_permission` messages to stdout. This
 //! is the last piece between "the turn loop works" (`headless.rs`, tested
-//! end to end already) and "you can spawn `boxcode --acp` as a subprocess
+//! end to end already) and "you can spawn `covexcode --acp` as a subprocess
 //! and talk to it."
 //!
 //! **Why this is the hard part, precisely:** ACP is bidirectional over one
@@ -598,7 +598,7 @@ impl Router {
 }
 
 /// The real entry point -- reads stdin, writes stdout, runs until stdin
-/// closes. Selected by `main.rs` via `boxcode --acp`, mutually exclusive
+/// closes. Selected by `main.rs` via `covexcode --acp`, mutually exclusive
 /// with the normal TUI (this never touches a terminal, only pipes).
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let stdin = tokio::io::stdin();

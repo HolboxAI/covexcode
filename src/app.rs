@@ -630,7 +630,7 @@ pub struct App {
     pub workspace_root: String,
     /// Set by `/pull` when the user picks a different local project. `main`'s
     /// loop exits on `should_exit` same as it always does; once it does, it
-    /// checks this and relaunches boxcode rooted there instead of just
+    /// checks this and relaunches covexcode rooted there instead of just
     /// quitting. `None` means an ordinary exit.
     pub pending_relaunch: Option<std::path::PathBuf>,
     /// Prompts already sent this session, oldest first, for ↑/↓ recall.
@@ -872,7 +872,7 @@ impl App {
     /// `/login` — if already linked, show status. Otherwise ask the event
     /// loop to hand the terminal to the browser device flow (same pattern as
     /// a deploy vendor login): `/login` used to only print "exit and run
-    /// `boxcode login`", which felt broken from inside the TUI.
+    /// `covexcode login`", which felt broken from inside the TUI.
     fn start_login(&mut self) {
         self.follow_tail = true;
         if self.is_busy() {
@@ -1555,7 +1555,7 @@ impl App {
                 // No `Role::Error` message to go with this. A guardrail
                 // refusing something is not an error: nothing failed, and the
                 // program did exactly what it is for. Drawn under a red
-                // "Error" headline it read as boxcode having broken, which is
+                // "Error" headline it read as covexcode having broken, which is
                 // the opposite of the truth and is alarming in a way the
                 // event does not deserve.
                 //
@@ -1733,7 +1733,7 @@ impl App {
     /// from. This only records it and works out what to say on the way in.
     pub fn adopt_plan(&mut self, plan: crate::plan::Plan) {
         // A finished plan is left on disk -- deleting the user's file is not
-        // boxcode's call -- but it is not followed. There is nothing left to
+        // covexcode's call -- but it is not followed. There is nothing left to
         // do, and restating it would invite the model to redo the work.
         if plan.is_finished() {
             let (_, total) = plan.progress();
@@ -4922,7 +4922,7 @@ mod tests {
     }
 
     /// `/login` must queue the browser flow for the event loop when this
-    /// machine is not linked — not dump "exit and run boxcode login".
+    /// machine is not linked — not dump "exit and run covexcode login".
     #[test]
     fn login_queues_the_browser_flow_when_unsigned() {
         let mut a = app();
@@ -7569,7 +7569,7 @@ mod tests {
     /// A guardrail refusing something is not an error.
     ///
     /// Nothing failed and the program did exactly what it is for, but a block
-    /// was drawn under a red "Error" headline -- which reads as boxcode
+    /// was drawn under a red "Error" headline -- which reads as covexcode
     /// having broken, and is alarming in a way the event does not deserve. It
     /// was also the same event twice, since the tool line says it too.
     #[test]
@@ -9545,7 +9545,7 @@ mod tests {
     }
 
     /// A finished plan is left on disk -- deleting the user's file is not
-    /// boxcode's call -- but it is not followed, or the model is invited to
+    /// covexcode's call -- but it is not followed, or the model is invited to
     /// redo work that is already done.
     #[test]
     fn a_finished_plan_is_not_followed() {

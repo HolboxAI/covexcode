@@ -2189,7 +2189,7 @@ pub enum Action {
     /// them. Always approved, for the same reason `Deploy` is: it publishes.
     Publish { path: String },
     /// Puts a real server on the internet for an already-published project:
-    /// its source is uploaded, built, and run in a microVM on boxcode's own
+    /// its source is uploaded, built, and run in a microVM on covexcode's own
     /// host. Always approved, same reasoning as `Publish`/`Deploy` -- and more
     /// so, because this one runs the project's code rather than serving it.
     DeployBackend { path: String },
@@ -2205,7 +2205,7 @@ pub enum Action {
     DbQuery { path: String, sql: String },
     /// Checks an already-published project's change-request mailbox.
     /// Ordinary approval, same reasoning as `DbQuery`: a private call to
-    /// boxcode's own control-plane, not something that touches the public
+    /// covexcode's own control-plane, not something that touches the public
     /// internet by itself.
     ListChangeRequests { path: String },
     /// Marks one change request handled. Same risk reasoning as
@@ -2243,7 +2243,7 @@ pub enum Action {
     /// asking permission to update a to-do list would make it unusable).
     Todos(Vec<TodoItem>),
     /// `check_in_browser`: asks the client to capture a screenshot of `url`
-    /// -- boxcode itself has no browser tab, only an ACP client (boxcode-ide's
+    /// -- covexcode itself has no browser tab, only an ACP client (boxcode-ide's
     /// chat participant, for one) does, so this is fulfilled entirely on the
     /// other side of the wire. Read-only by construction, like `Agent`:
     /// nothing here writes to disk or runs a command, it only looks. Only
@@ -7479,7 +7479,7 @@ mod tests {
         let action = describe_action(&call).expect("should parse");
         assert_eq!(action, Action::ListChangeRequests { path: "dist".to_string() });
 
-        // Same reasoning as db_query: a private call to boxcode's own
+        // Same reasoning as db_query: a private call to covexcode's own
         // control-plane, never the public internet by itself.
         let risk = action_risk(&action, Path::new("/tmp"));
         assert!(matches!(risk, danger::Risk::Normal), "{risk:?}");

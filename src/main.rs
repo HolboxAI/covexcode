@@ -291,7 +291,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     // Unlike the /pull-only check above, this runs on every ordinary
     // launch -- deliberately, since "opens with what broke" is the entire
-    // point of the reported-errors feature (there is no other moment boxcode
+    // point of the reported-errors feature (there is no other moment covexcode
     // is spawned that isn't already mid-conversation, see the delivery
     // design in errors.rs/docs). Two guards keep this from repeating the
     // cost the /pull check was written to avoid:
@@ -396,7 +396,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //   * `result.is_ok()` -- an error is printed just below, and an error
     //     that erased itself is worse than no error at all.
     //   * `!alternate_screen` -- that fallback has already restored whatever
-    //     was on screen before boxcode started. Clearing on top of it would
+    //     was on screen before covexcode started. Clearing on top of it would
     //     wipe the user's own terminal rather than ours.
     //   * the setting -- see `UiConfig::clear_on_exit` for the trade.
     //
@@ -469,7 +469,7 @@ fn should_clear_on_exit(ui: &config::UiConfig, alternate_screen: bool, ok: bool)
         return false;
     }
     // The alternate-screen fallback has already put back whatever was on
-    // screen before boxcode started. Clearing on top of that would wipe the
+    // screen before covexcode started. Clearing on top of that would wipe the
     // user's own terminal rather than ours.
     if alternate_screen {
         return false;
@@ -477,7 +477,7 @@ fn should_clear_on_exit(ui: &config::UiConfig, alternate_screen: bool, ok: bool)
     ui.clear_on_exit
 }
 
-/// Re-launches the boxcode binary rooted at `dir`, in place of this process
+/// Re-launches the covexcode binary rooted at `dir`, in place of this process
 /// on Unix (`exec` -- never returns on success) or by spawning and waiting on
 /// platforms without one. `Workspace` is built once at startup and held for
 /// the life of the process (see `workspace.rs`); there is no in-place way to
@@ -1115,7 +1115,7 @@ mod tests {
         assert!(!should_clear_on_exit(&on, false, false));
 
         // The alternate-screen fallback already restored the terminal; this
-        // would wipe what was there before boxcode started.
+        // would wipe what was there before covexcode started.
         assert!(!should_clear_on_exit(&on, true, true));
 
         // And the setting is the last word.
