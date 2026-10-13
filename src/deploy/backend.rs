@@ -14,7 +14,7 @@
 //! being wrong -- everything here is a default the user can override, so the
 //! cost of a bad guess is an edit rather than a broken deployment.
 //!
-//! What this is *for*: a boxcode-hosted backend runs in its own Firecracker
+//! What this is *for*: a covexcode-hosted backend runs in its own Firecracker
 //! microVM, as an ordinary long-running server process. So detection has to find
 //! two things -- which base image the guest needs, and which file starts the
 //! server -- and `BackendProfile::start_command` turns them into the argv that
