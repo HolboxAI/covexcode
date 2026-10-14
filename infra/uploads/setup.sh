@@ -2,21 +2,21 @@
 # Adds the uploads control-plane to a box that has already run
 # infra/auth/setup.sh -- same assumption infra/db/setup.sh and
 # infra/requests/setup.sh make, and the same reason: nginx, its cert, and
-# the base auth.boxcode.sh vhost already exist, and this only adds its own
+# the base auth.covexcode.com vhost already exist, and this only adds its own
 # systemd service plus its own nginx route. Does not touch certbot, and
 # deliberately does NOT touch /etc/nginx/conf.d/auth.conf itself -- see
 # infra/db/setup.sh's own header for why overwriting that file from a
 # template is the mistake to avoid.
 #
 # Unlike infra/requests, this endpoint is not reached through
-# auth.boxcode.sh at all in the end -- the presigned URLs it hands back
+# auth.covexcode.com at all in the end -- the presigned URLs it hands back
 # point straight at S3, and the *uploaded image itself* is served publicly
-# through boxcode.sh's own CloudFront distribution (a new /uploads/*
+# through covexcode.com's own CloudFront distribution (a new /uploads/*
 # behavior added there, and a matching bucket-policy statement -- both
 # outside this repo's own infra, done by hand against the account, see
 # infra/uploads/README.md). What runs on this box only ever signs; nginx's
 # route here is for the signing call itself
-# (POST auth.boxcode.sh/uploads), same shape as db/requests.
+# (POST auth.covexcode.com/uploads), same shape as db/requests.
 #
 # Idempotent, same as the other infra/*/setup.sh scripts -- safe to re-run
 # after any infra/uploads/ change.
