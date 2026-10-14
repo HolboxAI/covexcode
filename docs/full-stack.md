@@ -4,8 +4,8 @@
 a **real server** behind it, at the same domain, with a PostgreSQL database.
 
 ```
-https://boxcode.sh/artifacts/k9depef6      the frontend, static
-https://boxcode.sh/api/k9depef6/           the backend, a running server
+https://covexcode.com/artifacts/k9depef6      the frontend, static
+https://covexcode.com/api/k9depef6/           the backend, a running server
 ```
 
 Both expire **48 hours** after they are deployed, together.
