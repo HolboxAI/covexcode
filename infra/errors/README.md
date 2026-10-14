@@ -12,7 +12,7 @@ LLM key, on their own machine, through the ordinary agent loop
 `src/tools.rs`). This control-plane only holds the note between "the page
 threw" and "boxcode picked it up."
 
-Reuses `auth.boxcode.sh`'s existing vhost and cert, same as `infra/db/` and
+Reuses `auth.covexcode.com`'s existing vhost and cert, same as `infra/db/` and
 `infra/requests/` -- no new DNS or cert needed. Zero npm dependencies, same
 stance as the other control-planes: `node:http`/`node:crypto`/`node:fs` are
 all this needs.
@@ -79,7 +79,7 @@ to hold a full report.
   - `GET /errors-beacon.js` -- a small, dependency-free vanilla JS beacon.
     Not generated per-project: one static file, and a developer adds it to
     their own published page with a single `<script src="https://
-    auth.boxcode.sh/errors-beacon.js" data-project="<their artifact
+    auth.covexcode.com/errors-beacon.js" data-project="<their artifact
     id>"></script>` tag via `edit_file`, then republishes -- there is no
     separate "enable" tool, same convention as `requests-widget.js`.
   - `POST /errors {project_id, message, file, line, col}` -- what the beacon
@@ -116,7 +116,7 @@ the target box when ready, the same way the other control-planes' own
 
 `/errors-beacon.js` and `POST /errors` are called from the published
 artifact page's own origin (a different origin than this control-plane), so
-they carry `Access-Control-Allow-Origin: https://boxcode.sh` and `/errors`
+they carry `Access-Control-Allow-Origin: https://covexcode.com` and `/errors`
 answers its own `OPTIONS` preflight -- needed for the `fetch` fallback path;
 the primary `sendBeacon` path avoids the preflight entirely by construction
 (see above). `GET /errors` and `POST /errors/<id>/resolve` are called by the

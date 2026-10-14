@@ -34,10 +34,10 @@ const PORT = Number(process.env.PORT || 8083);
 // Published pages load the beacon from and submit reports to -- SITE_BASE in
 // the auth control-plane, kept as its own env var here rather than importing
 // that file, since this is a separate process with its own deploy story.
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://boxcode.sh";
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://covexcode.com";
 // Where the beacon HEADs to confirm project_id names a real, live artifact --
 // same URL shape infra/auth/'s artifactExists() uses.
-const SITE_BASE = process.env.SITE_BASE || "https://boxcode.sh";
+const SITE_BASE = process.env.SITE_BASE || "https://covexcode.com";
 
 // Same shape as every other control-plane's PROJECT_ID_RE: an artifact id is
 // how every project is identified everywhere in boxcode.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Adds the runtime-error control-plane to a box that has already run
 # infra/auth/setup.sh -- same assumption infra/requests/setup.sh makes, and
-# the same reason: nginx, its cert, and the base auth.boxcode.sh vhost
+# the same reason: nginx, its cert, and the base auth.covexcode.com vhost
 # already exist, and this only adds its own systemd service plus its own
 # nginx routes. Does not touch certbot, and deliberately does NOT touch
 # /etc/nginx/conf.d/auth.conf itself -- see infra/db/setup.sh's own header
