@@ -11,7 +11,7 @@ their own machine, through the ordinary agent loop (`src/requests.rs`,
 control-plane only holds the note between "someone left it" and "boxcode
 picked it up."
 
-Reuses `auth.boxcode.sh`'s existing vhost and cert, same as `infra/db/` --
+Reuses `auth.covexcode.com`'s existing vhost and cert, same as `infra/db/` --
 no new DNS or cert needed. Zero npm dependencies, same stance as the auth
 and db control-planes: `node:http`/`node:crypto`/`node:fs` are all this
 needs, so unlike `infra/db/` it runs fine on this box's system node (no
@@ -24,7 +24,7 @@ needs, so unlike `infra/db/` it runs fine on this box's system node (no
   - `GET /requests-widget.js` -- a small, dependency-free vanilla JS widget
     (floating "Request a change" button + textarea). Not generated
     per-project: it is one static file, and a developer adds it to their
-    own published page with a single `<script src="https://auth.boxcode.sh
+    own published page with a single `<script src="https://auth.covexcode.com
     /requests-widget.js" data-project="<their artifact id>"></script>` tag
     via `edit_file`, then republishes -- there is no separate "enable" tool.
   - `POST /requests {project_id, text}` -- what the widget submits. Stores
@@ -51,7 +51,7 @@ needs, so unlike `infra/db/` it runs fine on this box's system node (no
 
 `/requests-widget.js` and `POST /requests` are called from the published
 artifact page's own origin (a different origin than this control-plane), so
-they carry `Access-Control-Allow-Origin: https://boxcode.sh` and `/requests`
+they carry `Access-Control-Allow-Origin: https://covexcode.com` and `/requests`
 answers its own `OPTIONS` preflight. `GET /requests` and
 `POST /requests/<id>/resolve` are called by the boxcode CLI client directly,
 not a browser, so they carry no CORS headers -- same reasoning as
