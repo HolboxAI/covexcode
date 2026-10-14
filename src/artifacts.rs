@@ -442,7 +442,7 @@ fn inject_live_reload(bytes: Vec<u8>) -> Vec<u8> {
 }
 
 /// The path an artifact is served under, taken from the URL the signer
-/// returned -- `/artifacts/k9depef6` for `https://boxcode.sh/artifacts/k9depef6`.
+/// returned -- `/artifacts/k9depef6` for `https://covexcode.com/artifacts/k9depef6`.
 ///
 /// Read off the response rather than built from the id, so a fork or a
 /// self-hosted signer that lays its prefixes out differently keeps working
@@ -1063,7 +1063,7 @@ mod tests {
         write(&dir, "assets/app.js", "console.log('hello from the bundle');\n");
         write(&dir, "assets/app.css", "body{background:#fff;color:#111}\n");
 
-        let published = publish(&dir, "https://boxcode.sh/api/artifact")
+        let published = publish(&dir, "https://covexcode.com/api/artifact")
             .await
             .expect("publish should succeed");
         println!("published to {}", published.url);
@@ -1089,7 +1089,7 @@ mod tests {
                 if !url.starts_with('/') || url.starts_with("//") {
                     continue;
                 }
-                let absolute = format!("https://boxcode.sh{url}");
+                let absolute = format!("https://covexcode.com{url}");
                 let status = client
                     .get(&absolute)
                     .send()
@@ -1125,8 +1125,8 @@ mod tests {
     async fn verify_live_against_the_real_broken_and_fixed_pages() {
         let client = reqwest::Client::new();
 
-        let broken = "https://boxcode.sh/artifacts/k9depef6";
-        let fixed = "https://boxcode.sh/artifacts/25menr6r";
+        let broken = "https://covexcode.com/artifacts/k9depef6";
+        let fixed = "https://covexcode.com/artifacts/25menr6r";
 
         let broken_ok = verify_live(&client, broken, None).await;
         let fixed_ok = verify_live(&client, fixed, None).await;
@@ -1145,12 +1145,12 @@ mod tests {
     #[test]
     fn the_origin_and_directory_come_apart_the_way_a_browser_splits_them() {
         assert_eq!(
-            split_origin_and_dir("https://boxcode.sh/artifacts/k9depef6"),
-            ("https://boxcode.sh".to_string(), "/artifacts/".to_string())
+            split_origin_and_dir("https://covexcode.com/artifacts/k9depef6"),
+            ("https://covexcode.com".to_string(), "/artifacts/".to_string())
         );
         assert_eq!(
-            split_origin_and_dir("https://boxcode.sh/artifacts/k9depef6/"),
-            ("https://boxcode.sh".to_string(), "/artifacts/k9depef6/".to_string())
+            split_origin_and_dir("https://covexcode.com/artifacts/k9depef6/"),
+            ("https://covexcode.com".to_string(), "/artifacts/k9depef6/".to_string())
         );
         assert_eq!(
             split_origin_and_dir("https://example.test"),
@@ -1166,10 +1166,10 @@ mod tests {
 <link rel="stylesheet" href="/artifacts/k9depef6/assets/app.css">"#;
 
         assert_eq!(
-            referenced_assets(html, "https://boxcode.sh/artifacts/k9depef6"),
+            referenced_assets(html, "https://covexcode.com/artifacts/k9depef6"),
             vec![
-                "https://boxcode.sh/artifacts/k9depef6/assets/app.js".to_string(),
-                "https://boxcode.sh/artifacts/k9depef6/assets/app.css".to_string(),
+                "https://covexcode.com/artifacts/k9depef6/assets/app.js".to_string(),
+                "https://covexcode.com/artifacts/k9depef6/assets/app.css".to_string(),
             ]
         );
     }
@@ -1181,8 +1181,8 @@ mod tests {
     fn an_unrebased_page_is_checked_where_the_browser_would_actually_look() {
         let html = r#"<script src="/assets/index-BvuHFN-e.js"></script>"#;
         assert_eq!(
-            referenced_assets(html, "https://boxcode.sh/artifacts/k9depef6"),
-            vec!["https://boxcode.sh/assets/index-BvuHFN-e.js".to_string()],
+            referenced_assets(html, "https://covexcode.com/artifacts/k9depef6"),
+            vec!["https://covexcode.com/assets/index-BvuHFN-e.js".to_string()],
             "resolving this to where the file really is would confirm a blank page"
         );
     }
@@ -1194,10 +1194,10 @@ mod tests {
     fn relative_references_resolve_against_the_directory_not_the_page() {
         let html = r#"<script src="./assets/app.js"></script><img src="logo.png">"#;
         assert_eq!(
-            referenced_assets(html, "https://boxcode.sh/artifacts/k9depef6"),
+            referenced_assets(html, "https://covexcode.com/artifacts/k9depef6"),
             vec![
-                "https://boxcode.sh/artifacts/assets/app.js".to_string(),
-                "https://boxcode.sh/artifacts/logo.png".to_string(),
+                "https://covexcode.com/artifacts/assets/app.js".to_string(),
+                "https://covexcode.com/artifacts/logo.png".to_string(),
             ]
         );
     }
@@ -1210,7 +1210,7 @@ mod tests {
 <link href="https://cdn.test/x.css" rel="stylesheet">
 <img src="data:image/png;base64,AAAA">
 <a href="#top">top</a>"##;
-        assert!(referenced_assets(html, "https://boxcode.sh/artifacts/abc").is_empty());
+        assert!(referenced_assets(html, "https://covexcode.com/artifacts/abc").is_empty());
     }
 
     /// A single-page app's routes are not files. Treating `<a href="/admin">`
@@ -1220,8 +1220,8 @@ mod tests {
         let html = r#"<a href="/admin/orders">Orders</a><a href="/">Home</a>
 <link rel="stylesheet" href="/artifacts/abc/assets/app.css">"#;
         assert_eq!(
-            referenced_assets(html, "https://boxcode.sh/artifacts/abc"),
-            vec!["https://boxcode.sh/artifacts/abc/assets/app.css".to_string()],
+            referenced_assets(html, "https://covexcode.com/artifacts/abc"),
+            vec!["https://covexcode.com/artifacts/abc/assets/app.css".to_string()],
             "only the stylesheet is a file; the routes are the app's business"
         );
     }
@@ -1233,8 +1233,8 @@ mod tests {
         let html = r#"<script src='/artifacts/abc/a.js'></script>
 <script src="/artifacts/abc/a.js"></script>"#;
         assert_eq!(
-            referenced_assets(html, "https://boxcode.sh/artifacts/abc"),
-            vec!["https://boxcode.sh/artifacts/abc/a.js".to_string()]
+            referenced_assets(html, "https://covexcode.com/artifacts/abc"),
+            vec!["https://covexcode.com/artifacts/abc/a.js".to_string()]
         );
     }
 
@@ -1243,8 +1243,8 @@ mod tests {
     fn a_stylesheet_with_a_query_string_is_still_a_stylesheet() {
         let html = r#"<link rel="stylesheet" href="/artifacts/abc/a.css?v=2">"#;
         assert_eq!(
-            referenced_assets(html, "https://boxcode.sh/artifacts/abc"),
-            vec!["https://boxcode.sh/artifacts/abc/a.css?v=2".to_string()]
+            referenced_assets(html, "https://covexcode.com/artifacts/abc"),
+            vec!["https://covexcode.com/artifacts/abc/a.css?v=2".to_string()]
         );
     }
 
@@ -1252,8 +1252,8 @@ mod tests {
 
     #[test]
     fn the_served_path_is_read_off_the_signed_url() {
-        assert_eq!(served_under("https://boxcode.sh/artifacts/k9depef6"), "/artifacts/k9depef6");
-        assert_eq!(served_under("https://boxcode.sh/artifacts/k9depef6/"), "/artifacts/k9depef6");
+        assert_eq!(served_under("https://covexcode.com/artifacts/k9depef6"), "/artifacts/k9depef6");
+        assert_eq!(served_under("https://covexcode.com/artifacts/k9depef6/"), "/artifacts/k9depef6");
         assert_eq!(served_under("https://example.test/a/b/c"), "/a/b/c");
         // A signer serving from the domain root has no prefix to add, and
         // rebasing must then be a no-op rather than inventing one.
@@ -1320,11 +1320,11 @@ mod tests {
         // stylesheet from the prefix -- the path that actually exists --
         // instead of one directory too high.
         assert_eq!(
-            referenced_assets(&text, "https://boxcode.sh/artifacts/abc"),
+            referenced_assets(&text, "https://covexcode.com/artifacts/abc"),
             vec![
-                "https://boxcode.sh/artifacts/abc/a/b.png".to_string(),
-                "https://boxcode.sh/artifacts/abc/assets/app.js".to_string(),
-                "https://boxcode.sh/artifacts/abc/style.css".to_string(),
+                "https://covexcode.com/artifacts/abc/a/b.png".to_string(),
+                "https://covexcode.com/artifacts/abc/assets/app.js".to_string(),
+                "https://covexcode.com/artifacts/abc/style.css".to_string(),
             ]
         );
     }
@@ -1927,9 +1927,9 @@ mod live_check {
         std::fs::write(dir.join("assets/app.js"), "console.log('spa')").unwrap();
         std::fs::write(dir.join("data.csv"), "a,b\n1,2\n").unwrap();
 
-        let endpoint = std::env::var("BOXCODE_ARTIFACT_ENDPOINT").unwrap_or_default();
+        let endpoint = std::env::var("COVEXCODE_ARTIFACT_ENDPOINT").unwrap_or_default();
         if endpoint.is_empty() {
-            eprintln!("skipping: BOXCODE_ARTIFACT_ENDPOINT unset");
+            eprintln!("skipping: COVEXCODE_ARTIFACT_ENDPOINT unset");
             return;
         }
         let published = publish(&dir, &endpoint).await.expect("publish");

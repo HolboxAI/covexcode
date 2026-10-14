@@ -5670,12 +5670,12 @@ mod tests {
     /// it stays visible; the brackets do not.
     #[test]
     fn a_link_keeps_its_label_and_its_url() {
-        let joined: String = markdown_lines("See [the docs](https://boxcode.sh) now.", 70)
+        let joined: String = markdown_lines("See [the docs](https://covexcode.com) now.", 70)
             .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
             .collect();
         assert!(joined.contains("the docs"), "{joined}");
-        assert!(joined.contains("https://boxcode.sh"), "{joined}");
+        assert!(joined.contains("https://covexcode.com"), "{joined}");
         assert!(!joined.contains('['), "{joined}");
     }
 
