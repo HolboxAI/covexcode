@@ -748,8 +748,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_deploy_of_a_real_backend() {
-        let endpoint = std::env::var("BOXCODE_BACKEND_ENDPOINT")
-            .unwrap_or_else(|_| "https://boxcode.sh/api/deploy".to_string());
+        let endpoint = std::env::var("COVEXCODE_BACKEND_ENDPOINT")
+            .unwrap_or_else(|_| "https://covexcode.com/api/deploy".to_string());
         let id = std::env::var("BOXCODE_TEST_ID").unwrap_or_else(|_| "e2etest99".to_string());
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -787,8 +787,8 @@ app.listen(process.env.PORT || 3000, "0.0.0.0");
     #[test]
     fn a_project_url_is_derived_from_the_endpoint_not_hard_coded() {
         assert_eq!(
-            project_url("https://boxcode.sh/api/deploy", "jqtqx9zf"),
-            "https://boxcode.sh/api/jqtqx9zf/"
+            project_url("https://covexcode.com/api/deploy", "jqtqx9zf"),
+            "https://covexcode.com/api/jqtqx9zf/"
         );
         // A different install must move the links with it, or /deploys prints
         // URLs pointing at somebody else's platform.
@@ -799,8 +799,8 @@ app.listen(process.env.PORT || 3000, "0.0.0.0");
         // A trailing slash on the configured endpoint must not produce a
         // doubled one in the link.
         assert_eq!(
-            project_url("https://boxcode.sh/api/deploy/", "abcd2345"),
-            "https://boxcode.sh/api/abcd2345/"
+            project_url("https://covexcode.com/api/deploy/", "abcd2345"),
+            "https://covexcode.com/api/abcd2345/"
         );
     }
 
