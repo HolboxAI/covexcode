@@ -10,8 +10,8 @@ Restart=on-failure
 RestartSec=2
 Environment=STORE_PATH=/opt/boxcode-errors/errors.json
 Environment=PORT=8083
-Environment=ALLOWED_ORIGIN=https://boxcode.sh
-Environment=SITE_BASE=https://boxcode.sh
+Environment=ALLOWED_ORIGIN=https://covexcode.com
+Environment=SITE_BASE=https://covexcode.com
 # Root only because /opt/boxcode-errors needs creating on first run, same
 # reasoning as the auth/db/requests control-planes -- this service shells out
 # to nothing and touches no other system state, so root is a wider grant than
