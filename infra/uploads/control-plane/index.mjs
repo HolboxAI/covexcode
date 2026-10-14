@@ -21,10 +21,10 @@ import { createServer } from "node:http";
 import { createHmac, createHash, randomUUID } from "node:crypto";
 
 const PORT = Number(process.env.PORT || 8083);
-const AUTH_BASE = process.env.AUTH_BASE || "https://auth.boxcode.sh";
+const AUTH_BASE = process.env.AUTH_BASE || "https://auth.covexcode.com";
 const BUCKET = process.env.BUCKET || "boxcode-artifacts";
 const REGION = process.env.REGION || "us-east-1";
-const PUBLIC_BASE = process.env.PUBLIC_BASE || "https://boxcode.sh";
+const PUBLIC_BASE = process.env.PUBLIC_BASE || "https://covexcode.com";
 // How long the presigned URL is valid for -- long enough for a slow mobile
 // upload to start, short enough that a leaked URL (e.g. in a browser
 // history or a proxy log) is useless soon after.

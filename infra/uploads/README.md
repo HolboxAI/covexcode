@@ -5,7 +5,7 @@ a profile picture, a review photo, a product photo -- without leaving
 boxcode to stand up S3/Cloudinary/etc. by hand, and without this box ever
 seeing the file's bytes.
 
-Reuses `auth.boxcode.sh`'s existing vhost and cert for the one call it
+Reuses `auth.covexcode.com`'s existing vhost and cert for the one call it
 serves (`POST /uploads`), same as `infra/db/` and `infra/requests/` --
 no new DNS or cert needed. Zero npm dependencies, same stance as the
 other control-planes: this hand-rolls AWS SigV4 presigned-URL signing
@@ -41,7 +41,7 @@ Node 22.5+ requirement).
    this for free.
 4. Returns `{put_url, public_url}`. The browser `PUT`s the file straight
    to `put_url` -- the bytes never pass through this process or this
-   box -- and `public_url` (served through boxcode.sh's own CloudFront,
+   box -- and `public_url` (served through covexcode.com's own CloudFront,
    see below) is what the page uses from then on.
 
 This process holds no state at all: no registry, no data directory,
@@ -75,7 +75,7 @@ refreshed once within five minutes of the expiry IMDS itself reports.
 
 Unlike `infra/auth/`/`infra/db/`/`infra/requests/`, the public-facing half
 of this feature isn't a route this repo's `setup.sh` writes -- it's two
-changes made directly against the `boxcode.sh` CloudFront distribution and
+changes made directly against the `covexcode.com` CloudFront distribution and
 its S3 bucket policy, by hand, once:
 
 - A new CloudFront cache behavior, `/uploads/*` -> the existing `s3`
@@ -102,7 +102,7 @@ does.
   with `403`, proving the URL genuinely constrains the upload rather than
   merely gating the destination path.
 - The full path was confirmed live end to end: sign -> `PUT` to S3 ->
-  `GET` the same object back through `https://boxcode.sh/uploads/...`,
+  `GET` the same object back through `https://covexcode.com/uploads/...`,
   actually served by CloudFront (`x-cache`/`via` headers present),
   `content-type` correct.
 
