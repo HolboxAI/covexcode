@@ -15,12 +15,12 @@
 # Idempotent -- meant to be re-run after any infra/hosting change.
 #
 # SKIP_TLS=1 does everything except the DNS check and certbot, so the rest can
-# be proven over plain HTTP before apps.boxcode.sh has an A record.
+# be proven over plain HTTP before apps.covexcode.com has an A record.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKIP_TLS="${SKIP_TLS:-0}"
-DOMAIN=apps.boxcode.sh
+DOMAIN=apps.covexcode.com
 
 FC_DIR=/opt/firecracker           # binaries and the guest kernel
 JAIL_ROOT=/srv/jailer             # must match JAIL_ROOT in runtime/machine.mjs

@@ -77,7 +77,7 @@ data "aws_ssm_parameter" "al2023" {
 }
 
 # CloudFront's own egress ranges, maintained by AWS. Using this rather than
-# 0.0.0.0/0 means resolving apps.boxcode.sh and hitting the origin directly gets
+# 0.0.0.0/0 means resolving apps.covexcode.com and hitting the origin directly gets
 # nothing, so WAF and the rate limits cannot be skipped by avoiding the edge.
 data "aws_ec2_managed_prefix_list" "cloudfront" {
   name = "com.amazonaws.global.cloudfront.origin-facing"
@@ -261,7 +261,7 @@ variable "allocate_eip" {
   description = <<-EOT
     Whether to give the runner a stable Elastic IP.
 
-    Required in production: apps.boxcode.sh points at it, and a certificate
+    Required in production: apps.covexcode.com points at it, and a certificate
     issued for a name that stops resolving here breaks every project. Not
     required to test, where the instance's auto-assigned address is enough and
     SKIP_TLS=1 skips the certificate entirely.
@@ -376,6 +376,6 @@ output "runner_instance_id" {
 }
 
 output "runner_public_ip" {
-  description = "Point apps.boxcode.sh at this, and set it as the CloudFront origin for /api/*. The Elastic IP when there is one, otherwise the instance's own address -- which changes on stop/start, so it is fine for testing and not for DNS."
+  description = "Point apps.covexcode.com at this, and set it as the CloudFront origin for /api/*. The Elastic IP when there is one, otherwise the instance's own address -- which changes on stop/start, so it is fine for testing and not for DNS."
   value       = var.allocate_eip ? one(aws_eip.runner[*].public_ip) : aws_instance.runner.public_ip
 }
