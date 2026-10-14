@@ -1,6 +1,6 @@
-# Base vhost for apps.boxcode.sh -- the origin CloudFront sends /api/* to.
+# Base vhost for apps.covexcode.com -- the origin CloudFront sends /api/* to.
 #
-# Like auth.boxcode.sh, this needs a real owned domain: Let's Encrypt refuses
+# Like auth.covexcode.com, this needs a real owned domain: Let's Encrypt refuses
 # *.compute.amazonaws.com outright ("forbidden by policy") because anyone can
 # get one for free, and an ACM cert cannot be handed to plain nginx at all.
 # See infra/auth/nginx/auth.conf.template, which learned this the hard way.
@@ -25,7 +25,7 @@
 # additions there, not here.
 server {
     listen 80;
-    server_name apps.boxcode.sh;
+    server_name apps.covexcode.com;
 
     # Hosted backends are demo apps, not CDNs. A small body cap costs nothing
     # legitimate and takes an easy amplification lever off the table.

@@ -7,7 +7,7 @@
 # same work on demand, for the two cases that will not wait: someone asking for
 # their own project to be removed, and someone else's project that has to come
 # down this minute -- a phishing page on the apex domain puts the reputation of
-# every other page on boxcode.sh at risk, and there the time to remove is the
+# every other page on covexcode.com at risk, and there the time to remove is the
 # only thing limiting the damage.
 #
 # Doing it by hand means composing three commands, knowing the slot, and

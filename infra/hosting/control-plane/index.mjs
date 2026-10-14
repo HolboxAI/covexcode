@@ -41,7 +41,7 @@ const HOST = process.env.HOST || "127.0.0.1";
 const REPO = process.env.BOXCODE_HOSTING_DIR || "/opt/boxcode-hosting";
 const STATE_DIR = process.env.BOXCODE_STATE_DIR || "/opt/boxcode-hosting/state";
 const APPS_DIR = process.env.APPS_DIR || "/opt/boxcode-apps";
-const SITE_BASE = process.env.SITE_BASE || "https://boxcode.sh";
+const SITE_BASE = process.env.SITE_BASE || "https://covexcode.com";
 
 const REGISTRY_PATH = join(STATE_DIR, "registry.json");
 const GATE_PATH = join(STATE_DIR, "gate.json");
