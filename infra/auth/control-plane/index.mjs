@@ -25,14 +25,14 @@ const run = promisify(execFile);
 
 const REGISTRY_PATH = process.env.REGISTRY_PATH || "/opt/boxcode-auth/registry.json";
 const NGINX_CONF_DIR = process.env.NGINX_CONF_DIR || "/etc/nginx/conf.d/auth-projects";
-const SITE_BASE = process.env.SITE_BASE || "https://boxcode.sh";
+const SITE_BASE = process.env.SITE_BASE || "https://covexcode.com";
 // A real, owned domain, not this box's own AWS-assigned hostname -- that
 // was tried first and Let's Encrypt refuses to issue for
 // `*.compute.amazonaws.com` ("forbidden by policy"), and ACM cannot
 // substitute either (same ownership requirement, plus its certs are not
 // usable by plain nginx at all). See infra/auth/README.md and setup.sh's
 // own header for the fuller explanation.
-const AUTH_BASE = process.env.AUTH_BASE || "https://auth.boxcode.sh";
+const AUTH_BASE = process.env.AUTH_BASE || "https://auth.covexcode.com";
 const PORT = Number(process.env.PORT || 8080);
 const GOTRUE_PORT_BASE = 9000;
 // Pinned, not `:latest` -- Supabase does not publish a `:latest` tag for

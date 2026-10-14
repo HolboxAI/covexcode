@@ -1,6 +1,6 @@
 # boxcode auth control-plane
 
-Gives a published boxcode artifact (`boxcode.sh/artifacts/<id>`) sign-up/
+Gives a published boxcode artifact (`covexcode.com/artifacts/<id>`) sign-up/
 sign-in, without the user leaving boxcode or standing up their own Supabase/
 Firebase project. Self-hosted [GoTrue](https://github.com/supabase/auth)
 (Supabase's standalone, Apache-2.0 auth server) — one container per project,
@@ -22,7 +22,7 @@ for routing between several backend services, and there is only one here
   route for it. Idempotent — calling it again for a project that already
   has a container just returns the same `auth_url`.
 - `control-plane/boxcode-auth-control-plane.service` — the systemd unit.
-- `nginx/auth.conf.template` — the base vhost for `auth.boxcode.sh`. This
+- `nginx/auth.conf.template` — the base vhost for `auth.covexcode.com`. This
   domain is not optional: an earlier version of this tried using the EC2
   instance's own AWS-assigned hostname instead (real and free, no DNS step
   needed), but Let's Encrypt refuses to issue for `*.compute.amazonaws.com`
@@ -30,14 +30,14 @@ for routing between several backend services, and there is only one here
   free, so it doesn't count as proof of ownership. AWS Certificate Manager
   doesn't substitute either -- same ownership requirement, and its certs
   can't be handed to a plain nginx process regardless. A real, owned domain
-  is required, and `auth.boxcode.sh`'s DNS is at Namecheap (`boxcode.sh`
+  is required, and `auth.covexcode.com`'s DNS is at Namecheap (`covexcode.com`
   is not in Route53) -- an A record pointing it at this box's IP has to
   exist before `setup.sh`'s certbot step will succeed. Per-project
   `location` blocks live in `/etc/nginx/conf.d/auth-projects/`, written by
   the control-plane service, never edited by hand.
 - `setup.sh` — idempotent bootstrap for a fresh Amazon Linux 2023 box:
   Docker, Postgres, nginx + certbot, Node, and the control-plane service
-  under systemd. Checks that `auth.boxcode.sh` actually resolves to the
+  under systemd. Checks that `auth.covexcode.com` actually resolves to the
   box before attempting the certbot step, with a clear message if not,
   rather than letting certbot's own error be the first sign of it.
 
@@ -57,8 +57,8 @@ git pull && bash infra/auth/setup.sh
 
 ## What each project's GoTrue instance looks like
 
-- `GOTRUE_SITE_URL` = that project's own `boxcode.sh/artifacts/<id>` URL.
-- `GOTRUE_URI_ALLOW_LIST` = `https://boxcode.sh`, since the published page
+- `GOTRUE_SITE_URL` = that project's own `covexcode.com/artifacts/<id>` URL.
+- `GOTRUE_URI_ALLOW_LIST` = `https://covexcode.com`, since the published page
   and the auth API are different origins (CORS).
 - `GOTRUE_MAILER_AUTOCONFIRM=true` — no SMTP is configured, so a signup
   that waited on a confirmation email would never complete. This is the
@@ -69,7 +69,7 @@ git pull && bash infra/auth/setup.sh
   service and every GoTrue container run with `--network host`, and
   Postgres is configured for peer auth on `local` connections only. Nothing
   here is reachable except through nginx.
-- `auth_url` in every response is `https://auth.boxcode.sh/<id>`.
+- `auth_url` in every response is `https://auth.covexcode.com/<id>`.
 
 ## What guards `/provision`
 
@@ -106,7 +106,7 @@ What bounds the damage instead needs no idea who is asking. Four checks run
    volume of requests can push past. An *existing* project still re-provisions
    at the cap, because that is how a crash-looped container gets healed.
 4. **The artifact must exist** — one `HEAD` against
-   `https://boxcode.sh/artifacts/<id>`. This is what makes an id cost
+   `https://covexcode.com/artifacts/<id>`. This is what makes an id cost
    something: you cannot provision a project that was never published, so an
    attacker has to publish first, which is itself rate-limited, attributable
    and expiring. Fails closed — a network error means "cannot confirm".

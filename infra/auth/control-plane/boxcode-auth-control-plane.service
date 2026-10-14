@@ -9,7 +9,7 @@ Restart=on-failure
 RestartSec=2
 Environment=REGISTRY_PATH=/opt/boxcode-auth/registry.json
 Environment=NGINX_CONF_DIR=/etc/nginx/conf.d/auth-projects
-Environment=SITE_BASE=https://boxcode.sh
+Environment=SITE_BASE=https://covexcode.com
 Environment=PORT=8080
 # The ceiling on live projects. Every one is a container holding 30-50MB
 # and a Postgres database, on a 2GB box -- so this is the number past which
@@ -27,7 +27,7 @@ Environment=RATE_LIMIT=5
 # republishing to the same id is ordinary.
 Environment=REAP_AFTER_HOURS=72
 # AUTH_BASE is deliberately not set here: index.mjs already defaults to
-# https://auth.boxcode.sh. Override only if this box is ever reachable
+# https://auth.covexcode.com. Override only if this box is ever reachable
 # under a different domain.
 # Needs root: it runs `docker run`, `sudo -u postgres psql`, and reloads
 # nginx. All three are already root-equivalent operations on this box; a
