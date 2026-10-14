@@ -21,7 +21,7 @@ const PORT = Number(process.env.PORT || 8082);
 // from -- SITE_BASE in the auth control-plane, kept as its own env var here
 // rather than importing that file, since this is a separate process with
 // its own deploy story.
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://boxcode.sh";
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://covexcode.com";
 
 // Same shape as the auth/db control-planes' PROJECT_ID_RE: an artifact id
 // is how every project is identified everywhere in boxcode.
