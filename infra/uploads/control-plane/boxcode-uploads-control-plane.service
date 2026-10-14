@@ -10,10 +10,10 @@ ExecStart=/usr/bin/node /opt/boxcode-uploads/control-plane/index.mjs
 Restart=on-failure
 RestartSec=2
 Environment=PORT=8083
-Environment=AUTH_BASE=https://auth.boxcode.sh
+Environment=AUTH_BASE=https://auth.covexcode.com
 Environment=BUCKET=boxcode-artifacts
 Environment=REGION=us-east-1
-Environment=PUBLIC_BASE=https://boxcode.sh
+Environment=PUBLIC_BASE=https://covexcode.com
 # Root only for consistency with the other control-planes on this box, not
 # because this one needs it -- it touches no local filesystem state at all
 # (no registry, no data directory), only IMDS and outbound HTTPS. Signing
