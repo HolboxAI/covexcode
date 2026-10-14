@@ -50,7 +50,7 @@ const PORT = Number(process.env.PORT || 8081);
 // Set HOST=0.0.0.0 to also accept connections from inside the VPC. That is
 // what boxcode-hosted backends need -- they run with no route to the public
 // internet by design, so they cannot reach this service the way the agent
-// does, via https://auth.boxcode.sh. Whatever can reach the port is then
+// does, via https://auth.covexcode.com. Whatever can reach the port is then
 // decided by the instance's security group, which is the right place for it.
 const HOST = process.env.HOST || "127.0.0.1";
 
@@ -72,7 +72,7 @@ const MAX_DB_BYTES = Number(process.env.MAX_DB_BYTES || 50 * 1024 * 1024);
 // the same domain, and a project's auth is always reachable at
 // `${AUTH_BASE}/${projectId}/`, the nginx route writeNginxConf there sets
 // up. Overridable independently in case that ever stops being true.
-const AUTH_BASE = process.env.AUTH_BASE || "https://auth.boxcode.sh";
+const AUTH_BASE = process.env.AUTH_BASE || "https://auth.covexcode.com";
 
 // Same shape as the auth control-plane's PROJECT_ID_RE: an artifact id is
 // how every project is identified everywhere in boxcode, so this has to

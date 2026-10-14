@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Adds the db control-plane to a box that has already run
 # infra/auth/setup.sh -- this assumes nginx, its cert, and the base
-# auth.boxcode.sh vhost already exist, and only adds this feature's own
+# auth.covexcode.com vhost already exist, and only adds this feature's own
 # systemd service plus one new nginx route for it. Does not touch certbot,
 # and deliberately does NOT touch /etc/nginx/conf.d/auth.conf itself:
 # once certbot has run on this box, that file has its own TLS server block
