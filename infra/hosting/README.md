@@ -399,7 +399,7 @@ Without that check it surfaces much later as a confusing permissions error on th
 first deploy. Nested virtualization can only be changed while the instance is
 **stopped**.
 
-Point `apps.boxcode.sh` at the Elastic IP before the certbot step, or use
+Point `apps.covexcode.com` at the Elastic IP before the certbot step, or use
 `SKIP_TLS=1` to prove everything else first.
 
 **No control-plane yet**, so no deploys. `setup.sh` finishes with a clear message
