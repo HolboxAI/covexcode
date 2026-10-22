@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("covexcode {VERSION}");
                 return Ok(());
             }
-            // An ACP client (boxcode-ide) shells out to this to build its own
+            // An ACP client (covexcode-ide) shells out to this to build its own
             // provider picker from the same registry `/provider` uses in the
             // TUI, rather than hand-copying the table into TypeScript.
             "--providers-json" => {
@@ -1002,6 +1002,8 @@ COMMANDS (type in the input box, press Enter):
     /quota clear          Remove your own limits
     /quota override       Keep working past today's limit
     /quota reset          Cancel an override
+    /doctor               Check this install's health
+    /help                 List every slash command
 
 DEPLOYMENT (ask the model, e.g. 'deploy this to Vercel'; see [deploy] in
             config.toml):

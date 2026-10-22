@@ -170,6 +170,8 @@ to ask for the same thing.
 | `/compact` | Summarize the conversation now, freeing context |
 | `/usage` | Local token usage — today, last 7 days, all time |
 | `/rollback` | Undo every file the model wrote this session (asks first) |
+| `/doctor` | Check this install's health — version, config, provider, key presence |
+| `/help` | List every slash command |
 
 `/provider` and `/model` write to `~/.covexcode/config.toml` and apply
 immediately, no restart needed.
