@@ -132,7 +132,10 @@ mod tests {
             .expect("deepseek must be present");
         assert_eq!(deepseek["label"], "DeepSeek");
         assert_eq!(deepseek["endpoint"], "https://api.deepseek.com");
-        assert!(deepseek["models"].as_array().unwrap().contains(&serde_json::json!("deepseek-v4-pro")));
+        assert!(deepseek["models"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("deepseek-v4-pro")));
     }
 
     /// DeepSeek is the one provider with a specific, on-record reason to

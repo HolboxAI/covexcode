@@ -180,17 +180,33 @@ const PYTHON_MANIFESTS: &[&str] = &["requirements.txt", "pyproject.toml", "Pipfi
 /// Where a Node app usually lives, most conventional first. Only consulted
 /// when `package.json` has no `main`.
 const NODE_ENTRYPOINTS: &[&str] = &[
-    "index.js", "index.mjs", "server.js", "app.js",
-    "src/index.js", "src/index.mjs", "src/server.js", "src/app.js",
-    "index.ts", "src/index.ts", "server.ts", "src/server.ts",
+    "index.js",
+    "index.mjs",
+    "server.js",
+    "app.js",
+    "src/index.js",
+    "src/index.mjs",
+    "src/server.js",
+    "src/app.js",
+    "index.ts",
+    "src/index.ts",
+    "server.ts",
+    "src/server.ts",
 ];
 
 /// Same for Python. `manage.py` is deliberately absent: it is Django's CLI,
 /// not its app, and wrapping it would produce something that runs migrations
 /// rather than serves requests.
 const PYTHON_ENTRYPOINTS: &[&str] = &[
-    "main.py", "app.py", "application.py", "asgi.py", "wsgi.py",
-    "src/main.py", "src/app.py", "app/main.py", "api/main.py",
+    "main.py",
+    "app.py",
+    "application.py",
+    "asgi.py",
+    "wsgi.py",
+    "src/main.py",
+    "src/app.py",
+    "app/main.py",
+    "api/main.py",
 ];
 
 /// Packages that compile against the host when installed.
@@ -202,13 +218,35 @@ const PYTHON_ENTRYPOINTS: &[&str] = &[
 /// cleanly and then fails at import time, which is the least debuggable
 /// failure available.
 const NATIVE_NODE: &[&str] = &[
-    "bcrypt", "sharp", "canvas", "sqlite3", "better-sqlite3", "node-gyp",
-    "grpc", "@grpc/grpc-js", "node-sass", "sass-embedded", "argon2",
-    "@tensorflow/tfjs-node", "puppeteer", "playwright",
+    "bcrypt",
+    "sharp",
+    "canvas",
+    "sqlite3",
+    "better-sqlite3",
+    "node-gyp",
+    "grpc",
+    "@grpc/grpc-js",
+    "node-sass",
+    "sass-embedded",
+    "argon2",
+    "@tensorflow/tfjs-node",
+    "puppeteer",
+    "playwright",
 ];
 const NATIVE_PYTHON: &[&str] = &[
-    "psycopg2", "pillow", "numpy", "scipy", "pandas", "lxml", "cryptography",
-    "grpcio", "pyarrow", "mysqlclient", "bcrypt", "cffi", "matplotlib",
+    "psycopg2",
+    "pillow",
+    "numpy",
+    "scipy",
+    "pandas",
+    "lxml",
+    "cryptography",
+    "grpcio",
+    "pyarrow",
+    "mysqlclient",
+    "bcrypt",
+    "cffi",
+    "matplotlib",
 ];
 
 /// Read a directory as a backend.
@@ -394,7 +432,9 @@ fn node_dependencies(manifest: Option<&Value>) -> Vec<String> {
 /// understand markers, extras, editable installs and `-r` includes, and none
 /// of that changes the answer to "is fastapi in here".
 fn python_dependencies(root: &Path, manifest: Option<&str>) -> Vec<String> {
-    let Some(name) = manifest else { return Vec::new() };
+    let Some(name) = manifest else {
+        return Vec::new();
+    };
     let Ok(text) = std::fs::read_to_string(root.join(name)) else {
         return Vec::new();
     };
@@ -464,13 +504,20 @@ mod tests {
         assert_eq!(p.framework, BackendFramework::Express);
         assert_eq!(p.runtime, Runtime::Node);
         assert_eq!(p.entrypoint.as_deref(), Some("index.js"));
-        assert!(p.markers.iter().any(|m| m.contains("express")), "{:?}", p.markers);
+        assert!(
+            p.markers.iter().any(|m| m.contains("express")),
+            "{:?}",
+            p.markers
+        );
     }
 
     #[test]
     fn a_fastapi_app_is_python() {
         let dir = project(&[
-            ("requirements.txt", "fastapi==0.111.0\nuvicorn[standard]>=0.29\n"),
+            (
+                "requirements.txt",
+                "fastapi==0.111.0\nuvicorn[standard]>=0.29\n",
+            ),
             ("main.py", "from fastapi import FastAPI\napp = FastAPI()\n"),
         ]);
         let p = detect_backend(dir.path()).expect("detected");
@@ -482,10 +529,22 @@ mod tests {
     #[test]
     fn flask_fastify_koa_and_nest_are_each_recognised() {
         for (files, expected) in [
-            (vec![("package.json", pkg(r#""fastify":"^4""#))], BackendFramework::Fastify),
-            (vec![("package.json", pkg(r#""koa":"^2""#))], BackendFramework::Koa),
-            (vec![("package.json", pkg(r#""@nestjs/core":"^10""#))], BackendFramework::Nest),
-            (vec![("requirements.txt", "flask==3.0.0\n".to_string())], BackendFramework::Flask),
+            (
+                vec![("package.json", pkg(r#""fastify":"^4""#))],
+                BackendFramework::Fastify,
+            ),
+            (
+                vec![("package.json", pkg(r#""koa":"^2""#))],
+                BackendFramework::Koa,
+            ),
+            (
+                vec![("package.json", pkg(r#""@nestjs/core":"^10""#))],
+                BackendFramework::Nest,
+            ),
+            (
+                vec![("requirements.txt", "flask==3.0.0\n".to_string())],
+                BackendFramework::Flask,
+            ),
         ] {
             let owned: Vec<(&str, &str)> = files.iter().map(|(n, c)| (*n, c.as_str())).collect();
             let dir = project(&owned);
@@ -498,7 +557,10 @@ mod tests {
     /// has to win or every Nest project files as Express.
     #[test]
     fn nest_outranks_the_express_it_is_built_on() {
-        let dir = project(&[("package.json", &pkg(r#""@nestjs/core":"^10","express":"^4""#))]);
+        let dir = project(&[(
+            "package.json",
+            &pkg(r#""@nestjs/core":"^10","express":"^4""#),
+        )]);
         assert_eq!(
             detect_backend(dir.path()).unwrap().framework,
             BackendFramework::Nest
@@ -511,7 +573,10 @@ mod tests {
     fn a_server_framework_outranks_a_stray_manifest() {
         let dir = project(&[
             ("requirements.txt", "fastapi\n"),
-            ("package.json", r#"{"name":"tooling","devDependencies":{"prettier":"^3"}}"#),
+            (
+                "package.json",
+                r#"{"name":"tooling","devDependencies":{"prettier":"^3"}}"#,
+            ),
             ("main.py", "app = 1\n"),
         ]);
         let p = detect_backend(dir.path()).expect("detected");
@@ -523,10 +588,17 @@ mod tests {
     /// no manifest entry.
     #[test]
     fn django_is_found_by_manage_py_without_a_declared_dependency() {
-        let dir = project(&[("requirements.txt", "gunicorn\n"), ("manage.py", "#!/usr/bin/env python\n")]);
+        let dir = project(&[
+            ("requirements.txt", "gunicorn\n"),
+            ("manage.py", "#!/usr/bin/env python\n"),
+        ]);
         let p = detect_backend(dir.path()).expect("detected");
         assert_eq!(p.framework, BackendFramework::Django);
-        assert!(p.markers.iter().any(|m| m == "manage.py"), "{:?}", p.markers);
+        assert!(
+            p.markers.iter().any(|m| m == "manage.py"),
+            "{:?}",
+            p.markers
+        );
     }
 
     // ---- entrypoints -------------------------------------------------------
@@ -534,7 +606,10 @@ mod tests {
     #[test]
     fn package_main_beats_convention() {
         let dir = project(&[
-            ("package.json", r#"{"main":"src/server.js","dependencies":{"express":"^4"}}"#),
+            (
+                "package.json",
+                r#"{"main":"src/server.js","dependencies":{"express":"^4"}}"#,
+            ),
             ("index.js", "// a decoy the convention would have picked\n"),
             ("src/server.js", "module.exports = app\n"),
         ]);
@@ -547,7 +622,10 @@ mod tests {
     #[test]
     fn a_main_that_does_not_exist_falls_back_to_convention() {
         let dir = project(&[
-            ("package.json", r#"{"main":"dist/bundle.js","dependencies":{"express":"^4"}}"#),
+            (
+                "package.json",
+                r#"{"main":"dist/bundle.js","dependencies":{"express":"^4"}}"#,
+            ),
             ("server.js", "module.exports = app\n"),
         ]);
         assert_eq!(
@@ -562,7 +640,9 @@ mod tests {
         let p = detect_backend(dir.path()).expect("still detected");
         assert!(p.entrypoint.is_none());
         assert!(
-            p.warnings.iter().any(|w| w.contains("No obvious entrypoint")),
+            p.warnings
+                .iter()
+                .any(|w| w.contains("No obvious entrypoint")),
             "{:?}",
             p.warnings
         );
@@ -581,9 +661,16 @@ mod tests {
 
     #[test]
     fn native_modules_are_named_individually() {
-        let dir = project(&[("package.json", &pkg(r#""express":"^4","bcrypt":"^5","sharp":"^0.33""#))]);
+        let dir = project(&[(
+            "package.json",
+            &pkg(r#""express":"^4","bcrypt":"^5","sharp":"^0.33""#),
+        )]);
         let p = detect_backend(dir.path()).expect("detected");
-        let w = p.warnings.iter().find(|w| w.contains("compile against")).expect("warned");
+        let w = p
+            .warnings
+            .iter()
+            .find(|w| w.contains("compile against"))
+            .expect("warned");
         assert!(w.contains("bcrypt"), "{w}");
         assert!(w.contains("sharp"), "{w}");
     }
@@ -592,16 +679,27 @@ mod tests {
     fn python_natives_are_named_too() {
         let dir = project(&[("requirements.txt", "fastapi\npsycopg2==2.9.9\npillow>=10\n")]);
         let p = detect_backend(dir.path()).expect("detected");
-        let w = p.warnings.iter().find(|w| w.contains("compile against")).expect("warned");
+        let w = p
+            .warnings
+            .iter()
+            .find(|w| w.contains("compile against"))
+            .expect("warned");
         assert!(w.contains("psycopg2"), "{w}");
         assert!(w.contains("pillow"), "{w}");
     }
 
     #[test]
     fn a_clean_project_gets_no_native_warning() {
-        let dir = project(&[("package.json", &pkg(r#""express":"^4""#)), ("index.js", "x\n")]);
+        let dir = project(&[
+            ("package.json", &pkg(r#""express":"^4""#)),
+            ("index.js", "x\n"),
+        ]);
         let p = detect_backend(dir.path()).expect("detected");
-        assert!(!p.warnings.iter().any(|w| w.contains("compile against")), "{:?}", p.warnings);
+        assert!(
+            !p.warnings.iter().any(|w| w.contains("compile against")),
+            "{:?}",
+            p.warnings
+        );
     }
 
     /// Said for every backend, because it is the first thing a working one
@@ -617,7 +715,9 @@ mod tests {
             let dir = project(&owned);
             let p = detect_backend(dir.path()).expect("detected");
             assert!(
-                p.warnings.iter().any(|w| w.contains("no outbound internet")),
+                p.warnings
+                    .iter()
+                    .any(|w| w.contains("no outbound internet")),
                 "{:?}",
                 p.warnings
             );
@@ -646,12 +746,17 @@ mod tests {
 
     #[test]
     fn an_unrecognised_server_is_still_deployable_and_says_so() {
-        let dir = project(&[("package.json", r#"{"name":"x","main":"index.js"}"#), ("index.js", "x\n")]);
+        let dir = project(&[
+            ("package.json", r#"{"name":"x","main":"index.js"}"#),
+            ("index.js", "x\n"),
+        ]);
         let p = detect_backend(dir.path()).expect("detected");
         assert_eq!(p.framework, BackendFramework::Plain);
         assert!(!p.framework.is_recognised());
         assert!(
-            p.warnings.iter().any(|w| w.contains("No server framework recognised")),
+            p.warnings
+                .iter()
+                .any(|w| w.contains("No server framework recognised")),
             "{:?}",
             p.warnings
         );
@@ -664,12 +769,19 @@ mod tests {
     #[test]
     fn a_published_backend_is_detected_so_the_publish_can_offer_it() {
         let dir = project(&[
-            ("package.json", r#"{"name":"shop","dependencies":{"express":"^4.19.0"}}"#),
+            (
+                "package.json",
+                r#"{"name":"shop","dependencies":{"express":"^4.19.0"}}"#,
+            ),
             ("server.js", "require('express')()\n"),
         ]);
         let p = detect_backend(dir.path()).expect("an Express app is a backend");
         assert_eq!(p.framework, BackendFramework::Express);
-        assert_eq!(p.framework.label(), "Express", "the label goes into the suggestion verbatim");
+        assert_eq!(
+            p.framework.label(),
+            "Express",
+            "the label goes into the suggestion verbatim"
+        );
     }
 
     /// A frontend is not a backend. Detecting one as such would package a
@@ -677,7 +789,10 @@ mod tests {
     #[test]
     fn a_plain_react_frontend_is_not_recognised_as_a_server() {
         let dir = project(&[
-            ("package.json", &pkg(r#""react":"^18","react-dom":"^18","vite":"^5""#)),
+            (
+                "package.json",
+                &pkg(r#""react":"^18","react-dom":"^18","vite":"^5""#),
+            ),
             ("index.html", "<html></html>"),
         ]);
         let p = detect_backend(dir.path()).expect("has a manifest, so it parses");
@@ -701,4 +816,3 @@ mod tests {
         assert!(!deps.iter().any(|d| d.starts_with('#')), "{deps:?}");
     }
 }
-

@@ -50,8 +50,7 @@ pub struct Deployment {
     pub detail: Option<String>,
 }
 
-impl Deployment {
-}
+impl Deployment {}
 
 fn history_path() -> Option<PathBuf> {
     // Via `config`, not derived here: that is the one place that inherits the

@@ -70,7 +70,9 @@ impl Kind {
     }
 
     pub fn style(self) -> Style {
-        Style::default().fg(self.color()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.color())
+            .add_modifier(Modifier::BOLD)
     }
 
     /// A glyph, so the kind is legible before any text is read.
@@ -225,8 +227,17 @@ mod tests {
     /// unreadable.
     #[test]
     fn actionable_kinds_are_amber_and_faults_are_red() {
-        for k in [Kind::DailyLimit, Kind::ContextFull, Kind::Truncated, Kind::RateLimited] {
-            assert_eq!(k.color(), theme::p().warning, "{k:?} is expected, not a fault");
+        for k in [
+            Kind::DailyLimit,
+            Kind::ContextFull,
+            Kind::Truncated,
+            Kind::RateLimited,
+        ] {
+            assert_eq!(
+                k.color(),
+                theme::p().warning,
+                "{k:?} is expected, not a fault"
+            );
         }
         for k in [Kind::Auth, Kind::Offline, Kind::Provider, Kind::Other] {
             assert_eq!(k.color(), theme::p().danger, "{k:?} is a fault");
@@ -255,7 +266,12 @@ mod tests {
     /// the line that sometimes matters.
     #[test]
     fn hints_name_a_real_next_step() {
-        for k in [Kind::DailyLimit, Kind::ContextFull, Kind::Truncated, Kind::Auth] {
+        for k in [
+            Kind::DailyLimit,
+            Kind::ContextFull,
+            Kind::Truncated,
+            Kind::Auth,
+        ] {
             let hint = k.hint().expect("should have a hint");
             assert!(
                 hint.contains('/') || hint.contains("max_tokens") || hint.contains("Wait"),

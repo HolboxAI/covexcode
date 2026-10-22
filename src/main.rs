@@ -2,8 +2,8 @@ mod agent;
 mod app;
 mod approval;
 mod artifacts;
-mod backend;
 mod auth;
+mod backend;
 mod clipboard;
 mod config;
 mod contrast;
@@ -14,10 +14,13 @@ mod deploy;
 mod diff;
 mod errors;
 mod headless;
+mod history;
 mod llm;
 mod login;
+mod mcp;
 mod notice;
 mod plan;
+mod projects;
 mod protocol;
 mod providers;
 mod quota;
@@ -25,18 +28,16 @@ mod requests;
 mod rollback;
 mod session;
 mod telemetry;
-mod tools;
 mod theme;
+mod tools;
 mod transport;
 mod ui;
 mod upgrade;
 mod usage;
 mod workspace;
-mod mcp;
 
 use app::App;
 use config::{ApprovalMode, Config};
-use workspace::Workspace;
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -54,6 +55,7 @@ use std::error::Error;
 use std::io;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use workspace::Workspace;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -80,8 +82,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "--providers-json" => {
                 println!(
                     "{}",
-                    serde_json::to_string(providers::PROVIDERS)
-                        .expect("PROVIDERS must serialize")
+                    serde_json::to_string(providers::PROVIDERS).expect("PROVIDERS must serialize")
                 );
                 return Ok(());
             }
@@ -183,6 +184,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .or_else(|_| std::env::var("BOXCODE_PULL_DIR"))
         .ok();
     let (workspace, workspace_status) = open_workspace(&config, pull_dir.as_deref());
+    if let Some(ws) = workspace.as_ref() {
+        projects::record_access(ws.root());
+    }
 
     // Detached, not awaited: a slow or unreachable telemetry endpoint must
     // never delay the terminal coming up. See telemetry.rs -- this is a
@@ -236,12 +240,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app.quota = quota::DailyQuota::load(&quota::today());
     }
     app.workspace_status = workspace_status;
+    app.prompt_history = history::load_prompts();
     // Said once, on the welcome screen: a migration nobody is told about is
     // one nobody can verify.
     if migrating {
         app.startup_notices.push(
-            "Renamed to covexcode: your settings and history moved into ~/.covexcode."
-                .to_string(),
+            "Renamed to covexcode: your settings and history moved into ~/.covexcode.".to_string(),
         );
     }
     for name in config::deprecated_env_vars_in_use() {
@@ -530,7 +534,12 @@ fn flush_to_scrollback<B: ratatui::backend::Backend>(
         let lines = ui::welcome_lines(app, text_width);
         let height = lines.len() as u16;
         terminal.insert_before(height, |buf| {
-            let area = Rect { x: 0, y: 0, width, height };
+            let area = Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            };
             ratatui::widgets::Paragraph::new(lines)
                 .block(
                     ratatui::widgets::Block::default()
@@ -551,14 +560,16 @@ fn flush_to_scrollback<B: ratatui::backend::Backend>(
         // before it are deliberate blank lines in the reply, and a chunk now
         // spans several lines (see `safe_flush_end`), so stripping the lot
         // would swallow the paragraph break after a table or code block.
-        let lines: Vec<_> = ui::wrapped_lines(
-            text.strip_suffix('\n').unwrap_or(&text),
-            text_width,
-        );
+        let lines: Vec<_> = ui::wrapped_lines(text.strip_suffix('\n').unwrap_or(&text), text_width);
         if !lines.is_empty() {
             let height = lines.len() as u16;
             terminal.insert_before(height, |buf| {
-                let area = Rect { x: 0, y: 0, width, height };
+                let area = Rect {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                };
                 ratatui::widgets::Paragraph::new(lines)
                     .block(
                         ratatui::widgets::Block::default()
@@ -579,7 +590,12 @@ fn flush_to_scrollback<B: ratatui::backend::Backend>(
         }
         let height = lines.len() as u16;
         terminal.insert_before(height, |buf| {
-            let area = Rect { x: 0, y: 0, width, height };
+            let area = Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            };
             ratatui::widgets::Paragraph::new(lines)
                 .block(
                     ratatui::widgets::Block::default()
@@ -803,7 +819,8 @@ async fn run_app<B: ratatui::backend::Backend>(
         // before the agent steps below, so a rollback always lands before
         // whatever the next turn does.
         if let Some(steps) = app.rollback_request.take() {
-            app.finish_rollback(rollback::apply(&steps));
+            let target_turn = app.pending_rollback_query.take();
+            app.finish_query_rollback(rollback::apply(&steps), target_turn);
         }
 
         // The agent loop's two active steps: fire the request `App` queued,
@@ -1099,16 +1116,28 @@ mod tests {
     #[test]
     fn clearing_erases_the_scrollback_not_just_the_screen() {
         let sequence = String::from_utf8(CLEAR_SCROLLBACK.to_vec()).expect("ascii");
-        assert!(sequence.contains("\u{1b}[3J"), "missing the saved-lines erase: {sequence:?}");
-        assert!(sequence.contains("\u{1b}[2J"), "missing the screen erase: {sequence:?}");
-        assert!(sequence.contains("\u{1b}[H"), "missing the cursor home: {sequence:?}");
+        assert!(
+            sequence.contains("\u{1b}[3J"),
+            "missing the saved-lines erase: {sequence:?}"
+        );
+        assert!(
+            sequence.contains("\u{1b}[2J"),
+            "missing the screen erase: {sequence:?}"
+        );
+        assert!(
+            sequence.contains("\u{1b}[H"),
+            "missing the cursor home: {sequence:?}"
+        );
     }
 
     /// Every case where wiping the screen would cost more than it is worth.
     #[test]
     fn nothing_is_wiped_when_something_is_worth_keeping() {
         let on = config::UiConfig::default();
-        let off = config::UiConfig { clear_on_exit: false, ..Default::default() };
+        let off = config::UiConfig {
+            clear_on_exit: false,
+            ..Default::default()
+        };
 
         // The ordinary quit.
         assert!(should_clear_on_exit(&on, false, true));
@@ -1162,10 +1191,12 @@ mod tests {
         let mut config = Config::default();
         config.tools.workspace = configured.path().display().to_string();
 
-        let (ws, _status) =
-            open_workspace(&config, Some(&picked.path().display().to_string()));
+        let (ws, _status) = open_workspace(&config, Some(&picked.path().display().to_string()));
         let ws = ws.expect("workspace should open");
-        assert_eq!(ws.root(), picked.path().canonicalize().expect("canonicalize"));
+        assert_eq!(
+            ws.root(),
+            picked.path().canonicalize().expect("canonicalize")
+        );
     }
 
     /// No override at all (an ordinary launch, not a `/pull` relaunch) still
@@ -1179,6 +1210,9 @@ mod tests {
 
         let (ws, _status) = open_workspace(&config, None);
         let ws = ws.expect("workspace should open");
-        assert_eq!(ws.root(), configured.path().canonicalize().expect("canonicalize"));
+        assert_eq!(
+            ws.root(),
+            configured.path().canonicalize().expect("canonicalize")
+        );
     }
 }

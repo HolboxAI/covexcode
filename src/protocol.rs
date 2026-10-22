@@ -172,13 +172,19 @@ pub struct RpcNotification {
 impl RpcNotification {
     /// One line of NDJSON, `\n`-terminated, ready to write to a stdout pipe.
     pub fn to_ndjson_line(&self) -> String {
-        format!("{}\n", serde_json::to_string(self).expect("RpcNotification always serializes"))
+        format!(
+            "{}\n",
+            serde_json::to_string(self).expect("RpcNotification always serializes")
+        )
     }
 }
 
 impl RpcRequest {
     pub fn to_ndjson_line(&self) -> String {
-        format!("{}\n", serde_json::to_string(self).expect("RpcRequest always serializes"))
+        format!(
+            "{}\n",
+            serde_json::to_string(self).expect("RpcRequest always serializes")
+        )
     }
 }
 
@@ -199,9 +205,17 @@ pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion(1);
 pub struct InitializeRequest {
     #[serde(rename = "protocolVersion")]
     pub protocol_version: ProtocolVersion,
-    #[serde(rename = "clientCapabilities", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "clientCapabilities",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub client_capabilities: Option<serde_json::Value>,
-    #[serde(rename = "clientInfo", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "clientInfo",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub client_info: Option<Implementation>,
 }
 
@@ -377,10 +391,7 @@ pub enum SessionUpdate {
     #[serde(rename = "plan")]
     Plan(Plan),
     #[serde(rename = "usage_update")]
-    UsageUpdate {
-        used: u64,
-        size: u64,
-    },
+    UsageUpdate { used: u64, size: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -702,9 +713,15 @@ pub fn standard_options() -> Vec<PermissionOption> {
 impl From<CheckInBrowserOutcome> for BrowserCheckResult {
     fn from(outcome: CheckInBrowserOutcome) -> Self {
         match outcome {
-            CheckInBrowserOutcome::Screenshot { mime_type, data, ax_tree } => {
-                BrowserCheckResult::Screenshot { mime_type, data, ax_tree }
-            }
+            CheckInBrowserOutcome::Screenshot {
+                mime_type,
+                data,
+                ax_tree,
+            } => BrowserCheckResult::Screenshot {
+                mime_type,
+                data,
+                ax_tree,
+            },
             CheckInBrowserOutcome::Failed { reason } => BrowserCheckResult::Failed(reason),
         }
     }
@@ -746,9 +763,15 @@ pub enum InteractInBrowserOutcome {
 impl From<InteractInBrowserOutcome> for BrowserInteractResult {
     fn from(outcome: InteractInBrowserOutcome) -> Self {
         match outcome {
-            InteractInBrowserOutcome::Screenshot { mime_type, data, ax_tree } => {
-                BrowserInteractResult::Screenshot { mime_type, data, ax_tree }
-            }
+            InteractInBrowserOutcome::Screenshot {
+                mime_type,
+                data,
+                ax_tree,
+            } => BrowserInteractResult::Screenshot {
+                mime_type,
+                data,
+                ax_tree,
+            },
             InteractInBrowserOutcome::Failed { reason } => BrowserInteractResult::Failed(reason),
         }
     }
@@ -939,7 +962,9 @@ impl From<&ToolOutcome> for ToolCallUpdate {
             title: None,
             kind: None,
             status: Some(ToolCallStatus::Completed),
-            content: Some(ToolCallContent::Text { text: outcome.content.clone() }),
+            content: Some(ToolCallContent::Text {
+                text: outcome.content.clone(),
+            }),
         }
     }
 }
@@ -951,7 +976,10 @@ impl ApiUsage {
     /// model's context window, `0` when covexcode doesn't know it (the client
     /// then omits the "of M" half rather than inventing a limit).
     pub fn to_usage_update(&self, size: u64) -> SessionUpdate {
-        SessionUpdate::UsageUpdate { used: self.total() as u64, size }
+        SessionUpdate::UsageUpdate {
+            used: self.total() as u64,
+            size,
+        }
     }
 }
 
@@ -1003,7 +1031,9 @@ mod tests {
     fn a_prompt_request_matches_the_documented_v1_shape() {
         let req = PromptRequest {
             session_id: SessionId("sess_1".to_string()),
-            prompt: vec![ContentBlock::Text { text: "start a new webapp project".to_string() }],
+            prompt: vec![ContentBlock::Text {
+                text: "start a new webapp project".to_string(),
+            }],
             mode: None,
         };
         let value = serde_json::to_value(&req).unwrap();
@@ -1021,8 +1051,13 @@ mod tests {
         let req = PromptRequest {
             session_id: SessionId("sess_1".to_string()),
             prompt: vec![
-                ContentBlock::Text { text: "what's wrong with this button?".to_string() },
-                ContentBlock::Image { data: "aGVsbG8=".to_string(), mime_type: "image/png".to_string() },
+                ContentBlock::Text {
+                    text: "what's wrong with this button?".to_string(),
+                },
+                ContentBlock::Image {
+                    data: "aGVsbG8=".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
             ],
             mode: None,
         };
@@ -1041,7 +1076,10 @@ mod tests {
 
     #[test]
     fn a_prompt_response_carries_the_stop_reason_snake_case() {
-        let resp = PromptResponse { stop_reason: StopReason::EndTurn, turn: 1 };
+        let resp = PromptResponse {
+            stop_reason: StopReason::EndTurn,
+            turn: 1,
+        };
         let value = serde_json::to_value(&resp).unwrap();
         assert_eq!(value, json!({ "stopReason": "end_turn", "turn": 1 }));
     }
@@ -1053,7 +1091,9 @@ mod tests {
             title: None,
             kind: None,
             status: Some(ToolCallStatus::Completed),
-            content: Some(ToolCallContent::Text { text: "done".to_string() }),
+            content: Some(ToolCallContent::Text {
+                text: "done".to_string(),
+            }),
         };
         let value = serde_json::to_value(&update).unwrap();
         assert_eq!(
@@ -1096,7 +1136,10 @@ mod tests {
             hunks: None,
         };
         let value = serde_json::to_value(&content).unwrap();
-        assert_eq!(value, json!({ "type": "diff", "path": "src/new.rs", "newText": "fresh" }));
+        assert_eq!(
+            value,
+            json!({ "type": "diff", "path": "src/new.rs", "newText": "fresh" })
+        );
     }
 
     /// Per-hunk review ships the same hunk split `headless.rs` builds, with
@@ -1181,7 +1224,11 @@ mod tests {
         }))
         .unwrap();
         match BrowserCheckResult::from(with) {
-            BrowserCheckResult::Screenshot { mime_type, data, ax_tree } => {
+            BrowserCheckResult::Screenshot {
+                mime_type,
+                data,
+                ax_tree,
+            } => {
                 assert_eq!(mime_type, "image/png");
                 assert_eq!(data, "aGVsbG8=");
                 assert_eq!(
@@ -1209,7 +1256,9 @@ mod tests {
     #[test]
     fn a_session_update_tags_itself_by_sessionupdate_field() {
         let update = SessionUpdate::AgentMessageChunk {
-            content: ContentBlock::Text { text: "hi".to_string() },
+            content: ContentBlock::Text {
+                text: "hi".to_string(),
+            },
             message_id: None,
         };
         let value = serde_json::to_value(&update).unwrap();
@@ -1254,7 +1303,10 @@ mod tests {
             }),
             Decision::Refused
         );
-        assert_eq!(Decision::from(RequestPermissionOutcome::Cancelled), Decision::Refused);
+        assert_eq!(
+            Decision::from(RequestPermissionOutcome::Cancelled),
+            Decision::Refused
+        );
     }
 
     #[test]
@@ -1273,8 +1325,14 @@ mod tests {
     fn a_todo_list_becomes_a_well_formed_plan() {
         use crate::tools::{TodoItem, TodoStatus};
         let plan = plan_for_todos(&[
-            TodoItem { content: "write the tests".to_string(), status: TodoStatus::InProgress },
-            TodoItem { content: "ship it".to_string(), status: TodoStatus::Pending },
+            TodoItem {
+                content: "write the tests".to_string(),
+                status: TodoStatus::InProgress,
+            },
+            TodoItem {
+                content: "ship it".to_string(),
+                status: TodoStatus::Pending,
+            },
         ]);
         assert_eq!(plan.entries.len(), 2);
         assert_eq!(plan.entries[0].status, PlanEntryStatus::InProgress);
