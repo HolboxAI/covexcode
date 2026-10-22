@@ -215,7 +215,8 @@ pub fn detect(root: &Path) -> Result<ProjectProfile, DetectError> {
     let mut warnings = Vec::new();
 
     let package_manager = detect_package_manager(root, &mut markers);
-    let (framework, scripts) = detect_framework(root, manifest.as_ref(), has_index_html, &mut markers);
+    let (framework, scripts) =
+        detect_framework(root, manifest.as_ref(), has_index_html, &mut markers);
 
     let name = manifest
         .as_ref()
@@ -240,7 +241,9 @@ pub fn detect(root: &Path) -> Result<ProjectProfile, DetectError> {
 
     let output_dir = framework.default_output_dir().map(str::to_string);
 
-    if manifest.is_some() && !scripts.contains(&"build".to_string()) && framework != Framework::Static
+    if manifest.is_some()
+        && !scripts.contains(&"build".to_string())
+        && framework != Framework::Static
     {
         warnings.push(
             "package.json has no `build` script, so the build step may do nothing.".to_string(),
@@ -280,8 +283,10 @@ pub fn detect(root: &Path) -> Result<ProjectProfile, DetectError> {
         );
     }
 
-    let has_vercel_config = mark_if_present(root, &["vercel.json", ".vercel/project.json"], &mut markers);
-    let has_netlify_config = mark_if_present(root, &["netlify.toml", ".netlify/state.json"], &mut markers);
+    let has_vercel_config =
+        mark_if_present(root, &["vercel.json", ".vercel/project.json"], &mut markers);
+    let has_netlify_config =
+        mark_if_present(root, &["netlify.toml", ".netlify/state.json"], &mut markers);
 
     Ok(ProjectProfile {
         root: root.to_path_buf(),
@@ -353,7 +358,11 @@ fn detect_framework(
         (NUXT_CONFIGS, &["nuxt", "nuxt3"], Framework::Nuxt),
         (ASTRO_CONFIGS, &["astro"], Framework::Astro),
         (SVELTE_CONFIGS, &["@sveltejs/kit"], Framework::SvelteKit),
-        (REMIX_CONFIGS, &["@remix-run/dev", "@remix-run/node"], Framework::Remix),
+        (
+            REMIX_CONFIGS,
+            &["@remix-run/dev", "@remix-run/node"],
+            Framework::Remix,
+        ),
         (VITE_CONFIGS, &["vite"], Framework::Vite),
         (&[], &["react-scripts"], Framework::React),
         (&[], &["react", "react-dom"], Framework::React),
@@ -381,8 +390,7 @@ fn detect_framework(
         if scripts.contains(&"build".to_string()) {
             return (Framework::Unknown, scripts);
         }
-        if scripts.contains(&"start".to_string())
-            || manifest.and_then(|m| m.get("main")).is_some()
+        if scripts.contains(&"start".to_string()) || manifest.and_then(|m| m.get("main")).is_some()
         {
             return (Framework::Node, scripts);
         }
@@ -470,12 +478,19 @@ mod tests {
     #[test]
     fn next_js_is_detected_from_its_config_file() {
         let dir = project(&[
-            ("package.json", &manifest("\"scripts\": {\"build\": \"next build\"}")),
+            (
+                "package.json",
+                &manifest("\"scripts\": {\"build\": \"next build\"}"),
+            ),
             ("next.config.js", "module.exports = {}"),
         ]);
         let profile = detect(dir.path()).expect("detects");
         assert_eq!(profile.framework, Framework::NextJs);
-        assert!(profile.markers.iter().any(|m| m == "next.config.js"), "{:?}", profile.markers);
+        assert!(
+            profile.markers.iter().any(|m| m == "next.config.js"),
+            "{:?}",
+            profile.markers
+        );
         // Both providers infer Next.js output themselves; overriding it with a
         // guess is worse than saying nothing.
         assert_eq!(profile.output_dir, None);
@@ -498,7 +513,10 @@ mod tests {
     #[test]
     fn sveltekit_wins_over_the_vite_it_is_built_on() {
         let dir = project(&[
-            ("package.json", &manifest("\"devDependencies\": {\"vite\": \"5\", \"@sveltejs/kit\": \"2\"}")),
+            (
+                "package.json",
+                &manifest("\"devDependencies\": {\"vite\": \"5\", \"@sveltejs/kit\": \"2\"}"),
+            ),
             ("svelte.config.js", "export default {}"),
             ("vite.config.js", "export default {}"),
         ]);
@@ -508,7 +526,10 @@ mod tests {
     #[test]
     fn vite_is_detected_and_defaults_to_dist() {
         let dir = project(&[
-            ("package.json", &manifest("\"scripts\": {\"build\": \"vite build\"}")),
+            (
+                "package.json",
+                &manifest("\"scripts\": {\"build\": \"vite build\"}"),
+            ),
             ("vite.config.ts", "export default {}"),
         ]);
         let profile = detect(dir.path()).expect("detects");
@@ -540,7 +561,10 @@ mod tests {
         // which reads as our bug rather than a wrong guess.
         assert_eq!(profile.build_command, None);
         assert!(
-            profile.warnings.iter().any(|w| w.contains("long-running Node server")),
+            profile
+                .warnings
+                .iter()
+                .any(|w| w.contains("long-running Node server")),
             "{:?}",
             profile.warnings
         );
@@ -579,7 +603,10 @@ mod tests {
     /// would happily build.
     #[test]
     fn a_broken_package_json_still_leaves_a_deployable_project() {
-        let dir = project(&[("package.json", "{ not json at all"), ("index.html", "<p>x</p>")]);
+        let dir = project(&[
+            ("package.json", "{ not json at all"),
+            ("index.html", "<p>x</p>"),
+        ]);
         let profile = detect(dir.path()).expect("still deployable");
         assert_eq!(profile.framework, Framework::Static);
     }
@@ -611,7 +638,10 @@ mod tests {
     #[test]
     fn no_lockfile_assumes_npm() {
         let dir = project(&[("package.json", &manifest("\"scripts\": {\"build\": \"x\"}"))]);
-        assert_eq!(detect(dir.path()).unwrap().package_manager, PackageManager::Npm);
+        assert_eq!(
+            detect(dir.path()).unwrap().package_manager,
+            PackageManager::Npm
+        );
     }
 
     #[test]
@@ -631,10 +661,16 @@ mod tests {
 
     #[test]
     fn a_missing_build_script_is_warned_about_rather_than_refused() {
-        let dir = project(&[("package.json", &manifest("\"dependencies\": {\"react\": \"18\"}"))]);
+        let dir = project(&[(
+            "package.json",
+            &manifest("\"dependencies\": {\"react\": \"18\"}"),
+        )]);
         let profile = detect(dir.path()).expect("detects");
         assert!(
-            profile.warnings.iter().any(|w| w.contains("no `build` script")),
+            profile
+                .warnings
+                .iter()
+                .any(|w| w.contains("no `build` script")),
             "{:?}",
             profile.warnings
         );
@@ -651,18 +687,26 @@ mod tests {
         let profile = detect(dir.path()).expect("detects");
         let joined = profile.warnings.join(" ");
         assert!(joined.contains(".env is present"), "{joined}");
-        assert!(!joined.contains("super-secret-value"), "a value leaked: {joined}");
+        assert!(
+            !joined.contains("super-secret-value"),
+            "a value leaked: {joined}"
+        );
     }
 
     #[test]
     fn the_name_comes_from_package_json_then_the_directory() {
-        let named = project(&[("package.json", "{\"name\": \"my-site\"}"), ("index.html", "")]);
+        let named = project(&[
+            ("package.json", "{\"name\": \"my-site\"}"),
+            ("index.html", ""),
+        ]);
         assert_eq!(detect(named.path()).unwrap().name, "my-site");
 
         let unnamed = project(&[("index.html", "")]);
         let from_dir = detect(unnamed.path()).unwrap().name;
         assert!(!from_dir.is_empty());
-        assert!(from_dir.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+        assert!(from_dir
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
     }
 
     #[test]

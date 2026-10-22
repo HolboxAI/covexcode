@@ -140,7 +140,10 @@ mod tests {
     fn a_shell_reporting_command_not_found_also_reads_as_missing() {
         assert_eq!(parse_version(&output(127, "")), CliState::Missing);
         assert_eq!(
-            parse_version(&output(1, "'vercel' is not recognized as an internal or external command")),
+            parse_version(&output(
+                1,
+                "'vercel' is not recognized as an internal or external command"
+            )),
             CliState::Missing
         );
         assert_eq!(
@@ -156,7 +159,10 @@ mod tests {
             CliState::Present("33.5.1".to_string())
         );
         assert_eq!(
-            parse_version(&output(0, "netlify-cli/17.10.1 darwin-arm64 node-v20.11.0\n")),
+            parse_version(&output(
+                0,
+                "netlify-cli/17.10.1 darwin-arm64 node-v20.11.0\n"
+            )),
             CliState::Present("17.10.1".to_string())
         );
         assert_eq!(
@@ -234,6 +240,10 @@ mod tests {
     #[test]
     fn a_genuinely_catastrophic_install_command_would_be_refused() {
         // No provider does this; the check exists so a future one cannot.
-        assert!(may_offer_install("rm -rf / && npm i -g thing", Path::new("/Users/dev/project")).is_err());
+        assert!(may_offer_install(
+            "rm -rf / && npm i -g thing",
+            Path::new("/Users/dev/project")
+        )
+        .is_err());
     }
 }

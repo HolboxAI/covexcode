@@ -17,7 +17,8 @@
 
 use super::vercel::{first_url, is_deployment_url};
 use super::{
-    AuthState, CommandOutput, DeployPlan, DeploymentProvider, ProviderCommand, RemoteProject, Secret,
+    AuthState, CommandOutput, DeployPlan, DeploymentProvider, ProviderCommand, RemoteProject,
+    Secret,
 };
 use serde_json::Value;
 
@@ -148,8 +149,7 @@ impl DeploymentProvider for NetlifyProvider {
         token: Option<&Secret>,
     ) -> Option<ProviderCommand> {
         Some(
-            ProviderCommand::new("netlify", &["status", "--json"])
-                .with_env(Self::token_env(token)),
+            ProviderCommand::new("netlify", &["status", "--json"]).with_env(Self::token_env(token)),
         )
     }
 
@@ -281,7 +281,12 @@ impl DeploymentProvider for NetlifyProvider {
         }
 
         let text = out.combined();
-        for label in ["website url", "live url", "unique deploy url", "website draft url"] {
+        for label in [
+            "website url",
+            "live url",
+            "unique deploy url",
+            "website draft url",
+        ] {
             if let Some(url) = text
                 .lines()
                 .filter(|line| line.to_lowercase().contains(label))
@@ -387,7 +392,10 @@ mod tests {
         assert!(args.contains(&"--prod".to_string()), "{args:?}");
 
         plan.target = Target::Preview;
-        assert!(!NetlifyProvider.deploy(&plan).args.contains(&"--prod".to_string()));
+        assert!(!NetlifyProvider
+            .deploy(&plan)
+            .args
+            .contains(&"--prod".to_string()));
     }
 
     #[test]
@@ -396,7 +404,10 @@ mod tests {
         plan.framework = Framework::Vite;
         plan.output_dir = Some("dist".to_string());
         let args = NetlifyProvider.deploy(&plan).args;
-        assert!(args.windows(2).any(|w| w[0] == "--dir" && w[1] == "dist"), "{args:?}");
+        assert!(
+            args.windows(2).any(|w| w[0] == "--dir" && w[1] == "dist"),
+            "{args:?}"
+        );
     }
 
     /// Overriding a correct answer with a guess is worse than saying nothing:
@@ -406,7 +417,10 @@ mod tests {
         let mut plan = plan();
         plan.framework = Framework::NextJs;
         plan.output_dir = Some("dist".to_string());
-        assert!(!NetlifyProvider.deploy(&plan).args.contains(&"--dir".to_string()));
+        assert!(!NetlifyProvider
+            .deploy(&plan)
+            .args
+            .contains(&"--dir".to_string()));
     }
 
     #[test]
@@ -419,7 +433,8 @@ mod tests {
         });
         let args = NetlifyProvider.deploy(&plan).args;
         assert!(
-            args.windows(2).any(|w| w[0] == "--site" && w[1] == "1a2b3c-site-id"),
+            args.windows(2)
+                .any(|w| w[0] == "--site" && w[1] == "1a2b3c-site-id"),
             "{args:?}"
         );
     }
@@ -432,8 +447,16 @@ mod tests {
         plan.link = LinkChoice::New;
         plan.project_name = "fresh-site".to_string();
         let create = NetlifyProvider.create_project(&plan).expect("must create");
-        assert!(create.args.contains(&"sites:create".to_string()), "{:?}", create.args);
-        assert!(create.args.contains(&"fresh-site".to_string()), "{:?}", create.args);
+        assert!(
+            create.args.contains(&"sites:create".to_string()),
+            "{:?}",
+            create.args
+        );
+        assert!(
+            create.args.contains(&"fresh-site".to_string()),
+            "{:?}",
+            create.args
+        );
         // ...and there is nothing to link, since creating it links it.
         assert!(NetlifyProvider.link_project(&plan).is_none());
     }
@@ -527,7 +550,10 @@ mod tests {
         ] {
             let status = format!("Current Netlify User\n  Email: ada@example.com\n{extra}\n");
             assert!(
-                matches!(NetlifyProvider.parse_auth(&output(0, &status, "")), AuthState::In(_)),
+                matches!(
+                    NetlifyProvider.parse_auth(&output(0, &status, "")),
+                    AuthState::In(_)
+                ),
                 "read as signed out because of: {extra}"
             );
         }
@@ -548,7 +574,11 @@ mod tests {
             "You are not logged in. Run `netlify login` to log in.",
             "Not logged in. Please log in first.",
         ] {
-            assert_eq!(NetlifyProvider.parse_auth(&output(1, "", text)), AuthState::Out, "{text}");
+            assert_eq!(
+                NetlifyProvider.parse_auth(&output(1, "", text)),
+                AuthState::Out,
+                "{text}"
+            );
         }
     }
 
@@ -595,7 +625,9 @@ mod tests {
 
     #[test]
     fn an_empty_listing_is_an_empty_list() {
-        assert!(NetlifyProvider.parse_projects(&output(0, "[]", "")).is_empty());
+        assert!(NetlifyProvider
+            .parse_projects(&output(0, "[]", ""))
+            .is_empty());
     }
 
     // ---- urls ------------------------------------------------------------
@@ -615,7 +647,10 @@ mod tests {
     fn a_log_url_is_never_mistaken_for_the_site() {
         let json = r#"{"logs":"https://app.netlify.com/sites/x/deploys/y"}"#;
         let url = NetlifyProvider.get_deployment_url(&output(0, json, ""));
-        assert_ne!(url.as_deref(), Some("https://app.netlify.com/sites/x/deploys/y"));
+        assert_ne!(
+            url.as_deref(),
+            Some("https://app.netlify.com/sites/x/deploys/y")
+        );
     }
 
     #[test]
@@ -632,8 +667,14 @@ mod tests {
     #[test]
     fn each_kind_of_failure_gets_its_own_explanation() {
         for (out, expected) in [
-            (output(1, "", "Error: Build failed with exit code 1"), "build failed"),
-            (output(1, "", "Error: Site not found"), "could not find that site"),
+            (
+                output(1, "", "Error: Build failed with exit code 1"),
+                "build failed",
+            ),
+            (
+                output(1, "", "Error: Site not found"),
+                "could not find that site",
+            ),
             (
                 output(1, "", "Error: A site with the name already exists"),
                 "already taken",
@@ -642,10 +683,16 @@ mod tests {
                 output(1, "", "Error: Deploy directory 'dist' does not exist"),
                 "output directory does not exist",
             ),
-            (output(1, "", "Error: Unauthorized"), "rejected the credentials"),
+            (
+                output(1, "", "Error: Unauthorized"),
+                "rejected the credentials",
+            ),
         ] {
             let explained = NetlifyProvider.explain_failure(&out).to_lowercase();
-            assert!(explained.contains(expected), "{explained:?} should mention {expected:?}");
+            assert!(
+                explained.contains(expected),
+                "{explained:?} should mention {expected:?}"
+            );
         }
     }
 

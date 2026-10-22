@@ -27,7 +27,8 @@
 //! project" and "building it" fail separately and legibly.
 
 use super::{
-    AuthState, CommandOutput, DeployPlan, DeploymentProvider, ProviderCommand, RemoteProject, Secret,
+    AuthState, CommandOutput, DeployPlan, DeploymentProvider, ProviderCommand, RemoteProject,
+    Secret,
 };
 
 /// A deploy is a full remote build. Vercel's own builds routinely run for
@@ -324,7 +325,9 @@ pub(super) fn is_deployment_url(url: &str) -> bool {
     }
     // A deployment lives on its own host. `vercel.com/...` with a path is the
     // dashboard -- the inspect link -- not the site.
-    !lower.trim_start_matches("https://").starts_with("vercel.com/")
+    !lower
+        .trim_start_matches("https://")
+        .starts_with("vercel.com/")
 }
 
 /// The first `https://` URL in a line, trimmed of the punctuation CLIs wrap
@@ -332,9 +335,7 @@ pub(super) fn is_deployment_url(url: &str) -> bool {
 pub(super) fn first_url(line: &str) -> Option<String> {
     let start = line.find("https://")?;
     let rest = &line[start..];
-    let end = rest
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(rest.len());
+    let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     let url = rest[..end].trim_end_matches(['.', ',', ')', ']', '"', '\'', ';']);
     (url.len() > "https://".len()).then(|| url.to_string())
 }
@@ -358,17 +359,26 @@ mod tests {
     fn a_production_deploy_asks_for_production_and_a_preview_does_not() {
         let mut plan = plan();
         plan.target = Target::Production;
-        assert!(VercelProvider.deploy(&plan).args.contains(&"--prod".to_string()));
+        assert!(VercelProvider
+            .deploy(&plan)
+            .args
+            .contains(&"--prod".to_string()));
 
         plan.target = Target::Preview;
-        assert!(!VercelProvider.deploy(&plan).args.contains(&"--prod".to_string()));
+        assert!(!VercelProvider
+            .deploy(&plan)
+            .args
+            .contains(&"--prod".to_string()));
     }
 
     /// `--yes` is what keeps the CLI from opening its own interactive prompt
     /// against a stdin we have deliberately closed.
     #[test]
     fn deploying_never_waits_for_a_prompt() {
-        assert!(VercelProvider.deploy(&plan()).args.contains(&"--yes".to_string()));
+        assert!(VercelProvider
+            .deploy(&plan())
+            .args
+            .contains(&"--yes".to_string()));
         assert!(VercelProvider
             .link_project(&plan())
             .unwrap()
@@ -402,7 +412,10 @@ mod tests {
 
         assert!(deploy.env.iter().any(|(k, _)| k == "VERCEL_TOKEN"));
         assert!(!deploy.display().contains("vercel_secret_value"));
-        assert!(!deploy.args.iter().any(|a| a.contains("vercel_secret_value")));
+        assert!(!deploy
+            .args
+            .iter()
+            .any(|a| a.contains("vercel_secret_value")));
     }
 
     #[test]
@@ -559,7 +572,10 @@ mod tests {
 
     #[test]
     fn no_url_in_the_output_means_no_url_claimed() {
-        assert_eq!(VercelProvider.get_deployment_url(&output(0, "done\n", "")), None);
+        assert_eq!(
+            VercelProvider.get_deployment_url(&output(0, "done\n", "")),
+            None
+        );
     }
 
     // ---- failures --------------------------------------------------------
@@ -575,7 +591,10 @@ mod tests {
                 output(1, "", "Error: A project with that name already exists"),
                 "already exists",
             ),
-            (output(1, "", "Error: Not authorized"), "refused the request"),
+            (
+                output(1, "", "Error: Not authorized"),
+                "refused the request",
+            ),
             (output(1, "", "Error: rate limit exceeded"), "rate limiting"),
         ];
         for (out, expected) in cases {
@@ -589,11 +608,21 @@ mod tests {
 
     #[test]
     fn a_missing_cli_and_a_timeout_are_explained_as_themselves() {
-        let missing = CommandOutput { not_found: true, ..Default::default() };
-        assert!(VercelProvider.explain_failure(&missing).contains("not installed"));
+        let missing = CommandOutput {
+            not_found: true,
+            ..Default::default()
+        };
+        assert!(VercelProvider
+            .explain_failure(&missing)
+            .contains("not installed"));
 
-        let slow = CommandOutput { timed_out: true, ..Default::default() };
-        assert!(VercelProvider.explain_failure(&slow).contains("longer than the timeout"));
+        let slow = CommandOutput {
+            timed_out: true,
+            ..Default::default()
+        };
+        assert!(VercelProvider
+            .explain_failure(&slow)
+            .contains("longer than the timeout"));
     }
 
     /// An unrecognised failure keeps the CLI's own words, which is what a

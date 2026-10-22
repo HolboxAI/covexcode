@@ -250,7 +250,10 @@ pub enum DeployAction {
 pub enum DeployEvent {
     /// One line of output, already redacted by the runner.
     Log(String),
-    Finished { step: Step, output: CommandOutput },
+    Finished {
+        step: Step,
+        output: CommandOutput,
+    },
 }
 
 /// The parts of `[deploy]` the flow itself has to obey, copied in at the start
@@ -459,12 +462,11 @@ impl DeploySession {
         match &self.stage {
             Stage::Menu(Menu::Provider) => providers()
                 .iter()
-                .map(|p| MenuOption::with_detail(p.label(), format!("via the {} CLI", p.cli_binary())))
+                .map(|p| {
+                    MenuOption::with_detail(p.label(), format!("via the {} CLI", p.cli_binary()))
+                })
                 .collect(),
-            Stage::Menu(Menu::Confirm) => vec![
-                MenuOption::plain("Yes"),
-                MenuOption::plain("No"),
-            ],
+            Stage::Menu(Menu::Confirm) => vec![MenuOption::plain("Yes"), MenuOption::plain("No")],
             Stage::Menu(Menu::Settings) => vec![
                 MenuOption::plain("Yes"),
                 MenuOption::plain("Edit configuration"),
@@ -473,7 +475,9 @@ impl DeploySession {
                 MenuOption::with_detail("Project name", self.project_name.clone()),
                 MenuOption::with_detail(
                     "Build command",
-                    self.build_command.clone().unwrap_or_else(|| "none".to_string()),
+                    self.build_command
+                        .clone()
+                        .unwrap_or_else(|| "none".to_string()),
                 ),
                 MenuOption::with_detail(
                     "Output directory",
@@ -594,7 +598,9 @@ impl DeploySession {
                 rows.push(("Name".to_string(), self.project_name.clone()));
                 rows.push((
                     "Build command".to_string(),
-                    self.build_command.clone().unwrap_or_else(|| "none".to_string()),
+                    self.build_command
+                        .clone()
+                        .unwrap_or_else(|| "none".to_string()),
                 ));
                 rows.push((
                     "Output directory".to_string(),
@@ -957,8 +963,7 @@ impl DeploySession {
                     self.mark_last(StepState::Skipped);
                     if self.policy.allow_cli_install {
                         let install = provider.install_command();
-                        let line =
-                            format!("{} {}", install.program, install.args.join(" "));
+                        let line = format!("{} {}", install.program, install.args.join(" "));
                         // Judged by the same guardrails every shell command
                         // faces, so the prompt says the same thing about
                         // `npm install -g` that the tool-approval prompt would
@@ -1040,7 +1045,9 @@ impl DeploySession {
                     // they may not need is a worse answer than saying what
                     // happened and offering the choice.
                     self.mark_last(StepState::Skipped);
-                    self.push_log(format!("Could not tell whether you are signed in: {detail}"));
+                    self.push_log(format!(
+                        "Could not tell whether you are signed in: {detail}"
+                    ));
                     self.stage = Stage::Menu(Menu::Login);
                     self.selected = 0;
                     None
@@ -1561,7 +1568,11 @@ mod tests {
         let options = session.options();
         assert_eq!(options[0].label, "Yes");
         assert!(
-            options[0].detail.as_deref().unwrap_or_default().contains("npm install -g vercel"),
+            options[0]
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("npm install -g vercel"),
             "the exact command must be shown: {options:?}"
         );
 
@@ -1659,7 +1670,10 @@ mod tests {
         });
         assert_eq!(session.stage, Stage::Menu(Menu::Login));
         assert!(
-            session.log.iter().any(|l| l.contains("Could not tell whether you are signed in")),
+            session
+                .log
+                .iter()
+                .any(|l| l.contains("Could not tell whether you are signed in")),
             "{:?}",
             session.log
         );
@@ -1714,8 +1728,12 @@ mod tests {
 
         let summary = session.summary();
         assert!(summary.iter().any(|(k, v)| k == "Framework" && v == "Vite"));
-        assert!(summary.iter().any(|(k, v)| k == "Build command" && v == "npm run build"));
-        assert!(summary.iter().any(|(k, v)| k == "Output directory" && v == "dist"));
+        assert!(summary
+            .iter()
+            .any(|(k, v)| k == "Build command" && v == "npm run build"));
+        assert!(summary
+            .iter()
+            .any(|(k, v)| k == "Output directory" && v == "dist"));
 
         session.selected = 1; // Edit configuration
         session.select();
@@ -1777,7 +1795,10 @@ mod tests {
         // read a value back out of.
         let rendered = format!("{:?}", session.options());
         assert!(rendered.contains("API_URL"), "{rendered}");
-        assert!(!rendered.contains("secret-path"), "a value leaked: {rendered}");
+        assert!(
+            !rendered.contains("secret-path"),
+            "a value leaked: {rendered}"
+        );
         assert!(!format!("{:?}", session.summary()).contains("secret-path"));
     }
 
@@ -1888,10 +1909,16 @@ mod tests {
 
         assert_eq!(session.stage, Stage::Menu(Menu::Failure));
         let failure = session.failure.clone().unwrap_or_default();
-        assert!(failure.to_lowercase().contains("build command failed"), "{failure}");
+        assert!(
+            failure.to_lowercase().contains("build command failed"),
+            "{failure}"
+        );
 
         let labels: Vec<String> = session.options().iter().map(|o| o.label.clone()).collect();
-        assert_eq!(labels, vec!["View detailed logs", "Retry deployment", "Cancel"]);
+        assert_eq!(
+            labels,
+            vec!["View detailed logs", "Retry deployment", "Cancel"]
+        );
 
         match recorded {
             DeployAction::Record(entry) => assert_eq!(entry.status, "Failed"),
@@ -1909,7 +1936,10 @@ mod tests {
         session.selected = 1; // Retry deployment
         let action = session.select().expect("work restarts");
         assert_eq!(step_of(&action), Step::CheckingCli);
-        assert_eq!(session.project_name, "renamed", "configuration survives a retry");
+        assert_eq!(
+            session.project_name, "renamed",
+            "configuration survives a retry"
+        );
         assert!(session.token.is_some(), "a supplied token survives a retry");
         assert!(session.failure.is_none());
     }
@@ -1921,7 +1951,11 @@ mod tests {
         session.selected = 0;
         assert!(session.select().is_none());
         assert!(session.show_full_log);
-        assert_eq!(session.stage, Stage::Menu(Menu::Failure), "still on the failure screen");
+        assert_eq!(
+            session.stage,
+            Stage::Menu(Menu::Failure),
+            "still on the failure screen"
+        );
 
         session.selected = 0;
         session.select();
@@ -2066,7 +2100,10 @@ mod tests {
         // 1. Detection reads the real directory.
         let profile = super::super::detect::detect(dir.path()).expect("a deployable project");
         assert_eq!(profile.framework.label(), "Vite");
-        assert_eq!(profile.name, "smoke-test-app", "the npm name is folded, not used raw");
+        assert_eq!(
+            profile.name, "smoke-test-app",
+            "the npm name is folded, not used raw"
+        );
 
         // 2. The flow gets to the point of needing a CLI.
         let mut session = DeploySession::new(profile, DeployPolicy::default());
@@ -2095,7 +2132,10 @@ mod tests {
         match session.stage {
             // The ordinary case on a machine without the CLI.
             Stage::Menu(Menu::InstallCli) => {
-                assert!(next.is_none(), "nothing may be installed without a decision");
+                assert!(
+                    next.is_none(),
+                    "nothing may be installed without a decision"
+                );
                 let options = session.options();
                 assert!(options[0]
                     .detail
@@ -2120,6 +2160,10 @@ mod tests {
         }
         assert_eq!(session.log.len(), MAX_LOG_LINES);
         // The tail is what is kept: the newest lines are the ones being read.
-        assert!(session.log.back().unwrap().contains(&(MAX_LOG_LINES + 49).to_string()));
+        assert!(session
+            .log
+            .back()
+            .unwrap()
+            .contains(&(MAX_LOG_LINES + 49).to_string()));
     }
 }

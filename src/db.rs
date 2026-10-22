@@ -43,15 +43,27 @@ use rand::RngCore;
 
 #[derive(Debug)]
 pub enum QueryResult {
-    Rows { rows: Vec<serde_json::Value>, truncated: bool },
-    Write { changes: i64, last_insert_rowid: i64 },
+    Rows {
+        rows: Vec<serde_json::Value>,
+        truncated: bool,
+    },
+    Write {
+        changes: i64,
+        last_insert_rowid: i64,
+    },
 }
 
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum RawResult {
-    Rows { rows: Vec<serde_json::Value>, truncated: bool },
-    Write { changes: i64, last_insert_rowid: i64 },
+    Rows {
+        rows: Vec<serde_json::Value>,
+        truncated: bool,
+    },
+    Write {
+        changes: i64,
+        last_insert_rowid: i64,
+    },
 }
 
 /// Where this developer's per-project db keys live -- same file-based-
@@ -70,8 +82,12 @@ fn load_registry() -> HashMap<String, String> {
 }
 
 fn save_registry(map: &HashMap<String, String>) {
-    let Some(reg_path) = registry_path() else { return };
-    let Some(parent) = reg_path.parent() else { return };
+    let Some(reg_path) = registry_path() else {
+        return;
+    };
+    let Some(parent) = reg_path.parent() else {
+        return;
+    };
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
@@ -143,7 +159,8 @@ pub async fn query(
         .build()
         .map_err(|e| format!("could not build an HTTP client: {e}"))?;
 
-    let mut body = serde_json::json!({ "project_id": project_id, "key": key, "sql": sql, "params": params });
+    let mut body =
+        serde_json::json!({ "project_id": project_id, "key": key, "sql": sql, "params": params });
     if let Some(token) = access_token {
         body["access_token"] = serde_json::Value::String(token.to_string());
     }
@@ -159,16 +176,23 @@ pub async fn query(
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("the db service refused this ({status}): {}", text.trim()));
+        return Err(format!(
+            "the db service refused this ({status}): {}",
+            text.trim()
+        ));
     }
     let parsed: RawResult = serde_json::from_str(&text)
         .map_err(|e| format!("the db service returned something unexpected ({e})"))?;
 
     Ok(match parsed {
         RawResult::Rows { rows, truncated } => QueryResult::Rows { rows, truncated },
-        RawResult::Write { changes, last_insert_rowid } => {
-            QueryResult::Write { changes, last_insert_rowid }
-        }
+        RawResult::Write {
+            changes,
+            last_insert_rowid,
+        } => QueryResult::Write {
+            changes,
+            last_insert_rowid,
+        },
     })
 }
 
@@ -178,15 +202,22 @@ mod tests {
 
     #[tokio::test]
     async fn an_unconfigured_endpoint_explains_itself() {
-        let error = query(Path::new("/tmp/does-not-matter"), "  ", "SELECT 1", &[], None)
-            .await
-            .expect_err("should refuse");
+        let error = query(
+            Path::new("/tmp/does-not-matter"),
+            "  ",
+            "SELECT 1",
+            &[],
+            None,
+        )
+        .await
+        .expect_err("should refuse");
         assert!(error.contains("[tools]"), "{error}");
     }
 
     #[tokio::test]
     async fn an_unpublished_path_is_refused_before_any_network_call() {
-        let dir = std::env::temp_dir().join(format!("covexcode-db-unpublished-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("covexcode-db-unpublished-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let target = dir.join("index.html");
@@ -203,7 +234,9 @@ mod tests {
     /// A minimal HTTP/1.1 server on a real socket, not a fake address like
     /// the tests above -- this one has to inspect what actually went out on
     /// the wire, which an unreachable address can't show.
-    async fn serve_once_and_capture_body(response_json: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+    async fn serve_once_and_capture_body(
+        response_json: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -259,7 +292,11 @@ mod tests {
     /// private to that module -- this is the one other place (besides
     /// `enable_auth`) that needs a path to already read back as published.
     fn fake_publish(fake_home: &Path, project_dir: &Path, id: &str) {
-        let key = project_dir.canonicalize().expect("canonicalize").to_string_lossy().into_owned();
+        let key = project_dir
+            .canonicalize()
+            .expect("canonicalize")
+            .to_string_lossy()
+            .into_owned();
         let registry_path = fake_home.join(".boxcode").join("artifacts.json");
         std::fs::create_dir_all(registry_path.parent().unwrap()).expect("mkdir");
         let published_at = std::time::SystemTime::now()
@@ -267,7 +304,8 @@ mod tests {
             .expect("clock")
             .as_secs();
         let map = serde_json::json!({ key: { "id": id, "published_at": published_at } });
-        std::fs::write(registry_path, serde_json::to_string_pretty(&map).unwrap()).expect("write registry");
+        std::fs::write(registry_path, serde_json::to_string_pretty(&map).unwrap())
+            .expect("write registry");
     }
 
     /// Locks `HOME_LOCK` directly rather than going through
@@ -277,7 +315,9 @@ mod tests {
     /// synchronously already inside `#[tokio::test]`'s runtime.
     #[tokio::test]
     async fn an_access_token_is_forwarded_in_the_request_body() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -285,9 +325,17 @@ mod tests {
         let project = tempfile::tempdir().expect("project dir");
         std::fs::write(project.path().join("index.html"), "hi").expect("write");
         fake_publish(fake_home.path(), project.path(), "proj-with-token");
-        let (endpoint, handle) = serve_once_and_capture_body(r#"{"rows":[],"truncated":false}"#).await;
+        let (endpoint, handle) =
+            serve_once_and_capture_body(r#"{"rows":[],"truncated":false}"#).await;
 
-        let result = query(project.path(), &endpoint, "SELECT 1", &[], Some("the-access-token")).await;
+        let result = query(
+            project.path(),
+            &endpoint,
+            "SELECT 1",
+            &[],
+            Some("the-access-token"),
+        )
+        .await;
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),
@@ -296,12 +344,17 @@ mod tests {
 
         assert!(result.is_ok(), "{result:?}");
         let body = handle.await.expect("server task");
-        assert!(body.contains("\"access_token\":\"the-access-token\""), "{body}");
+        assert!(
+            body.contains("\"access_token\":\"the-access-token\""),
+            "{body}"
+        );
     }
 
     #[tokio::test]
     async fn no_access_token_means_no_access_token_field_at_all() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -309,7 +362,8 @@ mod tests {
         let project = tempfile::tempdir().expect("project dir");
         std::fs::write(project.path().join("index.html"), "hi").expect("write");
         fake_publish(fake_home.path(), project.path(), "proj-without-token");
-        let (endpoint, handle) = serve_once_and_capture_body(r#"{"rows":[],"truncated":false}"#).await;
+        let (endpoint, handle) =
+            serve_once_and_capture_body(r#"{"rows":[],"truncated":false}"#).await;
 
         let result = query(project.path(), &endpoint, "SELECT 1", &[], None).await;
 

@@ -152,11 +152,8 @@ pub async fn run(
 
     let limit = Duration::from_secs(command.timeout_secs);
     let collected = tokio::time::timeout(limit, async {
-        let (out, err, status) = tokio::join!(
-            pump(stdout, sink),
-            pump(stderr, sink),
-            child.wait(),
-        );
+        let (out, err, status) =
+            tokio::join!(pump(stdout, sink), pump(stderr, sink), child.wait(),);
         (out, err, status)
     })
     .await;
@@ -426,8 +423,16 @@ mod tests {
     #[tokio::test]
     async fn a_command_waiting_on_stdin_gets_eof_rather_than_the_terminal() {
         let dir = tempfile::tempdir().unwrap();
-        let out = run(&shell_command("cat; echo done").timeout(5), dir.path(), None).await;
-        assert!(!out.timed_out, "closed stdin should end `cat` at once: {out:?}");
+        let out = run(
+            &shell_command("cat; echo done").timeout(5),
+            dir.path(),
+            None,
+        )
+        .await;
+        assert!(
+            !out.timed_out,
+            "closed stdin should end `cat` at once: {out:?}"
+        );
         assert!(out.stdout.contains("done"), "{out:?}");
     }
 
@@ -443,7 +448,10 @@ mod tests {
             return; // the probe script above is shell-specific
         }
         let out = run(&command, dir.path(), None).await;
-        assert!(out.stdout.contains("len=8"), "the child did not see it: {out:?}");
+        assert!(
+            out.stdout.contains("len=8"),
+            "the child did not see it: {out:?}"
+        );
     }
 
     /// A CLI that ignores `NO_COLOR` would otherwise break every parser --
@@ -451,12 +459,21 @@ mod tests {
     /// invisible until it presents as a login loop.
     #[test]
     fn colour_codes_are_stripped_so_parsers_see_plain_text() {
-        assert_eq!(strip_ansi("\x1b[32mEmail: \x1b[39mada@example.com"), "Email: ada@example.com");
-        assert_eq!(strip_ansi("\x1b[1m\x1b[31mError\x1b[0m: nope"), "Error: nope");
+        assert_eq!(
+            strip_ansi("\x1b[32mEmail: \x1b[39mada@example.com"),
+            "Email: ada@example.com"
+        );
+        assert_eq!(
+            strip_ansi("\x1b[1m\x1b[31mError\x1b[0m: nope"),
+            "Error: nope"
+        );
         // Text with no escapes is returned untouched.
         assert_eq!(strip_ansi("plain line"), "plain line");
         // Box drawing and other real UTF-8 must survive.
-        assert_eq!(strip_ansi("──────┐ Current Netlify User │"), "──────┐ Current Netlify User │");
+        assert_eq!(
+            strip_ansi("──────┐ Current Netlify User │"),
+            "──────┐ Current Netlify User │"
+        );
     }
 
     #[tokio::test]

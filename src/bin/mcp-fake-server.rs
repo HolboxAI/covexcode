@@ -140,7 +140,11 @@ fn main() {
 
         let mut encoded = serde_json::to_vec(&reply).expect("encode reply");
         encoded.push(b'\n');
-        if stdout.write_all(&encoded).and_then(|_| stdout.flush()).is_err() {
+        if stdout
+            .write_all(&encoded)
+            .and_then(|_| stdout.flush())
+            .is_err()
+        {
             break;
         }
         let _ = writeln!(io::stderr(), "mcp-fake-server: handled {method}");
