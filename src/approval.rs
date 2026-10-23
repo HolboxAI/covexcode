@@ -97,7 +97,11 @@ pub enum Verdict {
     /// `plan_progress` bookkeeping against a plan the user already
     /// approved -- always auto-resolved, never asked, because there is
     /// nothing here for a prompt to protect.
-    Progress { step: usize, done: bool, note: Option<String> },
+    Progress {
+        step: usize,
+        done: bool,
+        note: Option<String>,
+    },
     /// `update_todos` bookkeeping -- always auto-resolved, same reasoning
     /// as `Progress`.
     Todos(Vec<crate::tools::TodoItem>),
@@ -148,7 +152,11 @@ pub fn verdict_for(
     // nothing here for a prompt to protect.
     match &action {
         Some(crate::tools::Action::Progress { step, done, note }) => {
-            return Verdict::Progress { step: *step, done: *done, note: note.clone() };
+            return Verdict::Progress {
+                step: *step,
+                done: *done,
+                note: note.clone(),
+            };
         }
         Some(crate::tools::Action::Todos(items)) => {
             return Verdict::Todos(items.clone());

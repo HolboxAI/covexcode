@@ -197,6 +197,7 @@ impl Journal {
     /// `/rollback` is all-or-nothing and never filters by turn. Every record
     /// here lands with `turn` 0, so a `plan_filtered(.., Some(n))` call
     /// simply won't match it (which is fine: the TUI never filters).
+    #[allow(dead_code)]
     pub fn record(&mut self, record: Record) {
         self.record_turn(record, 0);
     }
@@ -367,7 +368,7 @@ impl Journal {
     pub fn remove(&mut self, steps: &[Step]) {
         let paths: Vec<PathBuf> = steps.iter().map(|s| s.path.clone()).collect();
         self.files.retain(|f| {
-            if paths.iter().any(|p| *p == f.path) {
+            if paths.contains(&f.path) {
                 if let Before::Text(t) = &f.before {
                     self.held = self.held.saturating_sub(t.len());
                 }
@@ -381,6 +382,42 @@ impl Journal {
                 true
             }
         });
+    }
+
+    /// Prune entries after restoring to before `turn`.
+    ///
+    /// Files first touched at or after `turn` are removed (reverted to pre-touch state).
+    /// Files first touched before `turn` keep their session-start state and earlier snapshots,
+    /// while snapshots at or after `turn` are removed.
+    pub fn prune_after_turn(&mut self, turn: u64) {
+        self.files.retain_mut(|f| {
+            if f.turn >= turn {
+                if let Before::Text(t) = &f.before {
+                    self.held = self.held.saturating_sub(t.len());
+                }
+                for (_, before) in &f.snapshots {
+                    if let Before::Text(t) = before {
+                        self.held = self.held.saturating_sub(t.len());
+                    }
+                }
+                false
+            } else {
+                f.snapshots.retain(|(t, before)| {
+                    if *t >= turn {
+                        if let Before::Text(s) = before {
+                            self.held = self.held.saturating_sub(s.len());
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                true
+            }
+        });
+        if turn <= 1 {
+            self.shell.clear();
+        }
     }
 
     /// The commands whose effects the plan above does not cover, if any ran.
@@ -434,8 +471,9 @@ impl Report {
         let mut lines = Vec::new();
         let touched = self.restored.len() + self.deleted.len();
         lines.push(match touched {
-            0 => "Rolled back nothing — every file was already as the session found it."
-                .to_string(),
+            0 => {
+                "Rolled back nothing — every file was already as the session found it.".to_string()
+            }
             _ => format!(
                 "Rolled back {touched} file(s): {} restored, {} deleted.",
                 self.restored.len(),
@@ -659,7 +697,11 @@ mod tests {
     fn deleting_an_already_missing_file_is_not_a_failure() {
         let dir = tempfile::tempdir().unwrap();
         let mut journal = Journal::default();
-        journal.record(wrote("gone.rs", &dir.path().join("gone.rs"), Before::Absent));
+        journal.record(wrote(
+            "gone.rs",
+            &dir.path().join("gone.rs"),
+            Before::Absent,
+        ));
 
         let report = apply(&journal.plan());
         assert!(report.failed.is_empty());
@@ -881,8 +923,14 @@ mod tests {
         std::fs::write(&path, "v2\n").unwrap();
 
         let mut journal = Journal::default();
-        journal.record_turn(wrote("test.txt", &path, Before::Text("orig\n".to_string())), 1);
-        journal.record_turn(wrote("test.txt", &path, Before::Text("v1\n".to_string())), 2);
+        journal.record_turn(
+            wrote("test.txt", &path, Before::Text("orig\n".to_string())),
+            1,
+        );
+        journal.record_turn(
+            wrote("test.txt", &path, Before::Text("v1\n".to_string())),
+            2,
+        );
 
         let steps = journal.plan_before_turn(2);
         assert_eq!(steps.len(), 1);
@@ -907,7 +955,10 @@ mod tests {
         std::fs::write(&made, "new\n").unwrap();
 
         let mut journal = Journal::default();
-        journal.record_turn(wrote("edited.txt", &edited, Before::Text("orig\n".to_string())), 1);
+        journal.record_turn(
+            wrote("edited.txt", &edited, Before::Text("orig\n".to_string())),
+            1,
+        );
         journal.record_turn(wrote("made.txt", &made, Before::Absent), 2);
 
         // Turn 3 touched nothing.
@@ -937,7 +988,10 @@ mod tests {
         journal.record_turn(wrote("f.txt", &path, Before::Text("base\n".to_string())), 1);
         std::fs::write(&path, "base\nline1\n").unwrap();
         // Turn 2 adds line 2.
-        journal.record_turn(wrote("f.txt", &path, Before::Text("base\nline1\n".to_string())), 2);
+        journal.record_turn(
+            wrote("f.txt", &path, Before::Text("base\nline1\n".to_string())),
+            2,
+        );
         std::fs::write(&path, "base\nline1\nline2\n").unwrap();
 
         // Restore before turn 2: undo line 2, keep line 1, then spend the entry.
@@ -948,7 +1002,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "base\nline1\n");
 
         // Turn 3 re-adds line 2.
-        journal.record_turn(wrote("f.txt", &path, Before::Text("base\nline1\n".to_string())), 3);
+        journal.record_turn(
+            wrote("f.txt", &path, Before::Text("base\nline1\n".to_string())),
+            3,
+        );
         std::fs::write(&path, "base\nline1\nline2\n").unwrap();
 
         // Restore before turn 3: line 2 comes off again.
@@ -956,6 +1013,48 @@ mod tests {
         assert_eq!(steps.len(), 1, "turn 3's re-edit must still be undoable");
         let report = apply(&steps);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "base\nline1\n");
-        assert!(!report.restored.is_empty(), "expected a restore, not 'nothing': {report:?}");
+        assert!(
+            !report.restored.is_empty(),
+            "expected a restore, not 'nothing': {report:?}"
+        );
+    }
+
+    #[test]
+    fn prune_after_turn_preserves_earlier_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        let mut journal = Journal::default();
+
+        // Turn 1 edits file
+        journal.record_turn(
+            wrote("file.txt", &path, Before::Text("v0\n".to_string())),
+            1,
+        );
+        // Turn 2 edits file again
+        journal.record_turn(
+            wrote("file.txt", &path, Before::Text("v1\n".to_string())),
+            2,
+        );
+        // Turn 3 edits file again
+        journal.record_turn(
+            wrote("file.txt", &path, Before::Text("v2\n".to_string())),
+            3,
+        );
+
+        // Pruning after restoring to before turn 3 should keep turn 1 and turn 2 states
+        journal.prune_after_turn(3);
+        assert_eq!(journal.files.len(), 1);
+        assert_eq!(journal.files[0].snapshots.len(), 1);
+        assert_eq!(journal.files[0].snapshots[0].0, 2);
+
+        // Pruning after restoring to before turn 2 should keep only turn 1 initial before-state
+        journal.prune_after_turn(2);
+        assert_eq!(journal.files.len(), 1);
+        assert!(journal.files[0].snapshots.is_empty());
+        assert_eq!(journal.files[0].before, Before::Text("v0\n".to_string()));
+
+        // Pruning after restoring to before turn 1 removes the file entirely
+        journal.prune_after_turn(1);
+        assert!(journal.is_empty());
     }
 }

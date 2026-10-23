@@ -96,8 +96,7 @@ fn gh_risk(args: &[&str]) -> Risk {
     // then some, without naming any of them.
     if *noun == "api" {
         let writes = args.windows(2).any(|pair| {
-            matches!(pair[0], "-X" | "--method")
-                && !pair[1].eq_ignore_ascii_case("GET")
+            matches!(pair[0], "-X" | "--method") && !pair[1].eq_ignore_ascii_case("GET")
         }) || args.iter().any(|a| {
             a.strip_prefix("--method=")
                 .is_some_and(|m| !m.eq_ignore_ascii_case("GET"))
@@ -119,7 +118,9 @@ fn gh_risk(args: &[&str]) -> Risk {
         ("secret", "delete") | ("variable", "delete") => {
             dangerous("removes a secret or variable that CI may depend on")
         }
-        ("ssh-key", "delete") | ("gpg-key", "delete") => dangerous("removes a key from your account"),
+        ("ssh-key", "delete") | ("gpg-key", "delete") => {
+            dangerous("removes a key from your account")
+        }
         ("cache", "delete") => dangerous("deletes CI caches"),
         ("workflow", "disable") => dangerous("disables a CI workflow"),
         ("auth", "logout") => dangerous("signs this machine out of GitHub"),
@@ -138,8 +139,24 @@ fn dangerous(reason: impl Into<String>) -> Risk {
 /// Interpreters that turn arbitrary text into execution. Piping a download into
 /// one of these is the classic remote-code-execution one-liner.
 const INTERPRETERS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "python", "python2", "python3",
-    "perl", "ruby", "node", "php", "cmd", "powershell", "pwsh",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "csh",
+    "tcsh",
+    "python",
+    "python2",
+    "python3",
+    "perl",
+    "ruby",
+    "node",
+    "php",
+    "cmd",
+    "powershell",
+    "pwsh",
 ];
 
 /// Programs that fetch from the network.
@@ -148,8 +165,17 @@ const DOWNLOADERS: &[&str] = &["curl", "wget", "fetch", "iwr", "invoke-webreques
 /// Whole-disk and partition tools. None of these have a safe form to run from a
 /// project directory.
 const DISK_TOOLS: &[&str] = &[
-    "mkfs", "fdisk", "parted", "gparted", "wipefs", "sfdisk", "cfdisk", "diskpart", "format",
-    "hdparm", "badblocks",
+    "mkfs",
+    "fdisk",
+    "parted",
+    "gparted",
+    "wipefs",
+    "sfdisk",
+    "cfdisk",
+    "diskpart",
+    "format",
+    "hdparm",
+    "badblocks",
 ];
 
 /// Turning the machine off mid-session is never what the user meant.
@@ -206,7 +232,9 @@ fn whole_command_risk(command: &str) -> Risk {
     // Decoded-then-executed payloads: the point of the encoding is that the
     // command cannot be read, so it cannot be judged either.
     if (lower.contains("base64") || lower.contains("xxd") || lower.contains("uudecode"))
-        && INTERPRETERS.iter().any(|i| lower.contains(&format!("| {i}")))
+        && INTERPRETERS
+            .iter()
+            .any(|i| lower.contains(&format!("| {i}")))
     {
         return blocked("executes decoded data, so what would actually run cannot be read");
     }
@@ -300,8 +328,14 @@ fn program_risk(program: &str, args: &[&str], root: &Path) -> Risk {
         "del" | "erase" | "rd" | "remove-item" | "ri" => {
             return windows_delete_risk(program, args, root)
         }
-        "cipher" if args.iter().any(|a| a.to_ascii_lowercase().starts_with("/w")) => {
-            return blocked("`cipher /w` overwrites free space so deleted files cannot be recovered")
+        "cipher"
+            if args
+                .iter()
+                .any(|a| a.to_ascii_lowercase().starts_with("/w")) =>
+        {
+            return blocked(
+                "`cipher /w` overwrites free space so deleted files cannot be recovered",
+            )
         }
         "vssadmin" | "wbadmin" => {
             let joined = args.join(" ").to_ascii_lowercase();
@@ -310,12 +344,18 @@ fn program_risk(program: &str, args: &[&str], root: &Path) -> Risk {
                 return blocked("deletes shadow copies / backups, removing any way to restore");
             }
         }
-        "bcdedit" => return blocked("rewrites the boot configuration, which can make Windows unbootable"),
+        "bcdedit" => {
+            return blocked("rewrites the boot configuration, which can make Windows unbootable")
+        }
         "clear-disk" | "format-volume" | "initialize-disk" | "set-disk" => {
             return blocked(format!("`{program}` erases or repartitions a disk"))
         }
         "stop-computer" | "restart-computer" => return blocked("powers the machine off"),
-        "reg" if args.first().is_some_and(|a| a.eq_ignore_ascii_case("delete")) => {
+        "reg"
+            if args
+                .first()
+                .is_some_and(|a| a.eq_ignore_ascii_case("delete")) =>
+        {
             let hive = args.get(1).copied().unwrap_or("").to_ascii_uppercase();
             if hive.starts_with("HKLM") || hive.starts_with("HKEY_LOCAL_MACHINE") {
                 return blocked("deletes machine-wide registry keys, which can break Windows");
@@ -349,7 +389,10 @@ fn program_risk(program: &str, args: &[&str], root: &Path) -> Risk {
         "git" => git_risk(args),
         "find" => find_risk(args, root),
         "kill" | "killall" | "pkill" => {
-            if args.iter().any(|a| *a == "1" || *a == "init" || *a == "systemd") {
+            if args
+                .iter()
+                .any(|a| *a == "1" || *a == "init" || *a == "systemd")
+            {
                 blocked("killing PID 1 takes the whole system down")
             } else {
                 dangerous("terminates running processes")
@@ -437,7 +480,9 @@ fn windows_delete_risk(program: &str, args: &[&str], root: &Path) -> Risk {
         // and the most important one there is.
         let is_dos_switch = arg.starts_with('/')
             && (2..=4).contains(&arg.len())
-            && arg[1..].chars().all(|c| c.is_ascii_alphanumeric() || c == ':');
+            && arg[1..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == ':');
         if arg.starts_with('-') || is_dos_switch {
             continue;
         }
@@ -507,7 +552,9 @@ fn ownership_risk(program: &str, args: &[&str], root: &Path) -> Risk {
         }
     }
     if recursive {
-        dangerous(format!("`{program}` rewrites permissions across a whole tree"))
+        dangerous(format!(
+            "`{program}` rewrites permissions across a whole tree"
+        ))
     } else {
         Risk::Normal
     }
@@ -521,7 +568,9 @@ fn write_target_risk(program: &str, args: &[&str], root: &Path) -> Risk {
     };
 
     if is_device(destination) {
-        return blocked(format!("`{program}` writing to a raw device destroys the disk"));
+        return blocked(format!(
+            "`{program}` writing to a raw device destroys the disk"
+        ));
     }
     if is_temp_path(destination) {
         return Risk::Normal;
@@ -558,8 +607,7 @@ fn has_short_flag(args: &[&str], flag: char) -> bool {
 
 fn git_risk(args: &[&str]) -> Risk {
     let sub = args.iter().find(|a| !a.starts_with('-')).copied();
-    let forced =
-        has_short_flag(args, 'f') || args.iter().any(|a| a.starts_with("--force"));
+    let forced = has_short_flag(args, 'f') || args.iter().any(|a| a.starts_with("--force"));
 
     match sub {
         Some("reset") if args.contains(&"--hard") => {
@@ -756,7 +804,9 @@ fn classify_target(raw: &str, root: &Path) -> Target {
     let normalized = expanded.trim_end_matches('/').trim_end_matches('\\');
     if normalized.is_empty()
         || matches!(
-            expanded.to_ascii_lowercase().trim_end_matches(['/', '\\', '*']),
+            expanded
+                .to_ascii_lowercase()
+                .trim_end_matches(['/', '\\', '*']),
             "" | "c:" | "d:"
         )
     {
@@ -810,7 +860,10 @@ fn expand_home(target: &str) -> String {
     if home.is_empty() {
         // Without a home directory to compare against, `~` is still clearly not
         // inside the project -- keep it absolute so the check below rejects it.
-        return target.replace("$HOME", "/~").replace("${HOME}", "/~").replacen('~', "/~", 1);
+        return target
+            .replace("$HOME", "/~")
+            .replace("${HOME}", "/~")
+            .replacen('~', "/~", 1);
     }
     if target == "~" {
         return home;
@@ -843,8 +896,7 @@ fn is_temp_path(target: &str) -> bool {
     }
     roots.iter().any(|root| {
         let root = root.trim_end_matches('/');
-        !root.is_empty()
-            && (normalized == root || normalized.starts_with(&format!("{root}/")))
+        !root.is_empty() && (normalized == root || normalized.starts_with(&format!("{root}/")))
     })
 }
 
@@ -943,7 +995,11 @@ mod tests {
     }
 
     fn assert_normal(command: &str) {
-        assert_eq!(risk(command), Risk::Normal, "expected NORMAL for `{command}`");
+        assert_eq!(
+            risk(command),
+            Risk::Normal,
+            "expected NORMAL for `{command}`"
+        );
     }
 
     /// The command that prompted all of this, in the spellings it actually gets
@@ -969,7 +1025,13 @@ mod tests {
 
     #[test]
     fn erasing_the_home_directory_is_blocked() {
-        for command in ["rm -rf ~", "rm -rf ~/", "rm -rf $HOME", "rm -rf ${HOME}", "rm -rf ~/*"] {
+        for command in [
+            "rm -rf ~",
+            "rm -rf ~/",
+            "rm -rf $HOME",
+            "rm -rf ${HOME}",
+            "rm -rf ~/*",
+        ] {
             assert_blocked(command);
         }
     }
@@ -991,7 +1053,11 @@ mod tests {
     /// The subtle escape: relative paths that climb out of the project.
     #[test]
     fn climbing_out_of_the_project_with_dotdot_is_blocked() {
-        for command in ["rm -rf ../..", "rm -rf ../../../", "rm -rf ./../../other-project"] {
+        for command in [
+            "rm -rf ../..",
+            "rm -rf ../../../",
+            "rm -rf ./../../other-project",
+        ] {
             assert_blocked(command);
         }
     }
@@ -1083,7 +1149,13 @@ mod tests {
 
     #[test]
     fn powering_the_machine_off_is_blocked() {
-        for command in ["shutdown -h now", "sudo reboot", "poweroff", "halt", "init 0"] {
+        for command in [
+            "shutdown -h now",
+            "sudo reboot",
+            "poweroff",
+            "halt",
+            "init 0",
+        ] {
             assert_blocked(command);
         }
     }
@@ -1111,7 +1183,11 @@ mod tests {
     /// an approval prompt, so it must never ride any fast path.
     #[test]
     fn commands_built_at_runtime_can_never_be_auto_approved() {
-        for command in ["rm -rf $(cat target.txt)", "rm -rf `cat target.txt`", "eval \"$CMD\""] {
+        for command in [
+            "rm -rf $(cat target.txt)",
+            "rm -rf `cat target.txt`",
+            "eval \"$CMD\"",
+        ] {
             let verdict = risk(command);
             assert!(
                 verdict != Risk::Normal,
@@ -1280,10 +1356,12 @@ mod tests {
     fn absolute_targets_are_still_caught_without_a_known_project_directory() {
         let nowhere = PathBuf::new();
         assert!(matches!(classify("rm -rf /", &nowhere), Risk::Blocked(_)));
-        assert!(matches!(classify("mkfs.ext4 /dev/sda", &nowhere), Risk::Blocked(_)));
+        assert!(matches!(
+            classify("mkfs.ext4 /dev/sda", &nowhere),
+            Risk::Blocked(_)
+        ));
         assert!(classify("rm -rf build", &nowhere).is_dangerous());
     }
-
 
     /// Windows destruction, checked on every platform. These rules are not
     /// behind `cfg!(windows)` on purpose: the classifier is string analysis,
@@ -1323,7 +1401,11 @@ mod tests {
     /// parsed as a path would refuse every one of these.
     #[test]
     fn windows_cleanup_inside_the_project_asks_rather_than_refusing() {
-        for command in ["del /q build\\out.o", "rd /s /q build", "Remove-Item -Recurse build"] {
+        for command in [
+            "del /q build\\out.o",
+            "rd /s /q build",
+            "Remove-Item -Recurse build",
+        ] {
             assert_dangerous(command);
         }
     }

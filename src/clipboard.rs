@@ -102,7 +102,10 @@ fn read_windows() -> Option<ImageAttachment> {
 fn read_linux() -> Option<ImageAttachment> {
     for (tool, args) in [
         ("wl-paste", vec!["--type", "image/png"]),
-        ("xclip", vec!["-selection", "clipboard", "-t", "image/png", "-o"]),
+        (
+            "xclip",
+            vec!["-selection", "clipboard", "-t", "image/png", "-o"],
+        ),
     ] {
         if let Ok(out) = Command::new(tool).args(args).output() {
             if out.status.success() && !out.stdout.is_empty() {

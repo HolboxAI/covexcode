@@ -35,8 +35,8 @@
 //! [`redact`] on the way in regardless, because a CLI may print a token this
 //! app never held.
 
-pub mod cli;
 pub mod backend;
+pub mod cli;
 pub mod detect;
 pub mod history;
 pub mod netlify;
@@ -318,8 +318,11 @@ pub trait DeploymentProvider: Send + Sync {
     fn link_project(&self, plan: &DeployPlan) -> Option<ProviderCommand>;
     fn deploy(&self, plan: &DeployPlan) -> ProviderCommand;
     /// `None` when the provider has no separate status query worth making.
-    fn get_deployment_status(&self, deployment: &str, token: Option<&Secret>)
-        -> Option<ProviderCommand>;
+    fn get_deployment_status(
+        &self,
+        deployment: &str,
+        token: Option<&Secret>,
+    ) -> Option<ProviderCommand>;
 
     // ---- readers ---------------------------------------------------------
 
@@ -345,13 +348,30 @@ pub fn provider_by_id(id: &str) -> Option<Box<dyn DeploymentProvider>> {
 
 /// Keys whose value is a secret whatever it looks like.
 const SECRET_KEY_HINTS: &[&str] = &[
-    "token", "secret", "password", "passwd", "pwd", "apikey", "api_key", "auth", "credential",
-    "private_key", "access_key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "apikey",
+    "api_key",
+    "auth",
+    "credential",
+    "private_key",
+    "access_key",
 ];
 
 /// Token prefixes worth catching on sight, since a CLI may print one this app
 /// never held and therefore cannot know to mask.
-const TOKEN_PREFIXES: &[&str] = &["vercel_", "nfp_", "ghp_", "gho_", "github_pat_", "sk-", "nf_"];
+const TOKEN_PREFIXES: &[&str] = &[
+    "vercel_",
+    "nfp_",
+    "ghp_",
+    "gho_",
+    "github_pat_",
+    "sk-",
+    "nf_",
+];
 
 const MASK: &str = "••••";
 
@@ -401,7 +421,10 @@ fn redact_word(word: &str, after_keyword: bool) -> String {
             }
             let normalized = key.trim_start_matches('-').to_ascii_lowercase();
             let normalized = normalized.replace(['-', '.'], "_");
-            if SECRET_KEY_HINTS.iter().any(|hint| normalized.contains(hint)) {
+            if SECRET_KEY_HINTS
+                .iter()
+                .any(|hint| normalized.contains(hint))
+            {
                 return format!("{key}{separator}{MASK}");
             }
         }
@@ -434,13 +457,18 @@ mod tests {
     /// itself a small leak.
     #[test]
     fn masking_is_a_fixed_width_regardless_of_the_secret() {
-        assert_eq!(Secret::new("a").masked(), Secret::new("a".repeat(200)).masked());
+        assert_eq!(
+            Secret::new("a").masked(),
+            Secret::new("a".repeat(200)).masked()
+        );
     }
 
     #[test]
     fn a_described_command_never_renders_its_environment() {
-        let command = ProviderCommand::new("vercel", &["deploy", "--yes"])
-            .with_env(vec![("VERCEL_TOKEN".to_string(), Secret::new("tok_secret"))]);
+        let command = ProviderCommand::new("vercel", &["deploy", "--yes"]).with_env(vec![(
+            "VERCEL_TOKEN".to_string(),
+            Secret::new("tok_secret"),
+        )]);
         let shown = command.display();
         assert_eq!(shown, "$ vercel deploy --yes");
         assert!(!shown.contains("tok_secret"), "{shown}");
@@ -458,8 +486,16 @@ mod tests {
 
     #[test]
     fn conditional_flags_only_appear_when_asked_for() {
-        assert!(ProviderCommand::new("vercel", &[]).flag_if(true, "--prod").args == vec!["--prod"]);
-        assert!(ProviderCommand::new("vercel", &[]).flag_if(false, "--prod").args.is_empty());
+        assert!(
+            ProviderCommand::new("vercel", &[])
+                .flag_if(true, "--prod")
+                .args
+                == vec!["--prod"]
+        );
+        assert!(ProviderCommand::new("vercel", &[])
+            .flag_if(false, "--prod")
+            .args
+            .is_empty());
     }
 
     // ---- redaction ---------------------------------------------------------
@@ -520,7 +556,10 @@ mod tests {
         assert!(ids.contains(&"netlify"), "{ids:?}");
 
         assert_eq!(provider_by_id("vercel").map(|p| p.label()), Some("Vercel"));
-        assert_eq!(provider_by_id("netlify").map(|p| p.label()), Some("Netlify"));
+        assert_eq!(
+            provider_by_id("netlify").map(|p| p.label()),
+            Some("Netlify")
+        );
         assert!(provider_by_id("heroku").is_none());
     }
 

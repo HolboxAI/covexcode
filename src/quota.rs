@@ -111,7 +111,10 @@ impl DailyQuota {
     /// Zero the counters if the stored date is not `today`.
     pub fn roll_over(&mut self, today: &str) {
         if self.date != today {
-            *self = Self { date: today.to_string(), ..Default::default() };
+            *self = Self {
+                date: today.to_string(),
+                ..Default::default()
+            };
         }
     }
 
@@ -133,9 +136,9 @@ impl DailyQuota {
 
     fn path() -> Option<PathBuf> {
         // Still a guard, not a path: with no home directory at all there is
-    // nowhere to keep state, and falling back to the working directory would
-    // scatter it wherever the app happened to be launched.
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        // nowhere to keep state, and falling back to the working directory would
+        // scatter it wherever the app happened to be launched.
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
         Some(crate::config::Config::config_dir().join("quota.json"))
     }
 
@@ -198,7 +201,10 @@ pub fn evaluate(quota: &DailyQuota, config: &QuotaConfig) -> Verdict {
     check(
         quota.requests as f64,
         config.max_requests_per_day as f64,
-        format!("requests {} of {}", quota.requests, config.max_requests_per_day),
+        format!(
+            "requests {} of {}",
+            quota.requests, config.max_requests_per_day
+        ),
     );
     check(
         quota.total_tokens() as f64,
@@ -212,7 +218,11 @@ pub fn evaluate(quota: &DailyQuota, config: &QuotaConfig) -> Verdict {
     check(
         quota.usd(),
         config.max_usd_per_day,
-        format!("spend ${:.2} of ${:.2}", quota.usd(), config.max_usd_per_day),
+        format!(
+            "spend ${:.2} of ${:.2}",
+            quota.usd(),
+            config.max_usd_per_day
+        ),
     );
 
     if !spent.is_empty() {
@@ -231,7 +241,10 @@ pub fn evaluate(quota: &DailyQuota, config: &QuotaConfig) -> Verdict {
         ));
     }
     if !close.is_empty() {
-        return Verdict::Warn(format!("Approaching the daily limit — {}.", close.join("; ")));
+        return Verdict::Warn(format!(
+            "Approaching the daily limit — {}.",
+            close.join("; ")
+        ));
     }
     Verdict::Ok
 }
@@ -294,7 +307,11 @@ pub fn format_usd(usd: f64) -> String {
 /// The user's own ceilings, counted on this machine.
 pub fn describe(quota: &DailyQuota, config: &QuotaConfig) -> String {
     let limit = |used: String, limit: String, unlimited: bool| {
-        if unlimited { format!("{used} — no limit set") } else { format!("{used} of {limit}") }
+        if unlimited {
+            format!("{used} — no limit set")
+        } else {
+            format!("{used} of {limit}")
+        }
     };
 
     let mut lines = vec!["Your own limits (counted on this machine)".to_string()];
@@ -344,9 +361,14 @@ pub fn describe(quota: &DailyQuota, config: &QuotaConfig) -> String {
     // one, rather than leaving the user to find the config file.
     if !config.has_limits() {
         lines.push("  No limits of your own yet. Set one with:".to_string());
-        lines.push("    /quota set requests 200  ·  /quota set tokens 500000  ·  /quota set usd 0.10".to_string());
+        lines.push(
+            "    /quota set requests 200  ·  /quota set tokens 500000  ·  /quota set usd 0.10"
+                .to_string(),
+        );
     } else {
-        lines.push("  /quota set <requests|tokens|usd> <n> to change · /quota clear to remove".to_string());
+        lines.push(
+            "  /quota set <requests|tokens|usd> <n> to change · /quota clear to remove".to_string(),
+        );
     }
     lines.join("\n")
 }
@@ -389,16 +411,31 @@ mod tests {
     #[test]
     fn a_zero_limit_is_unlimited_for_that_metric_alone() {
         let c = cfg(5, 0, 0.0);
-        assert_eq!(evaluate(&used(1, 9_000_000, 0, 500_000_000), &c), Verdict::Ok);
-        assert!(matches!(evaluate(&used(5, 0, 0, 0), &c), Verdict::Blocked(_)));
+        assert_eq!(
+            evaluate(&used(1, 9_000_000, 0, 500_000_000), &c),
+            Verdict::Ok
+        );
+        assert!(matches!(
+            evaluate(&used(5, 0, 0, 0), &c),
+            Verdict::Blocked(_)
+        ));
     }
 
     #[test]
     fn each_metric_can_trip_the_limit_on_its_own() {
         let c = cfg(100, 1000, 1.0);
-        assert!(matches!(evaluate(&used(100, 0, 0, 0), &c), Verdict::Blocked(_)));
-        assert!(matches!(evaluate(&used(1, 600, 400, 0), &c), Verdict::Blocked(_)));
-        assert!(matches!(evaluate(&used(1, 0, 0, 1_000_000), &c), Verdict::Blocked(_)));
+        assert!(matches!(
+            evaluate(&used(100, 0, 0, 0), &c),
+            Verdict::Blocked(_)
+        ));
+        assert!(matches!(
+            evaluate(&used(1, 600, 400, 0), &c),
+            Verdict::Blocked(_)
+        ));
+        assert!(matches!(
+            evaluate(&used(1, 0, 0, 1_000_000), &c),
+            Verdict::Blocked(_)
+        ));
     }
 
     #[test]
@@ -424,7 +461,10 @@ mod tests {
     fn an_override_downgrades_a_block_to_a_warning() {
         let mut over = used(11, 0, 0, 0);
         over.override_active = true;
-        assert!(matches!(evaluate(&over, &cfg(10, 0, 0.0)), Verdict::Warn(_)));
+        assert!(matches!(
+            evaluate(&over, &cfg(10, 0, 0.0)),
+            Verdict::Warn(_)
+        ));
     }
 
     #[test]
@@ -456,8 +496,18 @@ mod tests {
     #[test]
     fn recording_accumulates_tokens_and_cost() {
         let mut q = DailyQuota::default();
-        let price = ModelPrice { input_per_mtok: 1.0, output_per_mtok: 2.0 };
-        q.record(&TokenCount { prompt: 1_000_000, completion: 1_000_000, estimated: false }, Some(price));
+        let price = ModelPrice {
+            input_per_mtok: 1.0,
+            output_per_mtok: 2.0,
+        };
+        q.record(
+            &TokenCount {
+                prompt: 1_000_000,
+                completion: 1_000_000,
+                estimated: false,
+            },
+            Some(price),
+        );
         assert_eq!(q.requests, 1);
         assert_eq!(q.total_tokens(), 2_000_000);
         assert_eq!(q.micro_usd, 3_000_000);
@@ -469,7 +519,14 @@ mod tests {
     #[test]
     fn an_unpriced_model_is_counted_separately_rather_than_as_free() {
         let mut q = DailyQuota::default();
-        q.record(&TokenCount { prompt: 5_000_000, completion: 5_000_000, estimated: false }, None);
+        q.record(
+            &TokenCount {
+                prompt: 5_000_000,
+                completion: 5_000_000,
+                estimated: false,
+            },
+            None,
+        );
         assert_eq!(q.micro_usd, 0);
         assert_eq!(q.unpriced_requests, 1);
         assert!(describe(&q, &QuotaConfig::default()).contains("no price"));
@@ -478,7 +535,14 @@ mod tests {
     #[test]
     fn estimated_counts_are_marked_in_the_readout() {
         let mut q = DailyQuota::default();
-        q.record(&TokenCount { prompt: 100, completion: 100, estimated: true }, None);
+        q.record(
+            &TokenCount {
+                prompt: 100,
+                completion: 100,
+                estimated: true,
+            },
+            None,
+        );
         assert!(q.any_estimated);
         assert!(describe(&q, &QuotaConfig::default()).contains("estimated"));
     }
@@ -506,8 +570,15 @@ mod tests {
     /// Integer micro-dollars exist so this holds exactly over many requests.
     #[test]
     fn cost_accumulates_without_drift() {
-        let price = ModelPrice { input_per_mtok: 0.14, output_per_mtok: 0.28 };
-        let tokens = TokenCount { prompt: 333, completion: 777, estimated: false };
+        let price = ModelPrice {
+            input_per_mtok: 0.14,
+            output_per_mtok: 0.28,
+        };
+        let tokens = TokenCount {
+            prompt: 333,
+            completion: 777,
+            estimated: false,
+        };
         let mut q = DailyQuota::default();
         for _ in 0..10_000 {
             q.record(&tokens, Some(price));

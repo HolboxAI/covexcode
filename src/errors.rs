@@ -98,7 +98,10 @@ pub async fn list_pending(path: &Path, endpoint: &str) -> Result<Vec<ReportedErr
 /// Same as `list_pending`, but for a caller that has already resolved the
 /// project id itself -- see `list_pending`'s doc comment for when to use
 /// this instead.
-pub async fn list_pending_for_id(project_id: &str, endpoint: &str) -> Result<Vec<ReportedError>, String> {
+pub async fn list_pending_for_id(
+    project_id: &str,
+    endpoint: &str,
+) -> Result<Vec<ReportedError>, String> {
     require_endpoint(endpoint)?;
 
     let client = http_client()?;
@@ -112,7 +115,10 @@ pub async fn list_pending_for_id(project_id: &str, endpoint: &str) -> Result<Vec
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("the errors service refused this ({status}): {}", text.trim()));
+        return Err(format!(
+            "the errors service refused this ({status}): {}",
+            text.trim()
+        ));
     }
     serde_json::from_str(&text)
         .map_err(|e| format!("the errors service returned something unexpected ({e})"))
@@ -140,7 +146,10 @@ pub async fn resolve(path: &Path, endpoint: &str, id: &str) -> Result<(), String
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(format!("the errors service refused this ({status}): {}", text.trim()));
+        return Err(format!(
+            "the errors service refused this ({status}): {}",
+            text.trim()
+        ));
     }
     Ok(())
 }
@@ -180,8 +189,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_unpublished_path_is_refused_before_any_network_call() {
-        let dir =
-            std::env::temp_dir().join(format!("covexcode-errors-unpublished-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "covexcode-errors-unpublished-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let target = dir.join("index.html");
@@ -191,11 +202,14 @@ mod tests {
         // if the code got as far as trying to reach it -- the assertion on
         // the message is what proves it was refused *before* that, for the
         // right reason.
-        let error = list_pending(&target, "http://127.0.0.1:1").await.expect_err("should refuse");
+        let error = list_pending(&target, "http://127.0.0.1:1")
+            .await
+            .expect_err("should refuse");
         assert!(error.contains("publish_artifact"), "{error}");
 
-        let error =
-            resolve(&target, "http://127.0.0.1:1", "err_abc123").await.expect_err("should refuse");
+        let error = resolve(&target, "http://127.0.0.1:1", "err_abc123")
+            .await
+            .expect_err("should refuse");
         assert!(error.contains("publish_artifact"), "{error}");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -269,7 +283,11 @@ mod tests {
     /// `artifacts::publish` itself would leave, since `remember` there is
     /// private to that module -- same helper `db.rs`'s tests use.
     fn fake_publish(fake_home: &Path, project_dir: &Path, id: &str) {
-        let key = project_dir.canonicalize().expect("canonicalize").to_string_lossy().into_owned();
+        let key = project_dir
+            .canonicalize()
+            .expect("canonicalize")
+            .to_string_lossy()
+            .into_owned();
         let registry_path = fake_home.join(".boxcode").join("artifacts.json");
         std::fs::create_dir_all(registry_path.parent().unwrap()).expect("mkdir");
         let published_at = std::time::SystemTime::now()
@@ -277,7 +295,8 @@ mod tests {
             .expect("clock")
             .as_secs();
         let map = serde_json::json!({ key: { "id": id, "published_at": published_at } });
-        std::fs::write(registry_path, serde_json::to_string_pretty(&map).unwrap()).expect("write registry");
+        std::fs::write(registry_path, serde_json::to_string_pretty(&map).unwrap())
+            .expect("write registry");
     }
 
     /// Same reasoning as `db.rs`'s `an_access_token_is_forwarded...`: this
@@ -285,7 +304,9 @@ mod tests {
     /// `HOME_LOCK` directly rather than going through `with_isolated_home`.
     #[tokio::test]
     async fn list_pending_parses_a_real_response_and_resolve_posts_the_project_id() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -308,7 +329,10 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].id, "err_1");
         assert_eq!(errors[0].count, 3);
-        assert_eq!(describe(&errors[0]), "[runtime error (×3)] TypeError: x is undefined — /checkout.js:12:4");
+        assert_eq!(
+            describe(&errors[0]),
+            "[runtime error (×3)] TypeError: x is undefined — /checkout.js:12:4"
+        );
 
         // Second round: resolve, and check the request body actually names
         // the right project -- same "sent the right thing on the wire"
@@ -324,7 +348,10 @@ mod tests {
 
         assert!(resolve_result.is_ok(), "{resolve_result:?}");
         let body = handle.await.expect("server task");
-        assert!(body.contains("\"project_id\":\"proj-with-errors\""), "{body}");
+        assert!(
+            body.contains("\"project_id\":\"proj-with-errors\""),
+            "{body}"
+        );
     }
 
     #[test]
