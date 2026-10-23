@@ -1212,7 +1212,7 @@ impl App {
     /// next prompt. Says so either way -- a silent no-op on "no image" would
     /// read as the key being dead.
     fn attach_clipboard_image(&mut self) {
-        if !providers::supports_images(&self.config.llm.provider) {
+        if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
             self.explain_no_vision();
             return;
         }
@@ -1265,7 +1265,7 @@ impl App {
         let Some(mime) = mime_for_path(&candidate) else {
             return false;
         };
-        if !providers::supports_images(&self.config.llm.provider) {
+        if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
             self.explain_no_vision();
             // Consume the path -- inserting it as text would be the *worse*
             // fallback: it would look like a prompt about a file the model
@@ -3546,7 +3546,10 @@ impl App {
                     // where the wire message is built, is the real guarantee
                     // that a base64 image never reaches an endpoint that would
                     // garble it.
-                    images: if providers::supports_images(&self.config.llm.provider) {
+                    images: if providers::supports_images(
+                        &self.config.llm.provider,
+                        &self.config.llm.model,
+                    ) {
                         message.images.clone()
                     } else {
                         Vec::new()

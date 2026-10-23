@@ -45,12 +45,18 @@ pub fn find_provider(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.id == id)
 }
 
-/// Whether the active provider can read images. Unknown/custom endpoints are
-/// assumed capable: the user opted into "any OpenAI-compatible endpoint", which
-/// may well be a multimodal server, and guessing wrong on the pessimistic side
-/// would silently strip an image a real model could read.
-pub fn supports_images(provider_id: &str) -> bool {
-    find_provider(provider_id).map_or(true, |p| p.vision)
+/// Whether the configured model accepts image prompt blocks.
+///
+/// A registry provider answers from its `vision` flag. Unknown providers --
+/// the managed proxy logs in with `provider = ""`, and custom endpoints also
+/// leave it empty -- have no registry entry, so the model id decides: DeepSeek
+/// models are text-only. Anything else stays permissive, preserving the old
+/// "assume a custom endpoint can read images" default.
+pub fn supports_images(provider_id: &str, model_id: &str) -> bool {
+    match find_provider(provider_id) {
+        Some(provider) => provider.vision,
+        None => !model_id.trim().to_ascii_lowercase().starts_with("deepseek"),
+    }
 }
 
 /// The conventional env var a user is likely to already have exported for this
@@ -149,11 +155,19 @@ mod tests {
 
     #[test]
     fn deepseek_is_text_only_and_openai_reads_images() {
-        assert!(!supports_images("deepseek"));
-        assert!(supports_images("openai"));
-        // Unknown/custom endpoints are assumed capable rather than silently
+        assert!(!supports_images("deepseek", "deepseek-v4-flash"));
+        assert!(supports_images("openai", "gpt-5.6-sol"));
+        assert!(
+            supports_images("openai", "deepseek-v4-flash"),
+            "a known provider's own vision flag wins over the model name"
+        );
+        // The managed proxy signs in with no provider id; the model still
+        // identifies DeepSeek as text-only.
+        assert!(!supports_images("", "deepseek-v4-flash"));
+        assert!(!supports_images("some-custom-endpoint", "DeepSeek-V4-Pro"));
+        // Other unknown/custom models are assumed capable rather than silently
         // stripped of a possibly-valid image.
-        assert!(supports_images(""));
-        assert!(supports_images("some-custom-endpoint"));
+        assert!(supports_images("", "my-vision-model"));
+        assert!(supports_images("some-custom-endpoint", "gpt-5.6-sol"));
     }
 }
