@@ -364,6 +364,10 @@ pub fn schemas_for(
                         "purpose": {
                             "type": "string",
                             "description": "One short sentence on why you need it. Shown to the user in the approval prompt, so be specific and honest."
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": "Set true for long-running servers or watchers. The command is started detached with stdin closed and output written to a log file; the tool returns immediately. Do not use this for builds or tests you need to wait for."
                         }
                     },
                     "required": ["command"]
@@ -1814,6 +1818,8 @@ struct RunArgs {
     command: String,
     #[serde(default)]
     purpose: Option<String>,
+    #[serde(default)]
+    background: bool,
 }
 
 #[derive(Deserialize)]
@@ -3177,6 +3183,73 @@ async fn execute_run_command(call: &ToolCall, workspace: &Workspace, config: &To
     }
 
     let (shell_name, shell_flag) = shell();
+
+    // A dev server or watcher never terminates, so waiting for it burns the
+    // whole command timeout and leaves a detached child behind. `background`
+    // gives the model the correct shape: start it detached, log its output,
+    // and return immediately.
+    if args.background {
+        let log_path = std::env::temp_dir().join(format!(
+            "covexcode-bg-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        let log = match std::fs::File::create(&log_path) {
+            Ok(file) => file,
+            Err(e) => {
+                return outcome(
+                    &call.id,
+                    format!("$ {} — could not start", clip(&command, 50)),
+                    format!("Error: could not create the background log: {e}"),
+                )
+            }
+        };
+        let err_log = match log.try_clone() {
+            Ok(file) => file,
+            Err(e) => {
+                return outcome(
+                    &call.id,
+                    format!("$ {} — could not start", clip(&command, 50)),
+                    format!("Error: could not prepare the background log: {e}"),
+                )
+            }
+        };
+        let mut bg = std::process::Command::new(shell_name);
+        bg.arg(shell_flag)
+            .arg(&command)
+            .current_dir(workspace.root())
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(err_log));
+        return match bg.spawn() {
+            Ok(child) => {
+                let mut result = outcome(
+                    &call.id,
+                    format!("$ {} — background", clip(&command, 50)),
+                    format!(
+                        "Started in the background as PID {}. Output: {}\n\
+                         The tool returned immediately; check the log for readiness. \
+                         Do not start a second copy.",
+                        child.id(),
+                        log_path.display()
+                    ),
+                );
+                if !is_read_only(&command) {
+                    result.rollback = Some(crate::rollback::Record::Shell { command });
+                }
+                result
+            }
+            Err(e) => outcome(
+                &call.id,
+                format!("$ {} — could not start", clip(&command, 50)),
+                format!("Error: could not start the command in the background: {e}"),
+            ),
+        };
+    }
+
     let mut cmd = tokio::process::Command::new(shell_name);
     cmd.arg(shell_flag)
         .arg(&command)
@@ -3206,7 +3279,9 @@ async fn execute_run_command(call: &ToolCall, workspace: &Workspace, config: &To
                 format!("$ {} — timed out", clip(&command, 50)),
                 format!(
                     "Error: killed after {}s. It was probably waiting for input or would not \
-                     terminate. Try a non-interactive form of the command.",
+                     terminate. Try a non-interactive form of the command. If this starts a \
+                     server or watcher, rerun with background=true or start it in a separate \
+                     terminal; do not foreground it.",
                     config.command_timeout_secs
                 ),
             )
@@ -5470,6 +5545,17 @@ mod tests {
         }
     }
 
+    fn background_call(command: &str) -> ToolCall {
+        ToolCall {
+            id: "call_bg".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: RUN_COMMAND.to_string(),
+                arguments: json!({ "command": command, "background": true }).to_string(),
+            },
+        }
+    }
+
     // ---- ported tools: list_dir, glob, edit_file -------------------------------
 
     fn tool_call(name: &str, args: Value) -> ToolCall {
@@ -6584,6 +6670,21 @@ mod tests {
             "should have been killed promptly, took {:?}",
             started.elapsed()
         );
+    }
+
+    /// A server/watcher is the case the timeout cannot help with. The
+    /// background flag must return immediately and tell the model where the
+    /// output went, instead of waiting out the 300s timeout.
+    #[tokio::test]
+    async fn a_background_command_returns_immediately_and_names_its_log() {
+        let (_dir, ws, cfg) = fixture();
+        let out = execute(&background_call("echo background-ok"), &ws, &cfg).await;
+        assert!(
+            out.content.contains("Started in the background"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("Output:"), "{}", out.content);
     }
 
     #[tokio::test]
