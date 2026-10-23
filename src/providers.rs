@@ -93,6 +93,21 @@ pub fn default_context_window(provider_id: &str) -> u64 {
     }
 }
 
+/// The model's context window when only the model id is known -- the managed
+/// Covexcode proxy and custom endpoints leave `provider` empty on purpose (a
+/// `bx-live-` key is not a DeepSeek BYOK key), so `default_context_window`
+/// cannot answer for them. The model name still identifies the family.
+///
+/// Only families whose window is unambiguous are listed. An unknown model
+/// returns `0`, keeping the "unknown" sentinel rather than guessing a limit.
+pub fn default_context_window_for_model(model_id: &str) -> u64 {
+    if model_id.trim().to_ascii_lowercase().starts_with("deepseek") {
+        131_072
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +129,14 @@ mod tests {
     fn env_var_name_uppercases_the_id() {
         assert_eq!(env_var_name("deepseek"), "DEEPSEEK_API_KEY");
         assert_eq!(env_var_name("openai"), "OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn a_deepseek_model_keeps_its_window_when_no_provider_is_set() {
+        assert_eq!(default_context_window_for_model("deepseek-v4-flash"), 131_072);
+        assert_eq!(default_context_window_for_model("DeepSeek-V4-Pro"), 131_072);
+        assert_eq!(default_context_window_for_model("gpt-5.6-sol"), 0);
+        assert_eq!(default_context_window_for_model(""), 0);
     }
 
     /// `covexcode --providers-json`'s whole reason to exist: an ACP client reads
