@@ -50,6 +50,7 @@ pub fn fire_request(
     let model = app.config.llm.model.clone();
     let api_key = app.config.llm.api_key.clone();
     let max_tokens = app.config.llm.max_tokens;
+    let context_window = app.config.llm.effective_context_window();
     let temperature = app.config.llm.effective_temperature();
 
     // Withholding the schemas once the budget is spent is what actually
@@ -134,6 +135,7 @@ pub fn fire_request(
                 model: &model,
                 api_key: &api_key,
                 max_tokens,
+                context_window,
                 include_usage,
                 temperature,
             },
@@ -433,6 +435,7 @@ pub async fn run_subagent(
                 model: &config.llm.model,
                 api_key: &config.llm.api_key,
                 max_tokens: config.llm.max_tokens,
+                context_window: config.llm.effective_context_window(),
                 include_usage: config.quota.include_usage,
                 temperature: config.llm.effective_temperature(),
             },
