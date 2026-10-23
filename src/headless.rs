@@ -415,6 +415,7 @@ impl HeadlessSession {
             model: &self.config.llm.model,
             api_key: &self.config.llm.api_key,
             max_tokens: self.config.llm.max_tokens,
+            context_window: self.config.llm.effective_context_window(),
             include_usage: self.config.quota.include_usage,
             temperature: self.config.llm.effective_temperature(),
         };
