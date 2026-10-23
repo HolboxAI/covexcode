@@ -52,8 +52,12 @@ use tokio::sync::{mpsc, oneshot};
 /// request outright, and DeepSeek answers as though the image were text it
 /// cannot read. The caller still decides whether to tell the user; this is the
 /// single place that decides what actually goes on the wire.
-fn images_for_model(provider: &str, images: Vec<llm::ImageAttachment>) -> Vec<llm::ImageAttachment> {
-    if crate::providers::supports_images(provider) {
+fn images_for_model(
+    provider: &str,
+    model: &str,
+    images: Vec<llm::ImageAttachment>,
+) -> Vec<llm::ImageAttachment> {
+    if crate::providers::supports_images(provider, model) {
         images
     } else {
         Vec::new()
@@ -297,9 +301,16 @@ impl HeadlessSession {
         self.turn_starts.push(self.messages.len());
 
         let had_images = !images.is_empty();
-        let images_supported = crate::providers::supports_images(&self.config.llm.provider);
+        let images_supported = crate::providers::supports_images(
+            &self.config.llm.provider,
+            &self.config.llm.model,
+        );
         let mut user_message = ChatMessage::text("user", text);
-        user_message.images = images_for_model(&self.config.llm.provider, images);
+        user_message.images = images_for_model(
+            &self.config.llm.provider,
+            &self.config.llm.model,
+            images,
+        );
         if had_images && !images_supported {
             // Say it once, on the turn that carried the image. The image is
             // not sent to a model that would reject or garble it; the turn
@@ -397,8 +408,10 @@ impl HeadlessSession {
                         message.images.clear();
                     }
                     for (call_id, mut content, images) in outcomes {
-                        let images_supported =
-                            crate::providers::supports_images(&self.config.llm.provider);
+                        let images_supported = crate::providers::supports_images(
+                            &self.config.llm.provider,
+                            &self.config.llm.model,
+                        );
                         if !images.is_empty() && !images_supported {
                             // The screenshot is still shown to the human by
                             // the client, but a text-only model must not get
@@ -1543,8 +1556,12 @@ mod tests {
             mime_type: "image/png".to_string(),
             data_base64: "aGVsbG8=".to_string(),
         };
-        assert!(images_for_model("deepseek", vec![image.clone()]).is_empty());
-        assert_eq!(images_for_model("openai", vec![image]).len(), 1);
+        assert!(images_for_model("deepseek", "deepseek-v4-flash", vec![image.clone()]).is_empty());
+        assert!(
+            images_for_model("", "deepseek-v4-flash", vec![image.clone()]).is_empty(),
+            "a proxy login has no provider id but is still text-only"
+        );
+        assert_eq!(images_for_model("openai", "gpt-5.6-sol", vec![image]).len(), 1);
     }
 
     /// The actual end-to-end proof for `ContentBlock::Image`: an image
