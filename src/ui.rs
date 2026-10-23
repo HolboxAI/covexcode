@@ -1260,6 +1260,24 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = vec![Span::raw("  ")];
 
+    // The permission posture is stated on every frame for the same reason plan
+    // mode is: it changes what the next keystroke can possibly do, and the note
+    // announcing the switch scrolls away. Shift+Tab cycles it; plan mode
+    // (below) takes precedence over the label since it overrides the posture.
+    if !app.mode.is_plan() {
+        let label = match app.config.tools.approval {
+            crate::config::ApprovalMode::Destructive => "AUTO",
+            crate::config::ApprovalMode::Always => "MANUAL",
+        };
+        spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(theme::p().accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled("  ·  ", theme::faint()));
+    }
+
     // Plan mode is stated on every frame, not just announced when it was
     // switched on. It changes what the next keystroke can possibly do, and
     // the line saying so scrolls away within a few exchanges -- after which
