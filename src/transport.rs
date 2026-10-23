@@ -329,13 +329,15 @@ impl Router {
             "initialize" => {
                 let _req: InitializeRequest = serde_json::from_value(params)
                     .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let images = crate::providers::supports_images(&self.config.llm.provider);
                 let resp = InitializeResponse {
                     protocol_version: PROTOCOL_VERSION,
-                    // `promptCapabilities.image: true` is the opt-in
+                    // `promptCapabilities.image` is the opt-in
                     // `ContentBlock::Image` requires per the ACP v1 schema
-                    // (protocol.rs's own doc comment on that variant) --
-                    // omitting it would leave a spec-compliant client
-                    // withholding image attachments it otherwise could send.
+                    // (protocol.rs's own doc comment on that variant). It
+                    // follows the configured provider: advertising it for a
+                    // text-only model invites a client to send screenshots
+                    // the endpoint will reject or garble.
                     // `mcp` is not part of the ACP v1 schema, which is exactly
                     // why it has to be advertised explicitly: the schema makes
                     // `mcpServers` a required field on `session/new`, so a build
@@ -344,7 +346,7 @@ impl Router {
                     // cannot tell that apart from real support. This capability
                     // is the positive signal to gate on -- absent it, a client
                     // should refuse to send servers rather than report success.
-                    agent_capabilities: json!({ "session": {}, "mcp": true, "promptCapabilities": { "image": true } }),
+                    agent_capabilities: json!({ "session": {}, "mcp": true, "promptCapabilities": { "image": images } }),
                     auth_methods: Vec::new(),
                     agent_info: Some(Implementation {
                         name: "covexcode".to_string(),
@@ -700,14 +702,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialize_advertises_the_image_prompt_capability() {
+    async fn initialize_advertises_image_only_for_a_vision_provider() {
         // Real regression coverage: a spec-compliant client is only
         // permitted to send ContentBlock::Image if this advertises support
         // for it -- see ContentBlock::Image's own doc comment on why this
-        // is required, not optional polish.
+        // is required, not optional polish. It must follow the provider, or
+        // a text-only model is handed screenshots it cannot use.
         let (outgoing_tx, _outgoing_rx) = mpsc::channel(8);
-        let mut router = Router::new(Config::default(), outgoing_tx);
-        let response = router
+        let mut text_only = Config::default();
+        text_only.llm.provider = "deepseek".to_string();
+        let mut text_router = Router::new(text_only, outgoing_tx.clone());
+        let response = text_router
+            .dispatch_request("initialize", json!({ "protocolVersion": 1 }))
+            .await
+            .expect("initialize always succeeds");
+        assert_eq!(response["agentCapabilities"]["promptCapabilities"]["image"], json!(false));
+
+        let mut vision = Config::default();
+        vision.llm.provider = "openai".to_string();
+        let mut vision_router = Router::new(vision, outgoing_tx);
+        let response = vision_router
             .dispatch_request("initialize", json!({ "protocolVersion": 1 }))
             .await
             .expect("initialize always succeeds");

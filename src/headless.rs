@@ -46,6 +46,20 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+/// Drop image attachments for providers that cannot read them.
+///
+/// A text-only provider must never receive an image: some endpoints reject the
+/// request outright, and DeepSeek answers as though the image were text it
+/// cannot read. The caller still decides whether to tell the user; this is the
+/// single place that decides what actually goes on the wire.
+fn images_for_model(provider: &str, images: Vec<llm::ImageAttachment>) -> Vec<llm::ImageAttachment> {
+    if crate::providers::supports_images(provider) {
+        images
+    } else {
+        Vec::new()
+    }
+}
+
 /// What a caller (the real stdio transport, or a test) gets sent for each
 /// `RequestPermissionRequest` a turn needs answered -- paired with a
 /// `oneshot` so `prompt()` can `await` the one reply it's asking for,
@@ -282,8 +296,25 @@ impl HeadlessSession {
         self.tool_steps = 0;
         self.turn_starts.push(self.messages.len());
 
+        let had_images = !images.is_empty();
+        let images_supported = crate::providers::supports_images(&self.config.llm.provider);
         let mut user_message = ChatMessage::text("user", text);
-        user_message.images = images;
+        user_message.images = images_for_model(&self.config.llm.provider, images);
+        if had_images && !images_supported {
+            // Say it once, on the turn that carried the image. The image is
+            // not sent to a model that would reject or garble it; the turn
+            // still proceeds with the text so the user is not stranded.
+            let _ = updates
+                .send(SessionUpdate::AgentMessageChunk {
+                    content: ContentBlock::Text {
+                        text: "The current model can't read images. The image was omitted; \
+                               switch to a vision model with /model and try again."
+                            .to_string(),
+                    },
+                    message_id: None,
+                })
+                .await;
+        }
         self.messages.push(user_message);
 
         // `App`'s own welcome screen already surfaces a missing key via
@@ -365,7 +396,21 @@ impl HeadlessSession {
                     for message in &mut self.messages {
                         message.images.clear();
                     }
-                    for (call_id, content, images) in outcomes {
+                    for (call_id, mut content, images) in outcomes {
+                        let images_supported =
+                            crate::providers::supports_images(&self.config.llm.provider);
+                        if !images.is_empty() && !images_supported {
+                            // The screenshot is still shown to the human by
+                            // the client, but a text-only model must not get
+                            // it. The accessibility tree above is the useful
+                            // part for this model; name the fix rather than
+                            // silently dropping the image.
+                            content.push_str(
+                                "\n\n(A screenshot was captured but the current model cannot \
+                                 read images; use the accessibility tree text above. Switch to \
+                                 a vision model with /model to use screenshots.)",
+                            );
+                        }
                         self.messages.push(ChatMessage {
                             role: "tool".to_string(),
                             content: Some(content),
@@ -380,7 +425,7 @@ impl HeadlessSession {
                         // rejected outright by real endpoints, which is why
                         // this is a second, separate message rather than
                         // attached to the tool result above.
-                        if !images.is_empty() {
+                        if !images.is_empty() && images_supported {
                             self.messages.push(ChatMessage {
                                 role: "user".to_string(),
                                 content: Some("Screenshot from the browser check above:".to_string()),
@@ -1491,6 +1536,16 @@ mod tests {
         assert_eq!(usage, SessionUpdate::UsageUpdate { used: 15, size: 131_072 });
     }
 
+    #[test]
+    fn images_are_dropped_for_a_text_only_provider() {
+        let image = llm::ImageAttachment {
+            mime_type: "image/png".to_string(),
+            data_base64: "aGVsbG8=".to_string(),
+        };
+        assert!(images_for_model("deepseek", vec![image.clone()]).is_empty());
+        assert_eq!(images_for_model("openai", vec![image]).len(), 1);
+    }
+
     /// The actual end-to-end proof for `ContentBlock::Image`: an image
     /// passed into `prompt()` must reach the real outbound LLM request as a
     /// base64 data URL (llm.rs's `ChatMessage` vision-content-block
@@ -1538,6 +1593,65 @@ mod tests {
             request.contains("data:image/png;base64,aGVsbG8="),
             "the image never reached the real LLM request body: {request}"
         );
+    }
+
+    /// The counterpart to the test above: a text-only provider must never
+    /// receive the image, and the user must be told why it was omitted.
+    #[tokio::test]
+    async fn a_text_only_provider_never_receives_an_image() {
+        let (_dir, ws) = workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let request = read_request(&mut socket).await;
+            let _ = captured_tx.send(request);
+            let _ = socket.write_all(text_round("I cannot see images.").as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+        let mut config = config_for(&format!("http://{addr}"));
+        config.llm.provider = "deepseek".to_string();
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+        let images = vec![llm::ImageAttachment {
+            mime_type: "image/png".to_string(),
+            data_base64: "aGVsbG8=".to_string(),
+        }];
+
+        let stop = session
+            .prompt(
+                "what's wrong with this button?".to_string(),
+                images,
+                None, &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let request = captured_rx.await.expect("request was captured");
+        assert!(
+            !request.contains("data:image/png"),
+            "a text-only provider must not receive an image: {request}"
+        );
+        let mut saw_notice = false;
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } = update
+            {
+                if text.contains("can't read images") {
+                    saw_notice = true;
+                }
+            }
+        }
+        assert!(saw_notice, "the user must be told why the image was omitted");
     }
 
     /// A read (auto-approved, per `verdict_for`) never reaches the
