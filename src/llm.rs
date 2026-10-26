@@ -958,7 +958,7 @@ fn is_retryable_network_error(error: &reqwest::Error) -> bool {
 /// Rough preflight estimate: JSON characters / 4, including tool schemas and
 /// any base64 images. Deliberately conservative; it exists to stop a request
 /// that is clearly over the window, not to replace the endpoint's exact count.
-fn estimate_request_tokens(messages: &[ChatMessage], tools: &[Value]) -> u64 {
+pub(crate) fn estimate_request_tokens(messages: &[ChatMessage], tools: &[Value]) -> u64 {
     let chars = serde_json::to_string(messages).map(|s| s.len()).unwrap_or(0)
         + serde_json::to_string(tools).map(|s| s.len()).unwrap_or(0);
     (chars / 4) as u64
