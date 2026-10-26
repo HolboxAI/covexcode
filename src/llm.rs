@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -395,6 +396,31 @@ pub fn chat_completions_url(endpoint: &str) -> String {
     }
 }
 
+/// Hostname of the backup for the managed Covexcode proxy. It serves the same
+/// API and accepts the same promo keys, but has existed longer, so it survives
+/// the stale or split-horizon resolver that can return NXDOMAIN for the newer
+/// primary hostname.
+const LEGACY_PROXY_HOST: &str = "llm.boxcode.sh";
+
+/// Once a request has actually reached the backup host, keep using it for the
+/// rest of this process instead of paying the primary hostname's DNS timeout
+/// on every turn. A new process starts on the primary host again, so a resolver
+/// that has recovered is picked back up.
+static PREFER_LEGACY_PROXY: AtomicBool = AtomicBool::new(false);
+
+/// The backup URL for the managed Covexcode proxy, or `None` for every other
+/// endpoint. Only the host changes: scheme, port, path, and query stay exactly
+/// as configured, so a custom `/openai` prefix or non-standard port still
+/// works.
+fn legacy_proxy_url(url: &str) -> Option<String> {
+    let mut parsed = reqwest::Url::parse(url).ok()?;
+    if parsed.host_str()? != "llm.covexcode.com" {
+        return None;
+    }
+    parsed.set_host(Some(LEGACY_PROXY_HOST)).ok()?;
+    Some(parsed.to_string())
+}
+
 /// Where a request goes and how it is bounded. Grouped so the two entry points
 /// below take a handful of arguments rather than a dozen positional strings
 /// that are trivial to transpose.
@@ -486,12 +512,23 @@ async fn run(
         .build()
         .map_err(|e| format!("Could not create HTTP client: {e}"))?;
 
-    let url = chat_completions_url(endpoint);
+    let primary_url = chat_completions_url(endpoint);
+    let legacy_url = legacy_proxy_url(&primary_url);
+    let mut url = if PREFER_LEGACY_PROXY.load(Ordering::Relaxed) {
+        legacy_url.clone().unwrap_or_else(|| primary_url.clone())
+    } else {
+        primary_url.clone()
+    };
+    let mut using_legacy = url != primary_url;
 
-    let mut req = client.post(&url).json(&request);
-    if !api_key.is_empty() {
-        req = req.bearer_auth(api_key);
-    }
+    let build_request = |url: &str| {
+        let mut req = client.post(url).json(&request);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+        req
+    };
+    let mut req = build_request(&url);
 
     // Retry the connection/status-check phase only -- never once a token has
     // reached the caller, since replaying a request that already streamed part
@@ -510,7 +547,19 @@ async fn run(
                 tokio::time::sleep(wait).await;
                 continue;
             }
-            Err(error) => return Err(network_failure(&url, &error)),
+            // A resolver that cannot see the newer hostname is not a reason to
+            // end a long task. The backup is the same proxy, so try it before
+            // surfacing anything to the user.
+            Err(error) if !using_legacy && legacy_url.is_some() && is_dns_failure(&error) => {
+                using_legacy = true;
+                attempt = 0;
+                if let Some(legacy) = legacy_url.clone() {
+                    url = legacy;
+                }
+                req = build_request(&url);
+                continue;
+            }
+            Err(error) => return Err(network_failure(&primary_url, &error)),
         };
         let status = response.status();
         if attempt >= MAX_RETRY_ATTEMPTS || !is_retryable_status(status) {
@@ -528,6 +577,9 @@ async fn run(
     // Surface HTTP failures (401 bad key, 404 wrong path, 400 bad model) as text
     // in the transcript instead of silently ending the stream.
     let status = response.status();
+    if using_legacy && status.is_success() {
+        PREFER_LEGACY_PROXY.store(true, Ordering::Relaxed);
+    }
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         let detail = body.trim();
@@ -854,6 +906,36 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
+/// The words a failed DNS lookup uses on each platform. Kept separate from the
+/// reqwest error chain so the Windows wording is testable without a network.
+fn is_dns_failure_message(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "dns error",
+        "failed to lookup",
+        "no such host",
+        "nodename nor servname",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// Whether any layer of the error is a resolver failure. `is_connect()` covers
+/// most platforms, but spelling the chain out keeps DNS retries working if
+/// reqwest changes that classification -- and lets the proxy fallback key on
+/// exactly this failure instead of a generic connection error.
+fn is_dns_failure(error: &reqwest::Error) -> bool {
+    use std::error::Error;
+    let mut source: Option<&(dyn Error + 'static)> = Some(error);
+    while let Some(err) = source {
+        if is_dns_failure_message(&err.to_string()) {
+            return true;
+        }
+        source = err.source();
+    }
+    false
+}
+
 /// A dropped/refused connection before any response is safe to retry: the
 /// request body is buffered JSON and no token has reached the caller yet.
 /// Certificate/TLS failures are permanent, so they are surfaced immediately
@@ -861,6 +943,7 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
 fn is_retryable_network_error(error: &reqwest::Error) -> bool {
     let transient = error.is_timeout()
         || error.is_connect()
+        || is_dns_failure(error)
         || chain_mentions(error, "connection reset")
         || chain_mentions(error, "connection closed")
         || chain_mentions(error, "broken pipe");
@@ -953,7 +1036,7 @@ fn network_failure(url: &str, e: &reqwest::Error) -> String {
     let host = host_of(url);
     // Ordered by specificity: a DNS failure is also a connect failure, and
     // "no such host" is the more useful of the two things to be told.
-    if chain_mentions(e, "dns error") || chain_mentions(e, "failed to lookup") {
+    if is_dns_failure(e) {
         format!("Could not reach {host}: no such host.")
     } else if e.is_timeout() {
         format!("Could not reach {host}: timed out.")
@@ -1248,6 +1331,44 @@ mod tests {
             chat_completions_url("https://llm.internal/v1/chat/completions"),
             "https://llm.internal/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn the_managed_proxy_has_a_legacy_backup_url() {
+        assert_eq!(
+            legacy_proxy_url("https://llm.covexcode.com/v1/chat/completions").as_deref(),
+            Some("https://llm.boxcode.sh/v1/chat/completions")
+        );
+        assert_eq!(
+            legacy_proxy_url("https://llm.covexcode.com:8443/openai/chat/completions").as_deref(),
+            Some("https://llm.boxcode.sh:8443/openai/chat/completions")
+        );
+        // Only the managed host is rewritten; a lookalike or a BYOK endpoint
+        // must keep going exactly where it was configured.
+        assert_eq!(legacy_proxy_url("https://llm.covexcode.com.evil/v1"), None);
+        assert_eq!(
+            legacy_proxy_url("https://api.deepseek.com/v1/chat/completions"),
+            None
+        );
+        assert_eq!(legacy_proxy_url("not a url"), None);
+    }
+
+    #[test]
+    fn dns_failure_wording_is_recognised_on_every_platform() {
+        for message in [
+            "dns error: failed to lookup address information: nodename nor servname provided",
+            "dns error: No such host is known. (os error 11001)",
+            "failed to lookup address information: Name or service not known",
+        ] {
+            assert!(is_dns_failure_message(message), "{message}");
+        }
+        for message in [
+            "connection refused",
+            "certificate verify failed",
+            "tls handshake failed",
+        ] {
+            assert!(!is_dns_failure_message(message), "{message}");
+        }
     }
 
     #[test]
