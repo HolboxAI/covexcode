@@ -547,10 +547,15 @@ async fn run(
                 tokio::time::sleep(wait).await;
                 continue;
             }
-            // A resolver that cannot see the newer hostname is not a reason to
-            // end a long task. The backup is the same proxy, so try it before
+            // A resolver that cannot see the newer hostname, or a connect that
+            // timed out before the proxy answered, is not a reason to end a
+            // long task. The backup is the same proxy, so try it before
             // surfacing anything to the user.
-            Err(error) if !using_legacy && legacy_url.is_some() && is_dns_failure(&error) => {
+            Err(error)
+                if !using_legacy
+                    && legacy_url.is_some()
+                    && (is_dns_failure(&error) || error.is_timeout()) =>
+            {
                 using_legacy = true;
                 attempt = 0;
                 if let Some(legacy) = legacy_url.clone() {
