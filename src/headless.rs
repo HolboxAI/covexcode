@@ -517,7 +517,21 @@ impl HeadlessSession {
                     Some((_, StreamEvent::Reasoning(_))) => {}
                     Some((_, StreamEvent::ToolCalls(c, _))) => calls = c,
                     Some((_, StreamEvent::Usage(u))) => usage = Some(u),
-                    Some((_, StreamEvent::Notice(_) | StreamEvent::AgentActivity { .. })) => {}
+                    // A truncation notice used to be TUI-only. Without it an
+                    // ACP client cannot tell a deliberately short answer from
+                    // one the output cap cut off mid-sentence, so show it in
+                    // the conversation alongside the partial text.
+                    Some((_, StreamEvent::Notice(message))) => {
+                        let _ = updates
+                            .send(SessionUpdate::AgentMessageChunk {
+                                content: ContentBlock::Text {
+                                    text: format!("\n\n{message}\n\n"),
+                                },
+                                message_id: None,
+                            })
+                            .await;
+                    }
+                    Some((_, StreamEvent::AgentActivity { .. })) => {}
                     Some((_, StreamEvent::ToolsFinished(_))) => {}
                     Some((_, StreamEvent::Done)) | None => break None,
                     Some((_, StreamEvent::Error(e))) => break Some(e),
@@ -551,6 +565,20 @@ impl HeadlessSession {
 
         if !text.trim().is_empty() {
             self.messages.push(ChatMessage::text("assistant", text));
+        } else {
+            // A blank completion used to end the turn with no explanation, so
+            // the chat looked like it had silently stopped after its last tool
+            // step. Say what happened; the user can then retry deliberately.
+            let _ = updates
+                .send(SessionUpdate::AgentMessageChunk {
+                    content: ContentBlock::Text {
+                        text: "\n\nThe model returned an empty response. \
+                               Send another message to retry.\n\n"
+                            .to_string(),
+                    },
+                    message_id: None,
+                })
+                .await;
         }
         RoundOutcome::Answered
     }
@@ -1694,6 +1722,89 @@ mod tests {
                 size: 131_072
             }
         );
+    }
+
+    /// The TUI shows `StreamEvent::Notice` (truncation today) on its own; an
+    /// ACP client only sees `AgentMessageChunk`s. Forwarding the notice is
+    /// what stops a cut-off reply from looking like a finished one in the IDE.
+    #[tokio::test]
+    async fn a_truncated_reply_reaches_the_acp_client_as_a_visible_notice() {
+        let (_dir, ws) = workspace();
+        let body = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"half a sen\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let endpoint = serve_rounds(vec![body]).await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let mut visible = String::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } = update
+            {
+                visible.push_str(&text);
+            }
+        }
+        assert!(visible.contains("half a sen"), "{visible}");
+        assert!(visible.contains("cut off"), "{visible}");
+    }
+
+    /// The other silent-end case: a completion with no text and no tool calls.
+    /// Without this the chat just stops after its last step with nothing to
+    /// tell the user whether the model finished or the endpoint returned junk.
+    #[tokio::test]
+    async fn an_empty_answer_is_reported_instead_of_ending_silently() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![sse("data: [DONE]\n\n")]).await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let update = updates_rx.recv().await.expect("empty-response notice");
+        match update {
+            SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } => assert!(text.contains("empty response"), "{text}"),
+            other => panic!("expected a text chunk, got {other:?}"),
+        }
     }
 
     #[test]
