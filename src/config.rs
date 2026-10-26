@@ -233,9 +233,10 @@ pub struct LlmConfig {
     /// The model's context window, in tokens, reported to the IDE as
     /// `usage_update.size` so the cost/usage meter can show occupancy ("N of M")
     /// instead of a bare count. `0` means "not set" -- covexcode then falls back
-    /// to the provider's known window (see `effective_context_window`), and to
-    /// `0` (unknown) for a custom endpoint. A real window is never 0, so 0 is a
-    /// safe sentinel rather than a separate `Option`.
+    /// to the provider's known window, then the model's (see
+    /// `effective_context_window`), and to `0` (unknown) when neither is known.
+    /// A real window is never 0, so 0 is a safe sentinel rather than a separate
+    /// `Option`.
     #[serde(default)]
     pub context_window: u64,
 }
@@ -252,14 +253,20 @@ impl LlmConfig {
 
     /// The context window to report as `usage_update.size`: the configured value
     /// when set, else the provider's known default (see
-    /// `providers::default_context_window`), else `0` for a custom endpoint.
+    /// `providers::default_context_window`), else the model's known default
+    /// (see `providers::default_context_window_for_model`) -- a managed proxy
+    /// login leaves `provider` empty while still naming a DeepSeek model.
     /// `0` means "unknown" and the client omits the "of M" half rather than
     /// inventing a limit.
     pub fn effective_context_window(&self) -> u64 {
         if self.context_window > 0 {
-            self.context_window
+            return self.context_window;
+        }
+        let by_provider = crate::providers::default_context_window(&self.provider);
+        if by_provider > 0 {
+            by_provider
         } else {
-            crate::providers::default_context_window(&self.provider)
+            crate::providers::default_context_window_for_model(&self.model)
         }
     }
 }
@@ -1112,6 +1119,33 @@ mod tests {
 
             std::env::remove_var("COVEXCODE_PROVIDER");
         });
+    }
+
+    #[test]
+    fn effective_context_window_falls_back_to_the_model_without_a_provider() {
+        let proxy = LlmConfig {
+            endpoint: "https://llm.covexcode.com/v1".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            provider: String::new(),
+            ..LlmConfig::default()
+        };
+        assert_eq!(proxy.effective_context_window(), 131_072);
+
+        let explicit = LlmConfig {
+            context_window: 200_000,
+            ..proxy.clone()
+        };
+        assert_eq!(
+            explicit.effective_context_window(),
+            200_000,
+            "an explicit context_window must win over both fallbacks"
+        );
+
+        let unknown = LlmConfig {
+            model: "gpt-5.6-sol".to_string(),
+            ..LlmConfig::default()
+        };
+        assert_eq!(unknown.effective_context_window(), 0);
     }
 
     #[test]

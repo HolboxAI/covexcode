@@ -403,6 +403,10 @@ pub struct Target<'a> {
     pub model: &'a str,
     pub api_key: &'a str,
     pub max_tokens: u32,
+    /// The model's context window, in tokens. `0` means unknown and skips the
+    /// preflight check. Callers resolve this from
+    /// `config::LlmConfig::effective_context_window`.
+    pub context_window: u64,
     /// Ask the endpoint for exact token counts. Off leaves the request byte for
     /// byte as it was before this existed.
     pub include_usage: bool,
@@ -440,12 +444,28 @@ async fn run(
         model,
         api_key,
         max_tokens,
+        context_window,
         include_usage,
         temperature,
     } = target;
     // A lone system prompt is not a conversation.
     if messages.iter().all(|m| m.role == "system") {
         return Err("Nothing to send.".to_string());
+    }
+
+    // Refuse an oversized request before it hits the network. The endpoint's
+    // own 400 is handled below, but a request this large can also be accepted
+    // and then time out mid-stream, which looks like a proxy outage and bills
+    // for the attempt. The estimate is deliberately conservative: JSON chars
+    // include tool schemas and any base64 images.
+    let estimated_tokens = estimate_request_tokens(&messages, &tools)
+        .saturating_add(max_tokens as u64);
+    if context_window > 0 && estimated_tokens > context_window {
+        return Err(format!(
+            "This conversation is too large for {model}'s {context_window}-token context \
+             window (estimated ~{estimated_tokens} tokens including the {max_tokens}-token \
+             reply budget). Start a new chat or run /compact."
+        ));
     }
 
     let sent_tools = !tools.is_empty();
@@ -482,10 +502,16 @@ async fn run(
         let this_req = req
             .try_clone()
             .expect("request body is buffered JSON, so it is always cloneable");
-        let response = this_req
-            .send()
-            .await
-            .map_err(|e| network_failure(&url, &e))?;
+        let response = match this_req.send().await {
+            Ok(response) => response,
+            Err(error) if attempt < MAX_RETRY_ATTEMPTS && is_retryable_network_error(&error) => {
+                let wait = backoff_delay(attempt);
+                attempt += 1;
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            Err(error) => return Err(network_failure(&url, &error)),
+        };
         let status = response.status();
         if attempt >= MAX_RETRY_ATTEMPTS || !is_retryable_status(status) {
             break response;
@@ -828,6 +854,28 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
+/// A dropped/refused connection before any response is safe to retry: the
+/// request body is buffered JSON and no token has reached the caller yet.
+/// Certificate/TLS failures are permanent, so they are surfaced immediately
+/// rather than retried three times.
+fn is_retryable_network_error(error: &reqwest::Error) -> bool {
+    let transient = error.is_timeout()
+        || error.is_connect()
+        || chain_mentions(error, "connection reset")
+        || chain_mentions(error, "connection closed")
+        || chain_mentions(error, "broken pipe");
+    transient && !chain_mentions(error, "certificate") && !chain_mentions(error, "tls")
+}
+
+/// Rough preflight estimate: JSON characters / 4, including tool schemas and
+/// any base64 images. Deliberately conservative; it exists to stop a request
+/// that is clearly over the window, not to replace the endpoint's exact count.
+fn estimate_request_tokens(messages: &[ChatMessage], tools: &[Value]) -> u64 {
+    let chars = serde_json::to_string(messages).map(|s| s.len()).unwrap_or(0)
+        + serde_json::to_string(tools).map(|s| s.len()).unwrap_or(0);
+    (chars / 4) as u64
+}
+
 /// Exponential backoff for the `attempt`-th retry (0-indexed): 1s, 2s, 4s, ...,
 /// capped at `MAX_BACKOFF`.
 fn backoff_delay(attempt: u32) -> Duration {
@@ -1017,6 +1065,7 @@ mod tests {
                 model: "m",
                 api_key: "",
                 max_tokens: 100,
+                context_window: 0,
                 include_usage: false,
                 temperature: None,
             },
@@ -1060,6 +1109,66 @@ mod tests {
         }
         // And the URL is named once, not at every layer.
         assert_eq!(error.matches("127.0.0.1").count(), 1, "{error:?}");
+    }
+
+    /// The preflight guard must stop an oversized turn before the network:
+    /// that is what prevents the proxy timeout / runaway retry loop.
+    #[tokio::test]
+    async fn a_request_over_the_context_window_is_refused_before_the_network() {
+        let (tx, mut rx) = mpsc::channel(8);
+        stream_chat(
+            Target {
+                endpoint: "http://127.0.0.1:1",
+                model: "m",
+                api_key: "",
+                max_tokens: 100,
+                context_window: 100,
+                include_usage: false,
+                temperature: None,
+            },
+            vec![ChatMessage::text("user", "x".repeat(1000))],
+            Vec::new(),
+            1,
+            tx,
+        )
+        .await;
+
+        let mut error = None;
+        while let Ok((_, ev)) = rx.try_recv() {
+            if let StreamEvent::Error(e) = ev {
+                error = Some(e);
+            }
+        }
+        let error = error.expect("an oversized request must report something");
+        assert!(error.contains("context window"), "{error}");
+    }
+
+    /// A transient connection drop before any response is retried; the
+    /// second connection succeeds. This is the proxy/network hiccup path.
+    #[tokio::test]
+    async fn a_dropped_connection_is_retried_then_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                drop(socket);
+            }
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}"
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let events = collect(&format!("http://{addr}")).await;
+        assert_eq!(text_of(&events), "hello");
     }
 
     /// Every one of these has to keep reaching `notice`'s "Endpoint
@@ -1348,6 +1457,7 @@ mod tests {
                 model: "test-model",
                 api_key: "sk-test",
                 max_tokens: 4096,
+                context_window: 0,
                 include_usage: true,
                 temperature: None,
             },
@@ -1628,6 +1738,7 @@ mod tests {
                 model: "m",
                 api_key: "k",
                 max_tokens: 4096,
+                context_window: 0,
                 include_usage: true,
                 temperature: None,
             },
