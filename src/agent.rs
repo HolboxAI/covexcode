@@ -56,7 +56,8 @@ pub fn fire_request(
     // Withholding the schemas once the budget is spent is what actually
     // stops a runaway loop: the model has nothing left to call, so it
     // answers. Saying "stop" in the prompt alone would only be a request.
-    let budget_left = app.config.tools.max_steps == 0 || app.tool_steps < app.config.tools.max_steps;
+    let budget_left =
+        app.config.tools.max_steps == 0 || app.tool_steps < app.config.tools.max_steps;
     // Exact counts make quota and `/usage` real; without them they fall back
     // to the same character estimate `usage.rs` uses. Deliberately not gated
     // on `quota.enabled`: the same stream_options flag also feeds the always-
@@ -164,9 +165,11 @@ pub fn handle_event(app: &mut App, id: u64, event: StreamEvent) {
         StreamEvent::Reasoning(text) => app.append_reasoning(&text),
         StreamEvent::ToolCalls(calls, truncated) => app.request_tools_truncated(calls, truncated),
         StreamEvent::ToolsFinished(outcomes) => app.finish_tools(outcomes),
-        StreamEvent::AgentActivity { call_id, label, rounds } => {
-            app.record_subagent_activity(&call_id, label, rounds)
-        }
+        StreamEvent::AgentActivity {
+            call_id,
+            label,
+            rounds,
+        } => app.record_subagent_activity(&call_id, label, rounds),
         StreamEvent::Usage(u) => app.record_exact_usage(u),
         StreamEvent::Done => app.finish_stream(),
         StreamEvent::Notice(note) => app.note(note),
@@ -207,8 +210,7 @@ pub fn execute_approved(
             let id = app.request_id;
             let tx = tx.clone();
             let handle = tokio::spawn(async move {
-                let outcomes =
-                    run_calls(&calls, &ws, &config, truncated, Some((id, &tx))).await;
+                let outcomes = run_calls(&calls, &ws, &config, truncated, Some((id, &tx))).await;
                 let _ = tx.send((id, StreamEvent::ToolsFinished(outcomes))).await;
             });
             app.abort = Some(handle.abort_handle());
@@ -305,14 +307,15 @@ async fn run_calls(
             // `Stream::map` closure's return type is itself an `async fn`
             // call rather than a fully owned `async move` block.
             for chunk in run.chunks(MAX_CONCURRENT_READS) {
-                let futures = chunk.iter().map(|call| {
-                    let call = call.clone();
-                    let ws = ws.clone();
-                    let tools_config = config.tools.clone();
-                    async move {
-                        tools::execute_truncated(&call, &ws, &tools_config, truncated).await
-                    }
-                });
+                let futures =
+                    chunk.iter().map(|call| {
+                        let call = call.clone();
+                        let ws = ws.clone();
+                        let tools_config = config.tools.clone();
+                        async move {
+                            tools::execute_truncated(&call, &ws, &tools_config, truncated).await
+                        }
+                    });
                 outcomes.extend(futures::future::join_all(futures).await);
             }
         } else {
@@ -403,7 +406,8 @@ pub async fn run_subagent(
     loop {
         // `0` means "no limit" for both budgets, matching `max_steps`'s own
         // convention -- an unlimited child keeps its schemas until it answers.
-        let budget_left = (max_steps == 0 || steps < max_steps) && (token_budget == 0 || spent < token_budget);
+        let budget_left =
+            (max_steps == 0 || steps < max_steps) && (token_budget == 0 || spent < token_budget);
         // Telling the prompt the budget is gone (whichever budget it was) is
         // what makes the last round an answer instead of another search.
         history[0] = ChatMessage::text(
@@ -414,7 +418,11 @@ pub async fn run_subagent(
                 max_steps,
             ),
         );
-        let schemas = if budget_left { tools::subagent_schemas() } else { Vec::new() };
+        let schemas = if budget_left {
+            tools::subagent_schemas()
+        } else {
+            Vec::new()
+        };
         // Subagents never get a message with a non-empty `images` today --
         // `subagent_schemas()` never offers `check_in_browser`, the only
         // thing that ever populates it -- but this sums `images` anyway so
@@ -552,8 +560,10 @@ pub async fn run_subagent(
             // *reported* as refused -- a trail that said "write notes.md"
             // about a write that never happened would be a lie in the UI.
             let gate = if !budget_left {
-                Err("Your budget is spent. Write your report now, from what you have seen."
-                    .to_string())
+                Err(
+                    "Your budget is spent. Write your report now, from what you have seen."
+                        .to_string(),
+                )
             } else {
                 tools::subagent_call_allowed(c)
             };
@@ -688,7 +698,9 @@ mod tests {
 
     /// Serve the given responses to successive connections and hand back the
     /// requests that were made, once all responses are spent.
-    async fn serve_rounds(responses: Vec<String>) -> (String, tokio::sync::oneshot::Receiver<Vec<String>>) {
+    async fn serve_rounds(
+        responses: Vec<String>,
+    ) -> (String, tokio::sync::oneshot::Receiver<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().unwrap();
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -726,13 +738,21 @@ mod tests {
         .await;
         let config = config_for(&endpoint);
 
-        let outcome =
-            run_subagent(&agent_call(json!({ "task": "count lines in hello.txt" })), &ws, &config, None)
-                .await;
+        let outcome = run_subagent(
+            &agent_call(json!({ "task": "count lines in hello.txt" })),
+            &ws,
+            &config,
+            None,
+        )
+        .await;
 
         assert_eq!(outcome.content, "hello.txt has three lines.");
         assert_eq!(outcome.call_id, "call_agent");
-        assert!(outcome.display.contains("1 tool round"), "{}", outcome.display);
+        assert!(
+            outcome.display.contains("1 tool round"),
+            "{}",
+            outcome.display
+        );
         let requests = requests.await.expect("both rounds served");
         assert!(
             requests[1].contains("three"),
@@ -757,11 +777,19 @@ mod tests {
         .await;
         let config = config_for(&endpoint);
 
-        let outcome =
-            run_subagent(&agent_call(json!({ "task": "write up findings" })), &ws, &config, None).await;
+        let outcome = run_subagent(
+            &agent_call(json!({ "task": "write up findings" })),
+            &ws,
+            &config,
+            None,
+        )
+        .await;
 
         assert_eq!(outcome.content, "Report without writing.");
-        assert!(!dir.path().join("notes.md").exists(), "nothing may reach disk");
+        assert!(
+            !dir.path().join("notes.md").exists(),
+            "nothing may reach disk"
+        );
         let requests = requests.await.expect("both rounds served");
         assert!(
             requests[1].contains("read-only research subagent"),
@@ -824,17 +852,30 @@ mod tests {
         assert_eq!(outcome.content, "Report.");
         let mut activities = Vec::new();
         while let Some((id, event)) = rx.recv().await {
-            let StreamEvent::AgentActivity { call_id, label, rounds } = event else {
+            let StreamEvent::AgentActivity {
+                call_id,
+                label,
+                rounds,
+            } = event
+            else {
                 panic!("the child must only send activity, got {event:?}");
             };
             assert_eq!(id, 7, "tagged with the parent's request id");
             assert_eq!(call_id, "call_agent", "tagged with the parent call");
             activities.push((label, rounds));
         }
-        assert_eq!(activities.len(), 2, "one event per tool call the child made");
+        assert_eq!(
+            activities.len(),
+            2,
+            "one event per tool call the child made"
+        );
         assert!(activities[0].0.contains("read"), "{}", activities[0].0);
         assert_eq!(activities[0].1, 1);
-        assert!(activities[1].0.ends_with("— refused"), "{}", activities[1].0);
+        assert!(
+            activities[1].0.ends_with("— refused"),
+            "{}",
+            activities[1].0
+        );
         assert_eq!(activities[1].1, 2);
     }
 
@@ -855,8 +896,13 @@ mod tests {
         // be a positive one.)
         config.tools.subagent_max_steps = 1;
 
-        let outcome =
-            run_subagent(&agent_call(json!({ "task": "anything" })), &ws, &config, None).await;
+        let outcome = run_subagent(
+            &agent_call(json!({ "task": "anything" })),
+            &ws,
+            &config,
+            None,
+        )
+        .await;
 
         assert_eq!(outcome.content, "Forced report.");
         let requests = requests.await.expect("both rounds served");
@@ -876,7 +922,10 @@ mod tests {
         ToolCall {
             id: id.to_string(),
             kind: "function".to_string(),
-            function: llm::FunctionCall { name: name.to_string(), arguments: args.to_string() },
+            function: llm::FunctionCall {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
         }
     }
 
@@ -885,7 +934,11 @@ mod tests {
     }
 
     fn write_call(id: &str, path: &str, content: &str) -> ToolCall {
-        call_with(id, tools::WRITE_FILE, json!({ "path": path, "content": content }))
+        call_with(
+            id,
+            tools::WRITE_FILE,
+            json!({ "path": path, "content": content }),
+        )
     }
 
     /// Not on `is_read_only`'s allowlist even as a literal prefix (`rm` is
@@ -912,8 +965,16 @@ mod tests {
     #[test]
     fn is_pure_read_call_matches_the_documented_allowlist() {
         assert!(is_pure_read_call(&read_call("1", "a.txt")));
-        assert!(is_pure_read_call(&call_with("2", tools::LIST_DIR, json!({ "path": "." }))));
-        assert!(is_pure_read_call(&call_with("3", tools::GLOB, json!({ "pattern": "**/*.rs" }))));
+        assert!(is_pure_read_call(&call_with(
+            "2",
+            tools::LIST_DIR,
+            json!({ "path": "." })
+        )));
+        assert!(is_pure_read_call(&call_with(
+            "3",
+            tools::GLOB,
+            json!({ "pattern": "**/*.rs" })
+        )));
         assert!(is_pure_read_call(&call_with(
             "4",
             tools::GREP_SEARCH,
@@ -928,7 +989,9 @@ mod tests {
             json!({ "path": "a.txt", "old_string": "x", "new_string": "y" })
         )));
         assert!(!is_pure_read_call(&run_command_call("8", "rm -rf a.txt")));
-        assert!(!is_pure_read_call(&agent_call(json!({ "task": "look around" }))));
+        assert!(!is_pure_read_call(&agent_call(
+            json!({ "task": "look around" })
+        )));
     }
 
     /// A whole batch of reads -- the four dedicated tools plus a read-only
@@ -954,7 +1017,11 @@ mod tests {
 
         assert_eq!(outcomes.len(), calls.len());
         let ids: Vec<&str> = outcomes.iter().map(|o| o.call_id.as_str()).collect();
-        assert_eq!(ids, vec!["1", "2", "3", "4", "5", "6"], "results must match call order");
+        assert_eq!(
+            ids,
+            vec!["1", "2", "3", "4", "5", "6"],
+            "results must match call order"
+        );
         assert!(outcomes[0].content.contains("aaa"));
         assert!(outcomes[2].content.contains("bbb"));
         assert!(outcomes[4].content.contains("ccc"));

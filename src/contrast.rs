@@ -20,15 +20,36 @@ pub fn parse_hex(s: &str) -> Result<(u8, u8, u8), String> {
     let (r, g, b) = match s.len() {
         3 | 4 => {
             let mut chars = s.chars();
-            let r = expand(chars.next().ok_or_else(|| format!("'{s}' is not a valid hex color"))?);
-            let g = expand(chars.next().ok_or_else(|| format!("'{s}' is not a valid hex color"))?);
-            let b = expand(chars.next().ok_or_else(|| format!("'{s}' is not a valid hex color"))?);
+            let r = expand(
+                chars
+                    .next()
+                    .ok_or_else(|| format!("'{s}' is not a valid hex color"))?,
+            );
+            let g = expand(
+                chars
+                    .next()
+                    .ok_or_else(|| format!("'{s}' is not a valid hex color"))?,
+            );
+            let b = expand(
+                chars
+                    .next()
+                    .ok_or_else(|| format!("'{s}' is not a valid hex color"))?,
+            );
             (r, g, b)
         }
-        6 | 8 => (s[0..2].to_string(), s[2..4].to_string(), s[4..6].to_string()),
-        _ => return Err(format!("'{s}' is not a valid hex color (expected #rgb or #rrggbb)")),
+        6 | 8 => (
+            s[0..2].to_string(),
+            s[2..4].to_string(),
+            s[4..6].to_string(),
+        ),
+        _ => {
+            return Err(format!(
+                "'{s}' is not a valid hex color (expected #rgb or #rrggbb)"
+            ))
+        }
     };
-    let parse = |h: &str| u8::from_str_radix(h, 16).map_err(|_| format!("'{s}' is not a valid hex color"));
+    let parse =
+        |h: &str| u8::from_str_radix(h, 16).map_err(|_| format!("'{s}' is not a valid hex color"));
     Ok((parse(&r)?, parse(&g)?, parse(&b)?))
 }
 
@@ -40,7 +61,11 @@ pub fn parse_hex(s: &str) -> Result<(u8, u8, u8), String> {
 fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
     let channel = |c: u8| -> f64 {
         let c = c as f64 / 255.0;
-        if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
     };
     0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
 }
@@ -50,7 +75,10 @@ fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
 /// luminance is always the numerator by construction, so argument order
 /// never changes the result.
 pub fn contrast_ratio(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
-    let (la, lb) = (relative_luminance(a.0, a.1, a.2), relative_luminance(b.0, b.1, b.2));
+    let (la, lb) = (
+        relative_luminance(a.0, a.1, a.2),
+        relative_luminance(b.0, b.1, b.2),
+    );
     let (lighter, darker) = if la >= lb { (la, lb) } else { (lb, la) };
     (lighter + 0.05) / (darker + 0.05)
 }
@@ -72,7 +100,11 @@ pub struct ContrastCheck {
 
 /// Checks one foreground/background pair. Only ever fails on a malformed hex
 /// string -- there is no "unusable" pair, only a passing or failing one.
-pub fn check(label: &str, foreground_hex: &str, background_hex: &str) -> Result<ContrastCheck, String> {
+pub fn check(
+    label: &str,
+    foreground_hex: &str,
+    background_hex: &str,
+) -> Result<ContrastCheck, String> {
     let fg = parse_hex(foreground_hex).map_err(|e| format!("foreground: {e}"))?;
     let bg = parse_hex(background_hex).map_err(|e| format!("background: {e}"))?;
     let ratio = contrast_ratio(fg, bg);
@@ -92,7 +124,11 @@ mod tests {
     fn parses_three_and_six_digit_hex_the_same() {
         assert_eq!(parse_hex("#fff").unwrap(), (255, 255, 255));
         assert_eq!(parse_hex("#ffffff").unwrap(), (255, 255, 255));
-        assert_eq!(parse_hex("fff").unwrap(), (255, 255, 255), "leading # is optional");
+        assert_eq!(
+            parse_hex("fff").unwrap(),
+            (255, 255, 255),
+            "leading # is optional"
+        );
         assert_eq!(parse_hex("#a7b").unwrap(), (0xaa, 0x77, 0xbb));
     }
 

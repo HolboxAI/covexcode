@@ -96,12 +96,17 @@ impl SessionLog {
                 p
             }
         };
-        let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
         else {
             return;
         };
         for message in &messages[self.persisted..] {
-            let Ok(line) = serde_json::to_string(message) else { continue };
+            let Ok(line) = serde_json::to_string(message) else {
+                continue;
+            };
             if writeln!(file, "{line}").is_err() {
                 return;
             }
@@ -118,7 +123,11 @@ impl SessionLog {
             date: crate::dateutil::today_string(),
         };
         let line = serde_json::to_string(&header).ok()?;
-        let mut file = std::fs::OpenOptions::new().create_new(true).write(true).open(&path).ok()?;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .ok()?;
         writeln!(file, "{line}").ok()?;
         self.path = Some(path.clone());
         Some(path)
@@ -132,13 +141,23 @@ pub fn latest_for(workspace: &str) -> Option<PathBuf> {
     let mut best: Option<(u128, PathBuf)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-        let Ok(n) = name.parse::<u128>() else { continue };
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(n) = name.parse::<u128>() else {
+            continue;
+        };
         // The header says whose session this is; a file for another project
         // -- or with no readable header at all -- is not a candidate.
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
-        let Some(first) = content.lines().next() else { continue };
-        let Ok(header) = serde_json::from_str::<Header>(first) else { continue };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(first) = content.lines().next() else {
+            continue;
+        };
+        let Ok(header) = serde_json::from_str::<Header>(first) else {
+            continue;
+        };
         if header.workspace != workspace {
             continue;
         }
@@ -258,11 +277,17 @@ mod tests {
         crate::config::test_support::with_isolated_home(|| {
             let mut log = SessionLog::new("/tmp/proj");
             log.append(&[]);
-            assert!(latest_for("/tmp/proj").is_none(), "nothing was said, nothing is kept");
+            assert!(
+                latest_for("/tmp/proj").is_none(),
+                "nothing was said, nothing is kept"
+            );
 
             let mut other = SessionLog::new("/tmp/other");
             other.append(&[msg(Role::User, "hi")]);
-            assert!(latest_for("/tmp/proj").is_none(), "another project's session");
+            assert!(
+                latest_for("/tmp/proj").is_none(),
+                "another project's session"
+            );
             assert!(latest_for("/tmp/other").is_some());
         });
     }

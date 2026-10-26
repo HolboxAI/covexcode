@@ -262,7 +262,14 @@ pub fn schemas(mode: Mode, active_plan: bool, deploy: bool, published: bool) -> 
     // actually needs it -- `HeadlessSession`, so far the only one -- goes
     // through `schemas_for` directly, same as it already does for the diet
     // parameter this wrapper also hides.
-    schemas_for(mode, active_plan, deploy, published, false, SchemaDiet::full())
+    schemas_for(
+        mode,
+        active_plan,
+        deploy,
+        published,
+        false,
+        SchemaDiet::full(),
+    )
 }
 
 /// Which optional schemas to send. The list has to stay byte-identical
@@ -281,7 +288,10 @@ pub struct SchemaDiet {
 
 impl SchemaDiet {
     pub fn full() -> Self {
-        Self { agent: true, web_search: true }
+        Self {
+            agent: true,
+            web_search: true,
+        }
     }
 
     /// Count files, not lines: a new project is empty, a webpage is a
@@ -1153,13 +1163,7 @@ pub fn schemas_for(
             let name = schema["function"]["name"].as_str().unwrap_or_default();
             matches!(
                 name,
-                READ_FILE
-                    | WRITE_FILE
-                    | EDIT_FILE
-                    | LIST_DIR
-                    | GLOB
-                    | GREP_SEARCH
-                    | UPDATE_TODOS
+                READ_FILE | WRITE_FILE | EDIT_FILE | LIST_DIR | GLOB | GREP_SEARCH | UPDATE_TODOS
             )
         });
     }
@@ -1355,7 +1359,11 @@ pub fn subagent_call_allowed(call: &ToolCall) -> Result<(), String> {
 /// job description is inverted -- research and report, never change anything,
 /// and the final message *is* the deliverable, because it is the only thing
 /// the requester ever sees.
-pub fn subagent_system_prompt(workspace: &Workspace, steps_used: usize, max_steps: usize) -> String {
+pub fn subagent_system_prompt(
+    workspace: &Workspace,
+    steps_used: usize,
+    max_steps: usize,
+) -> String {
     if max_steps != 0 && steps_used >= max_steps {
         return format!(
             "You are a read-only research subagent working in {}.\n\
@@ -1935,13 +1943,19 @@ fn edit_spans(args: EditFileArgs) -> Result<Vec<EditSpan>, String> {
         return Ok(args
             .edits
             .into_iter()
-            .map(|e| EditSpan { old: e.old_string, new: e.new_string, replace_all: e.replace_all })
+            .map(|e| EditSpan {
+                old: e.old_string,
+                new: e.new_string,
+                replace_all: e.replace_all,
+            })
             .collect());
     }
     match (args.old_string, args.new_string) {
-        (Some(old), Some(new)) => {
-            Ok(vec![EditSpan { old, new, replace_all: args.replace_all }])
-        }
+        (Some(old), Some(new)) => Ok(vec![EditSpan {
+            old,
+            new,
+            replace_all: args.replace_all,
+        }]),
         _ => Err(
             "old_string and new_string are both required, unless the replacements are given \
              under edits."
@@ -2017,7 +2031,10 @@ pub fn preview_change(action: &Action, workspace_root: &Path) -> Option<crate::d
 /// there happens to be a difference, and it is the caller's job (matching
 /// `preview_change`'s own "nothing to show" judgment) to decide whether an
 /// empty diff is worth sending at all.
-pub fn preview_change_text(action: &Action, workspace_root: &Path) -> Option<(String, String, String)> {
+pub fn preview_change_text(
+    action: &Action,
+    workspace_root: &Path,
+) -> Option<(String, String, String)> {
     resolve_change_text(action, workspace_root)
 }
 
@@ -2066,7 +2083,11 @@ pub fn apply_edits(
     // and nothing touches the disk until every one has succeeded -- a batch
     // that half-applied would leave the file in a state neither the model nor
     // the user approved.
-    let untouched = if batch { " None of the edits were applied." } else { "" };
+    let untouched = if batch {
+        " None of the edits were applied."
+    } else {
+        ""
+    };
     let mut working = contents.to_string();
     let mut replaced_total = 0usize;
     for (i, span) in spans.iter().enumerate() {
@@ -2199,54 +2220,91 @@ const DEFAULT_SEARCH_RESULTS: u32 = 5;
 /// transcript can render without knowing which tool produced it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    Command { command: String, purpose: Option<String> },
-    Read { path: String },
-    Write { path: String, content: String },
+    Command {
+        command: String,
+        purpose: Option<String>,
+    },
+    Read {
+        path: String,
+    },
+    Write {
+        path: String,
+        content: String,
+    },
     /// Read-only, like `Read`: listing a directory changes nothing.
-    List { path: String },
+    List {
+        path: String,
+    },
     /// Read-only, like `Read`.
-    Glob { pattern: String },
+    Glob {
+        pattern: String,
+    },
     /// Read-only, like `Glob` -- searches file contents where `Glob` searches
     /// file names.
-    Grep { pattern: String, path: Option<String> },
+    Grep {
+        pattern: String,
+        path: Option<String>,
+    },
     /// Changes a file, so it is approved like `Write` -- but shows only the
     /// spans being replaced, which is the whole reason to prefer it. Always
     /// holds at least one span; several when the model batched its edits to
     /// one file into one approval.
-    Edit { path: String, edits: Vec<EditSpan> },
-    Search { query: String, max_results: u32 },
+    Edit {
+        path: String,
+        edits: Vec<EditSpan>,
+    },
+    Search {
+        query: String,
+        max_results: u32,
+    },
     /// Read-only, like `Read`: returns a static embedded stylesheet, touches
     /// no file and no network.
     DesignStarter,
     /// Read-only, like `Read`: pure arithmetic on the hex strings the model
     /// already sent, touches no file and no network.
-    CheckContrast { pairs: Vec<(String, String, String)> },
+    CheckContrast {
+        pairs: Vec<(String, String, String)>,
+    },
     /// Uploads static files to a temporary public URL so the user can look at
     /// them. Always approved, for the same reason `Deploy` is: it publishes.
-    Publish { path: String },
+    Publish {
+        path: String,
+    },
     /// Puts a real server on the internet for an already-published project:
     /// its source is uploaded, built, and run in a microVM on covexcode's own
     /// host. Always approved, same reasoning as `Publish`/`Deploy` -- and more
     /// so, because this one runs the project's code rather than serving it.
-    DeployBackend { path: String },
+    DeployBackend {
+        path: String,
+    },
     /// Provisions a live sign-up/sign-in service for an already-published
     /// project. Always approved, same reasoning as `Publish`/`Deploy`: it
     /// stands up a real backend on the public internet, not something a
     /// blanket "skip approval" setting should silently cover.
-    EnableAuth { path: String },
+    EnableAuth {
+        path: String,
+    },
     /// Runs one statement against an already-published project's own
     /// database. Ordinary approval, not always-on like `Publish`/`Deploy`/
     /// `EnableAuth` -- it does not put anything on the public internet by
     /// itself, so it is judged the same way `Write`/`Edit` are.
-    DbQuery { path: String, sql: String },
+    DbQuery {
+        path: String,
+        sql: String,
+    },
     /// Checks an already-published project's change-request mailbox.
     /// Ordinary approval, same reasoning as `DbQuery`: a private call to
     /// covexcode's own control-plane, not something that touches the public
     /// internet by itself.
-    ListChangeRequests { path: String },
+    ListChangeRequests {
+        path: String,
+    },
     /// Marks one change request handled. Same risk reasoning as
     /// `ListChangeRequests`.
-    ResolveChangeRequest { path: String, id: String },
+    ResolveChangeRequest {
+        path: String,
+        id: String,
+    },
     /// Puts this project on the internet. Always approved -- see `action_risk`.
     Deploy {
         provider: String,
@@ -2262,7 +2320,10 @@ pub enum Action {
     /// tools and its commands are filtered through the same `is_read_only`
     /// allowlist the approval layer trusts, so there is nothing a prompt
     /// would protect. See `agent::run_subagent`.
-    Agent { task: String, agent_type: String },
+    Agent {
+        task: String,
+        agent_type: String,
+    },
     /// `exit_plan_mode`: the one action that changes nothing on disk *yet* and
     /// is still always worth stopping for. Approving it hands the writing
     /// tools back and saves the plan as a file, so it is two consequential
@@ -2271,7 +2332,11 @@ pub enum Action {
     Plan(Proposal),
     /// `plan_progress`: bookkeeping against a plan the user already approved.
     /// Also resolved in `app.rs`, since it edits the live plan.
-    Progress { step: usize, done: bool, note: Option<String> },
+    Progress {
+        step: usize,
+        done: bool,
+        note: Option<String>,
+    },
     /// `update_todos`: the model's own short-term checklist, replaced whole
     /// on every call -- unlike `Progress`, this needs no approved plan and no
     /// file: it is pure in-memory bookkeeping for `Mode::Normal`, resolved in
@@ -2289,7 +2354,9 @@ pub enum Action {
     /// interception of this, mirroring how `Agent` is intercepted rather
     /// than reaching `tools::execute`, which has no local implementation for
     /// this at all.
-    CheckInBrowser { url: String },
+    CheckInBrowser {
+        url: String,
+    },
     /// `interact_in_browser`: clicks, types, presses a key, or navigates in
     /// the same live tab `check_in_browser` looks at -- fulfilled the same
     /// way, entirely on the client side of the wire (see `headless.rs`'s
@@ -2302,7 +2369,10 @@ pub enum Action {
     /// `Navigate` can send the tab anywhere -- so unlike `CheckInBrowser` it
     /// is `Risk::Dangerous` (always asks, see `action_risk`) and blocked in
     /// plan mode (see `plan_mode_block`).
-    InteractInBrowser { url: String, interaction: BrowserInteraction },
+    InteractInBrowser {
+        url: String,
+        interaction: BrowserInteraction,
+    },
     /// A tool on a configured MCP server, named `mcp__<server>__<tool>`.
     ///
     /// This variant exists to make MCP calls *approvable*. Without it the name is
@@ -2373,7 +2443,11 @@ impl Action {
                 pairs.len(),
                 if pairs.len() == 1 { "" } else { "s" }
             ),
-            Action::Deploy { provider, production, .. } => format!(
+            Action::Deploy {
+                provider,
+                production,
+                ..
+            } => format!(
                 "deploy → {provider} ({})",
                 if *production { "Production" } else { "Preview" }
             ),
@@ -2391,7 +2465,10 @@ impl Action {
                 format!("{} step {step}", if *done { "☑" } else { "☐" })
             }
             Action::Todos(items) => {
-                let done = items.iter().filter(|t| t.status == TodoStatus::Completed).count();
+                let done = items
+                    .iter()
+                    .filter(|t| t.status == TodoStatus::Completed)
+                    .count();
                 format!("todos — {done}/{}", items.len())
             }
             Action::CheckInBrowser { url } => format!("check in browser — {url}"),
@@ -2429,7 +2506,9 @@ pub fn action_risk(action: &Action, workspace_root: &Path) -> danger::Risk {
             "provisions a live sign-up/sign-in service on the public internet for this project"
                 .to_string(),
         ),
-        Action::Deploy { production: true, .. } => danger::Risk::Dangerous(
+        Action::Deploy {
+            production: true, ..
+        } => danger::Risk::Dangerous(
             "publishes to the live production URL, replacing whatever is served there now"
                 .to_string(),
         ),
@@ -2630,13 +2709,18 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
             let args: InteractInBrowserArgs =
                 serde_json::from_str(&call.function.arguments).ok()?;
             let url = args.url.trim().to_string();
-            (!url.is_empty())
-                .then_some(Action::InteractInBrowser { url, interaction: args.interaction })
+            (!url.is_empty()).then_some(Action::InteractInBrowser {
+                url,
+                interaction: args.interaction,
+            })
         }
         WRITE_FILE => {
             let args: WriteFileArgs = serde_json::from_str(&call.function.arguments).ok()?;
             let path = args.path.trim().to_string();
-            (!path.is_empty()).then_some(Action::Write { path, content: args.content })
+            (!path.is_empty()).then_some(Action::Write {
+                path,
+                content: args.content,
+            })
         }
         LIST_DIR => {
             // `path` is optional: no argument means the project root, so an
@@ -2659,7 +2743,10 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
             let pattern = args.pattern.trim().to_string();
             (!pattern.is_empty()).then_some(Action::Grep {
                 pattern,
-                path: args.path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
+                path: args
+                    .path
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty()),
             })
         }
         EDIT_FILE => {
@@ -2678,7 +2765,9 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
         }
         PUBLISH_ARTIFACT => {
             #[derive(serde::Deserialize)]
-            struct Args { path: String }
+            struct Args {
+                path: String,
+            }
             let args: Args = serde_json::from_str(&call.function.arguments).ok()?;
             let path = args.path.trim().to_string();
             if path.is_empty() {
@@ -2688,7 +2777,9 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
         }
         DEPLOY_BACKEND => {
             #[derive(serde::Deserialize)]
-            struct Args { path: String }
+            struct Args {
+                path: String,
+            }
             let args: Args = serde_json::from_str(&call.function.arguments).ok()?;
             let path = args.path.trim().to_string();
             if path.is_empty() {
@@ -2698,7 +2789,10 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
         }
         DB_QUERY => {
             #[derive(serde::Deserialize)]
-            struct Args { path: String, sql: String }
+            struct Args {
+                path: String,
+                sql: String,
+            }
             let args: Args = serde_json::from_str(&call.function.arguments).ok()?;
             let path = args.path.trim().to_string();
             let sql = args.sql.trim().to_string();
@@ -2709,7 +2803,9 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
         }
         LIST_CHANGE_REQUESTS => {
             #[derive(serde::Deserialize)]
-            struct Args { path: String }
+            struct Args {
+                path: String,
+            }
             let args: Args = serde_json::from_str(&call.function.arguments).ok()?;
             let path = args.path.trim().to_string();
             if path.is_empty() {
@@ -2719,7 +2815,10 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
         }
         RESOLVE_CHANGE_REQUEST => {
             #[derive(serde::Deserialize)]
-            struct Args { path: String, id: String }
+            struct Args {
+                path: String,
+                id: String,
+            }
             let args: Args = serde_json::from_str(&call.function.arguments).ok()?;
             let path = args.path.trim().to_string();
             let id = args.id.trim().to_string();
@@ -2730,7 +2829,9 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
         }
         ENABLE_AUTH => {
             #[derive(serde::Deserialize)]
-            struct Args { path: String }
+            struct Args {
+                path: String,
+            }
             let args: Args = serde_json::from_str(&call.function.arguments).ok()?;
             let path = args.path.trim().to_string();
             if path.is_empty() {
@@ -2827,7 +2928,10 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
             Some(Action::Progress {
                 step: args.step,
                 done,
-                note: args.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+                note: args
+                    .note
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty()),
             })
         }
         UPDATE_TODOS => {
@@ -2840,7 +2944,10 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
                     if content.is_empty() {
                         return None;
                     }
-                    Some(TodoItem { content, status: TodoStatus::parse(&t.status)? })
+                    Some(TodoItem {
+                        content,
+                        status: TodoStatus::parse(&t.status)?,
+                    })
                 })
                 .collect();
             Some(Action::Todos(items))
@@ -3162,7 +3269,11 @@ pub async fn execute_truncated(
     }
 }
 
-async fn execute_run_command(call: &ToolCall, workspace: &Workspace, config: &ToolsConfig) -> ToolOutcome {
+async fn execute_run_command(
+    call: &ToolCall,
+    workspace: &Workspace,
+    config: &ToolsConfig,
+) -> ToolOutcome {
     let Ok(args) = serde_json::from_str::<RunArgs>(&call.function.arguments) else {
         return outcome(
             &call.id,
@@ -3341,7 +3452,11 @@ async fn execute_run_command(call: &ToolCall, workspace: &Workspace, config: &To
     result
 }
 
-async fn execute_read_file(call: &ToolCall, workspace: &Workspace, config: &ToolsConfig) -> ToolOutcome {
+async fn execute_read_file(
+    call: &ToolCall,
+    workspace: &Workspace,
+    config: &ToolsConfig,
+) -> ToolOutcome {
     let Ok(args) = serde_json::from_str::<ReadFileArgs>(&call.function.arguments) else {
         return outcome(
             &call.id,
@@ -3411,14 +3526,19 @@ async fn execute_read_file(call: &ToolCall, workspace: &Workspace, config: &Tool
             // for aiming later reads/edits; the schema warns the model off
             // copying them into edit_file.
             let offset = args.offset.unwrap_or(1).max(1) as usize;
-            let limit = args.limit.map(|l| (l.max(1)) as usize).unwrap_or(usize::MAX);
+            let limit = args
+                .limit
+                .map(|l| (l.max(1)) as usize)
+                .unwrap_or(usize::MAX);
             if offset > total {
                 // An answer, not a failure -- same contract as an empty glob.
                 return outcome(
                     &call.id,
                     format!("read {} — past the end", clip(path, 50)),
-                    format!("'{path}' has only {total} line{}; nothing at offset {offset}.",
-                        if total == 1 { "" } else { "s" }),
+                    format!(
+                        "'{path}' has only {total} line{}; nothing at offset {offset}.",
+                        if total == 1 { "" } else { "s" }
+                    ),
                 );
             }
             let numbered: Vec<String> = text
@@ -3500,11 +3620,16 @@ fn placeholder_marker(content: &str) -> Option<String> {
     }
 
     let last_line = content.lines().rev().find(|l| !l.trim().is_empty())?.trim();
-    const MARKERS: &[(&str, &str)] =
-        &[("//", ""), ("#", ""), ("/*", "*/"), ("<!--", "-->")];
+    const MARKERS: &[(&str, &str)] = &[("//", ""), ("#", ""), ("/*", "*/"), ("<!--", "-->")];
     for (prefix, suffix) in MARKERS {
-        let Some(rest) = last_line.strip_prefix(prefix) else { continue };
-        let rest = if suffix.is_empty() { rest } else { rest.strip_suffix(suffix).unwrap_or(rest) };
+        let Some(rest) = last_line.strip_prefix(prefix) else {
+            continue;
+        };
+        let rest = if suffix.is_empty() {
+            rest
+        } else {
+            rest.strip_suffix(suffix).unwrap_or(rest)
+        };
         let rest = rest.trim();
         if rest.len() >= 3 && rest.chars().all(|c| c == '.') {
             return Some(
@@ -3544,7 +3669,11 @@ fn check_complete(content: &str, truncated_response: bool) -> Result<(), String>
     Ok(())
 }
 
-async fn execute_write_file(call: &ToolCall, workspace: &Workspace, truncated: bool) -> ToolOutcome {
+async fn execute_write_file(
+    call: &ToolCall,
+    workspace: &Workspace,
+    truncated: bool,
+) -> ToolOutcome {
     let Ok(args) = serde_json::from_str::<WriteFileArgs>(&call.function.arguments) else {
         return outcome(
             &call.id,
@@ -3740,7 +3869,11 @@ fn looks_like_windows_app_execution_alias_stub(output: &std::process::Output) ->
 /// it ends up trying -- factored out so falling back to the embedded Python
 /// after the configured one is not found doesn't mean reconstructing this
 /// by hand a second time and risking the two drifting apart.
-fn web_search_command(python_bin: &std::ffi::OsStr, query: &str, max_results: u32) -> tokio::process::Command {
+fn web_search_command(
+    python_bin: &std::ffi::OsStr,
+    query: &str,
+    max_results: u32,
+) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(python_bin);
     cmd.arg("-c")
         .arg(DDGS_SCRIPT)
@@ -3837,7 +3970,11 @@ fn execute_check_contrast(call: &ToolCall) -> ToolOutcome {
         "contrast — {} pair{}{}",
         args.pairs.len(),
         if args.pairs.len() == 1 { "" } else { "s" },
-        if any_failed { ", 1+ failing" } else { ", all pass" }
+        if any_failed {
+            ", 1+ failing"
+        } else {
+            ", all pass"
+        }
     );
     outcome(&call.id, summary, lines.join("\n"))
 }
@@ -3866,7 +4003,11 @@ async fn execute_web_search(call: &ToolCall, config: &ToolsConfig) -> ToolOutcom
         .unwrap_or(DEFAULT_SEARCH_RESULTS)
         .clamp(MIN_SEARCH_RESULTS, MAX_SEARCH_RESULTS);
 
-    let mut cmd = web_search_command(std::ffi::OsStr::new(&config.python_bin), &query, max_results);
+    let mut cmd = web_search_command(
+        std::ffi::OsStr::new(&config.python_bin),
+        &query,
+        max_results,
+    );
 
     let limit = Duration::from_secs(config.search_timeout_secs);
     let mut retries_left = 3;
@@ -3883,7 +4024,8 @@ async fn execute_web_search(call: &ToolCall, config: &ToolsConfig) -> ToolOutcom
             // is the only way to tell it apart from a real interpreter that
             // spawned fine but genuinely lacks ddgs.
             Ok(Ok(output))
-                if !tried_embedded_fallback && looks_like_windows_app_execution_alias_stub(&output) =>
+                if !tried_embedded_fallback
+                    && looks_like_windows_app_execution_alias_stub(&output) =>
             {
                 tried_embedded_fallback = true;
                 match embedded_python_path() {
@@ -3895,14 +4037,14 @@ async fn execute_web_search(call: &ToolCall, config: &ToolsConfig) -> ToolOutcom
                             &call.id,
                             format!("search \"{}\" — could not start", clip(&query, 50)),
                             format!(
-                                "Error: '{}' resolved to Windows' \"App Execution Alias\" stub, not \
+                            "Error: '{}' resolved to Windows' \"App Execution Alias\" stub, not \
                                  a real Python install. web_search needs Python 3 with the `ddgs` \
                                  package installed (pip install ddgs). Install Python from \
                                  https://python.org, disable the alias under Settings > Apps > \
                                  Advanced app settings > App execution aliases, or set \
                                  tools.python_bin in config.toml to a real interpreter.",
-                                config.python_bin
-                            ),
+                            config.python_bin
+                        ),
                         )
                     }
                 }
@@ -3918,7 +4060,9 @@ async fn execute_web_search(call: &ToolCall, config: &ToolsConfig) -> ToolOutcom
             // ordinarily a long-settled system binary, not a freshly
             // written file, but nothing here can assume that of every
             // possible configuration.
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && retries_left > 0 => {
+            Ok(Err(e))
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy && retries_left > 0 =>
+            {
                 retries_left -= 1;
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -3928,9 +4072,7 @@ async fn execute_web_search(call: &ToolCall, config: &ToolsConfig) -> ToolOutcom
             // embedded_python_path's own doc comment). Tried once, not in
             // the retry budget above: this is a different interpreter
             // entirely, not the same one transiently unavailable.
-            Ok(Err(e))
-                if e.kind() == std::io::ErrorKind::NotFound && !tried_embedded_fallback =>
-            {
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound && !tried_embedded_fallback => {
                 tried_embedded_fallback = true;
                 match embedded_python_path() {
                     Some(embedded) => {
@@ -4048,7 +4190,10 @@ fn format_search_result(call_id: &str, query: &str, stdout: &str, budget: usize)
 
     let mut content = String::new();
     for (i, r) in results.iter().enumerate() {
-        let title = r.get("title").and_then(Value::as_str).unwrap_or("(untitled)");
+        let title = r
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("(untitled)");
         let href = r.get("href").and_then(Value::as_str).unwrap_or("");
         let body = r.get("body").and_then(Value::as_str).unwrap_or("");
         content.push_str(&format!("{}. {title}\n   {href}\n   {body}\n\n", i + 1));
@@ -4133,7 +4278,12 @@ async fn execute_publish_artifact(
                     // published one with the prefix swapped. Derived rather
                     // than rebuilt from parts: whatever the artifact endpoint
                     // is configured to be, this follows it.
-                    published.url.replacen("/artifacts/", "/api/", 1).trim_end_matches('/').to_string() + "/",
+                    published
+                        .url
+                        .replacen("/artifacts/", "/api/", 1)
+                        .trim_end_matches('/')
+                        .to_string()
+                        + "/",
                 ),
                 // No backend, or nothing recognisable as one. Silence is right:
                 // a suggestion offered on every publish is one nobody reads by
@@ -4171,7 +4321,11 @@ async fn execute_publish_artifact(
                     published.files,
                     if published.files == 1 { "" } else { "s" },
                     published.expires_in_hours,
-                    if published.verified { "" } else { ", unconfirmed" }
+                    if published.verified {
+                        ""
+                    } else {
+                        ", unconfirmed"
+                    }
                 ),
                 format!(
                     "Published {} file{} ({:.0} KB).\n\nURL: {}\n\n{confirmation}\n\nGive the \
@@ -4297,7 +4451,11 @@ async fn execute_deploy_backend(
     }
 }
 
-async fn execute_enable_auth(call: &ToolCall, workspace: &Workspace, config: &ToolsConfig) -> ToolOutcome {
+async fn execute_enable_auth(
+    call: &ToolCall,
+    workspace: &Workspace,
+    config: &ToolsConfig,
+) -> ToolOutcome {
     let Some(Action::EnableAuth { path }) = describe_action(call) else {
         return outcome(
             &call.id,
@@ -4348,7 +4506,11 @@ async fn execute_enable_auth(call: &ToolCall, workspace: &Workspace, config: &To
 /// only carries `path` and `sql` -- `params` is re-read from the raw call
 /// arguments here rather than added to the enum, since nothing outside
 /// this one function needs it.
-async fn execute_db_query(call: &ToolCall, workspace: &Workspace, config: &ToolsConfig) -> ToolOutcome {
+async fn execute_db_query(
+    call: &ToolCall,
+    workspace: &Workspace,
+    config: &ToolsConfig,
+) -> ToolOutcome {
     let Some(Action::DbQuery { path, sql }) = describe_action(call) else {
         return outcome(
             &call.id,
@@ -4378,22 +4540,43 @@ async fn execute_db_query(call: &ToolCall, workspace: &Workspace, config: &Tools
         }
     };
 
-    match crate::db::query(&resolved, &config.db_endpoint, &sql, &params, access_token.as_deref()).await {
+    match crate::db::query(
+        &resolved,
+        &config.db_endpoint,
+        &sql,
+        &params,
+        access_token.as_deref(),
+    )
+    .await
+    {
         Ok(crate::db::QueryResult::Rows { rows, truncated }) => {
             let count = rows.len();
             let json = serde_json::to_string_pretty(&rows).unwrap_or_default();
             outcome(
                 &call.id,
-                format!("\u{1F5C4}\u{FE0F} db \u{2014} {count} row{}", if count == 1 { "" } else { "s" }),
+                format!(
+                    "\u{1F5C4}\u{FE0F} db \u{2014} {count} row{}",
+                    if count == 1 { "" } else { "s" }
+                ),
                 format!(
                     "{json}{}",
-                    if truncated { "\n\n(truncated at 500 rows)" } else { "" }
+                    if truncated {
+                        "\n\n(truncated at 500 rows)"
+                    } else {
+                        ""
+                    }
                 ),
             )
         }
-        Ok(crate::db::QueryResult::Write { changes, last_insert_rowid }) => outcome(
+        Ok(crate::db::QueryResult::Write {
+            changes,
+            last_insert_rowid,
+        }) => outcome(
             &call.id,
-            format!("\u{1F5C4}\u{FE0F} db \u{2014} {changes} change{}", if changes == 1 { "" } else { "s" }),
+            format!(
+                "\u{1F5C4}\u{FE0F} db \u{2014} {changes} change{}",
+                if changes == 1 { "" } else { "s" }
+            ),
             format!("changes: {changes}\nlast_insert_rowid: {last_insert_rowid}"),
         ),
         Err(e) => outcome(
@@ -4489,8 +4672,11 @@ async fn execute_list_change_requests(
     // the soft-degrade note appended below instead for a failure that
     // isn't total.
     if !failures.is_empty() && failures.len() == configured_count {
-        let message =
-            failures.iter().map(|(name, e)| format!("{name}: {e}")).collect::<Vec<_>>().join("; ");
+        let message = failures
+            .iter()
+            .map(|(name, e)| format!("{name}: {e}"))
+            .collect::<Vec<_>>()
+            .join("; ");
         return outcome(
             &call.id,
             format!("\u{1F4E8} requests {} \u{2014} failed", clip(&path, 40)),
@@ -4526,7 +4712,11 @@ async fn execute_list_change_requests(
         .iter()
         .map(|r| format!("{}  ({})  \"{}\"", r.id, r.created_at, r.text))
         .collect();
-    lines.extend(errors.iter().map(|e| format!("{}  {}", e.id, crate::errors::describe(e))));
+    lines.extend(
+        errors
+            .iter()
+            .map(|e| format!("{}  {}", e.id, crate::errors::describe(e))),
+    );
     outcome(
         &call.id,
         format!("\u{1F4E8} requests \u{2014} {count} pending"),
@@ -4566,9 +4756,15 @@ async fn execute_resolve_change_request(
     // (`errors::ID_PREFIX`), not by a `kind` argument the model would have
     // to remember to pass -- see the doc comment on `errors.rs`.
     let (label, result) = if id.starts_with(crate::errors::ID_PREFIX) {
-        ("Reported error", crate::errors::resolve(&resolved, &config.errors_endpoint, &id).await)
+        (
+            "Reported error",
+            crate::errors::resolve(&resolved, &config.errors_endpoint, &id).await,
+        )
     } else {
-        ("Request", crate::requests::resolve(&resolved, &config.requests_endpoint, &id).await)
+        (
+            "Request",
+            crate::requests::resolve(&resolved, &config.requests_endpoint, &id).await,
+        )
     };
 
     match result {
@@ -4627,7 +4823,13 @@ fn execute_list_dir(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
 
     let dir = match resolve_in_workspace(workspace, &requested) {
         Ok(p) => p,
-        Err(e) => return outcome(&call.id, format!("list {requested} — {e}"), format!("Error: {e}")),
+        Err(e) => {
+            return outcome(
+                &call.id,
+                format!("list {requested} — {e}"),
+                format!("Error: {e}"),
+            )
+        }
     };
 
     let entries = match std::fs::read_dir(&dir) {
@@ -4830,7 +5032,11 @@ fn execute_grep_search(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
     let root = match resolve_in_workspace(workspace, &requested) {
         Ok(p) => p,
         Err(e) => {
-            return outcome(&call.id, format!("grep {pattern} — {e}"), format!("Error: {e}"))
+            return outcome(
+                &call.id,
+                format!("grep {pattern} — {e}"),
+                format!("Error: {e}"),
+            )
         }
     };
     if !root.exists() {
@@ -4902,9 +5108,17 @@ fn execute_grep_search(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
                     section.push("--".to_string());
                 }
                 if match_idx.contains(&i) {
-                    section.push(format!("{rel}:{}: {}", i + 1, clip(line, MAX_GREP_LINE_CHARS)));
+                    section.push(format!(
+                        "{rel}:{}: {}",
+                        i + 1,
+                        clip(line, MAX_GREP_LINE_CHARS)
+                    ));
                 } else {
-                    section.push(format!("{rel}-{}- {}", i + 1, clip(line, MAX_GREP_LINE_CHARS)));
+                    section.push(format!(
+                        "{rel}-{}- {}",
+                        i + 1,
+                        clip(line, MAX_GREP_LINE_CHARS)
+                    ));
                 }
                 last_printed = Some(i);
             }
@@ -4973,7 +5187,11 @@ fn execute_edit_file(call: &ToolCall, workspace: &Workspace, truncated: bool) ->
     // Checked against the replacement text the model actually generated, not
     // against the file it lands in -- the file is mostly pre-existing content
     // that has nothing to do with whether *this* generation was cut short.
-    let new_text = spans.iter().map(|s| s.new.as_str()).collect::<Vec<_>>().join("\n");
+    let new_text = spans
+        .iter()
+        .map(|s| s.new.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     if let Err(reason) = check_complete(&new_text, truncated) {
         return outcome(
             &call.id,
@@ -5157,11 +5375,7 @@ pub fn progress_recorded(
             if remaining == 1 { "" } else { "s" }
         )
     };
-    outcome(
-        &call.id,
-        display,
-        format!("Recorded in {saved_to}. {next}"),
-    )
+    outcome(&call.id, display, format!("Recorded in {saved_to}. {next}"))
 }
 
 /// The result of a step number that does not exist, or a plan that is no
@@ -5183,7 +5397,10 @@ pub fn progress_failed(call: &ToolCall, reason: &str) -> ToolOutcome {
 /// would only spend tokens).
 pub fn todos_recorded(call: &ToolCall, items: &[TodoItem]) -> ToolOutcome {
     let total = items.len();
-    let done = items.iter().filter(|t| t.status == TodoStatus::Completed).count();
+    let done = items
+        .iter()
+        .filter(|t| t.status == TodoStatus::Completed)
+        .count();
     let display = if total == 0 {
         "todos — cleared".to_string()
     } else {
@@ -5195,7 +5412,10 @@ pub fn todos_recorded(call: &ToolCall, items: &[TodoItem]) -> ToolOutcome {
     let content = if total == 0 {
         "Checklist cleared.".to_string()
     } else {
-        let in_progress = items.iter().filter(|t| t.status == TodoStatus::InProgress).count();
+        let in_progress = items
+            .iter()
+            .filter(|t| t.status == TodoStatus::InProgress)
+            .count();
         let reminder = if in_progress > 1 {
             " More than one item is 'in_progress' -- keep it to the single one you are actually \
              doing right now."
@@ -5439,7 +5659,10 @@ fn compact_command_output(command: &str, content: &str) -> String {
 
 fn looks_like_noisy_build(command: &str) -> bool {
     let c = command.to_ascii_lowercase();
-    if c.contains("cargo build") || c.contains("cargo test") || c.contains("pip install") || c.contains("pip3 install")
+    if c.contains("cargo build")
+        || c.contains("cargo test")
+        || c.contains("pip install")
+        || c.contains("pip3 install")
     {
         return true;
     }
@@ -5448,7 +5671,10 @@ fn looks_like_noisy_build(command: &str) -> bool {
     c.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-'))
         .any(|tok| {
             let tok = tok.trim_end_matches(".cmd").trim_end_matches(".exe");
-            matches!(tok, "npm" | "npx" | "yarn" | "pnpm" | "tsc" | "vite" | "webpack" | "esbuild")
+            matches!(
+                tok,
+                "npm" | "npx" | "yarn" | "pnpm" | "tsc" | "vite" | "webpack" | "esbuild"
+            )
         })
 }
 
@@ -5604,7 +5830,10 @@ mod tests {
         };
 
         run(execute(
-            &tool_call(WRITE_FILE, json!({"path": "src/brand_new.rs", "content": "fn a() {}\n"})),
+            &tool_call(
+                WRITE_FILE,
+                json!({"path": "src/brand_new.rs", "content": "fn a() {}\n"}),
+            ),
             &ws,
             &cfg,
         )
@@ -5658,21 +5887,25 @@ mod tests {
         );
     }
 
-
     /// A write to a file that did not exist records `Absent`, which is what
     /// makes undoing it a delete rather than a write of "".
     #[tokio::test]
     async fn writing_a_new_file_records_it_as_absent_beforehand() {
         let (_d, ws, cfg) = tree();
         let out = execute(
-            &tool_call(WRITE_FILE, json!({"path": "src/new.rs", "content": "fn main() {}\n"})),
+            &tool_call(
+                WRITE_FILE,
+                json!({"path": "src/new.rs", "content": "fn main() {}\n"}),
+            ),
             &ws,
             &cfg,
         )
         .await;
 
         match out.rollback.expect("a write must be undoable") {
-            crate::rollback::Record::File { display, before, .. } => {
+            crate::rollback::Record::File {
+                display, before, ..
+            } => {
                 assert_eq!(display, "src/new.rs");
                 assert_eq!(before, crate::rollback::Before::Absent);
             }
@@ -5686,7 +5919,10 @@ mod tests {
     async fn overwriting_a_file_keeps_the_previous_content() {
         let (_d, ws, cfg) = tree();
         let out = execute(
-            &tool_call(WRITE_FILE, json!({"path": "src/app.rs", "content": "replaced\n"})),
+            &tool_call(
+                WRITE_FILE,
+                json!({"path": "src/app.rs", "content": "replaced\n"}),
+            ),
             &ws,
             &cfg,
         )
@@ -5819,7 +6055,12 @@ mod tests {
     #[tokio::test]
     async fn glob_matches_recursively_and_returns_relative_paths() {
         let (_d, ws, cfg) = tree();
-        let out = execute(&tool_call(GLOB, json!({"pattern": "src/**/*.rs"})), &ws, &cfg).await;
+        let out = execute(
+            &tool_call(GLOB, json!({"pattern": "src/**/*.rs"})),
+            &ws,
+            &cfg,
+        )
+        .await;
         let mut found: Vec<&str> = out.content.lines().collect();
         found.sort();
         assert_eq!(found, vec!["src/app.rs", "src/ui/render.rs"]);
@@ -5879,16 +6120,34 @@ mod tests {
     #[tokio::test]
     async fn glob_rejects_an_invalid_pattern_with_an_actionable_message() {
         let (_d, ws, cfg) = tree();
-        let out = execute(&tool_call(GLOB, json!({"pattern": "src/[unclosed"})), &ws, &cfg).await;
+        let out = execute(
+            &tool_call(GLOB, json!({"pattern": "src/[unclosed"})),
+            &ws,
+            &cfg,
+        )
+        .await;
         assert!(out.content.contains("not a valid glob"), "{}", out.content);
     }
 
     #[tokio::test]
     async fn grep_finds_matches_as_path_line_text() {
         let (_d, ws, cfg) = tree();
-        let out = execute(&tool_call(GREP_SEARCH, json!({"pattern": "needle"})), &ws, &cfg).await;
-        assert!(out.content.contains("src/app.rs:1: let needle = 1;"), "{}", out.content);
-        assert!(out.display.contains("1 match(es) in 1 file(s)"), "{}", out.display);
+        let out = execute(
+            &tool_call(GREP_SEARCH, json!({"pattern": "needle"})),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(
+            out.content.contains("src/app.rs:1: let needle = 1;"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.display.contains("1 match(es) in 1 file(s)"),
+            "{}",
+            out.display
+        );
     }
 
     #[tokio::test]
@@ -5906,17 +6165,29 @@ mod tests {
     #[tokio::test]
     async fn grep_reports_no_matches_as_a_normal_result() {
         let (_d, ws, cfg) = tree();
-        let out =
-            execute(&tool_call(GREP_SEARCH, json!({"pattern": "nowhere_to_be_found"})), &ws, &cfg)
-                .await;
+        let out = execute(
+            &tool_call(GREP_SEARCH, json!({"pattern": "nowhere_to_be_found"})),
+            &ws,
+            &cfg,
+        )
+        .await;
         assert!(out.content.contains("No lines match"), "{}", out.content);
     }
 
     #[tokio::test]
     async fn grep_rejects_an_invalid_regex_with_an_actionable_message() {
         let (_d, ws, cfg) = tree();
-        let out = execute(&tool_call(GREP_SEARCH, json!({"pattern": "[unclosed"})), &ws, &cfg).await;
-        assert!(out.content.contains("not a valid regular expression"), "{}", out.content);
+        let out = execute(
+            &tool_call(GREP_SEARCH, json!({"pattern": "[unclosed"})),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(
+            out.content.contains("not a valid regular expression"),
+            "{}",
+            out.content
+        );
     }
 
     #[tokio::test]
@@ -5940,19 +6211,37 @@ mod tests {
     #[tokio::test]
     async fn grep_scopes_to_a_subdirectory_or_single_file() {
         let (_d, ws, cfg) = tree();
-        let dir_scoped =
-            execute(&tool_call(GREP_SEARCH, json!({"pattern": "//", "path": "src/ui"})), &ws, &cfg)
-                .await;
-        assert!(dir_scoped.content.contains("src/ui/render.rs"), "{}", dir_scoped.content);
-        assert!(!dir_scoped.content.contains("src/app.rs"), "{}", dir_scoped.content);
-
-        let file_scoped = execute(
-            &tool_call(GREP_SEARCH, json!({"pattern": "needle", "path": "src/app.rs"})),
+        let dir_scoped = execute(
+            &tool_call(GREP_SEARCH, json!({"pattern": "//", "path": "src/ui"})),
             &ws,
             &cfg,
         )
         .await;
-        assert!(file_scoped.content.contains("src/app.rs:1:"), "{}", file_scoped.content);
+        assert!(
+            dir_scoped.content.contains("src/ui/render.rs"),
+            "{}",
+            dir_scoped.content
+        );
+        assert!(
+            !dir_scoped.content.contains("src/app.rs"),
+            "{}",
+            dir_scoped.content
+        );
+
+        let file_scoped = execute(
+            &tool_call(
+                GREP_SEARCH,
+                json!({"pattern": "needle", "path": "src/app.rs"}),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(
+            file_scoped.content.contains("src/app.rs:1:"),
+            "{}",
+            file_scoped.content
+        );
     }
 
     #[tokio::test]
@@ -5960,14 +6249,21 @@ mod tests {
         let (_d, ws, cfg) = tree();
         std::fs::write(ws.root().join("src/app.rs"), "one\ntwo\nthree\n").unwrap();
         let out = execute(
-            &tool_call(GREP_SEARCH, json!({"pattern": "two", "path": "src/app.rs", "context": 1})),
+            &tool_call(
+                GREP_SEARCH,
+                json!({"pattern": "two", "path": "src/app.rs", "context": 1}),
+            ),
             &ws,
             &cfg,
         )
         .await;
         assert!(out.content.contains("src/app.rs-1- one"), "{}", out.content);
         assert!(out.content.contains("src/app.rs:2: two"), "{}", out.content);
-        assert!(out.content.contains("src/app.rs-3- three"), "{}", out.content);
+        assert!(
+            out.content.contains("src/app.rs-3- three"),
+            "{}",
+            out.content
+        );
     }
 
     /// Matched fragments of an image or an object file are noise the model
@@ -5976,7 +6272,12 @@ mod tests {
     async fn grep_skips_binary_files() {
         let (_d, ws, cfg) = tree();
         std::fs::write(ws.root().join("blob.bin"), b"needle\x00needle\n").unwrap();
-        let out = execute(&tool_call(GREP_SEARCH, json!({"pattern": "needle"})), &ws, &cfg).await;
+        let out = execute(
+            &tool_call(GREP_SEARCH, json!({"pattern": "needle"})),
+            &ws,
+            &cfg,
+        )
+        .await;
         assert!(!out.content.contains("blob.bin"), "{}", out.content);
     }
 
@@ -5987,9 +6288,15 @@ mod tests {
         let (_d, ws, cfg) = tree();
         let many = "needle\n".repeat(MAX_GREP_MATCHES + 50);
         std::fs::write(ws.root().join("src/app.rs"), many).unwrap();
-        let out = execute(&tool_call(GREP_SEARCH, json!({"pattern": "needle"})), &ws, &cfg).await;
+        let out = execute(
+            &tool_call(GREP_SEARCH, json!({"pattern": "needle"})),
+            &ws,
+            &cfg,
+        )
+        .await;
         assert!(
-            out.content.contains(&format!("[capped at {MAX_GREP_MATCHES} matching lines")),
+            out.content
+                .contains(&format!("[capped at {MAX_GREP_MATCHES} matching lines")),
             "{}",
             out.content
         );
@@ -5999,10 +6306,19 @@ mod tests {
     /// refuse it -- the point of the mode is to make research cheap.
     #[test]
     fn grep_is_allowed_in_plan_mode_and_offered_to_the_model() {
-        assert!(plan_mode_block(&Action::Grep { pattern: "x".into(), path: None }).is_none());
+        assert!(plan_mode_block(&Action::Grep {
+            pattern: "x".into(),
+            path: None
+        })
+        .is_none());
         let names: Vec<String> = schemas(Mode::Plan, false, true, true)
             .iter()
-            .map(|s| s["function"]["name"].as_str().unwrap_or_default().to_string())
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect();
         assert!(names.contains(&GREP_SEARCH.to_string()), "{names:?}");
     }
@@ -6052,31 +6368,70 @@ mod tests {
     #[test]
     fn no_label_carries_a_pictograph() {
         let labels = [
-            Action::Command { command: "ls".into(), purpose: None },
-            Action::Read { path: "a.rs".into() },
-            Action::Write { path: "a.rs".into(), content: String::new() },
+            Action::Command {
+                command: "ls".into(),
+                purpose: None,
+            },
+            Action::Read {
+                path: "a.rs".into(),
+            },
+            Action::Write {
+                path: "a.rs".into(),
+                content: String::new(),
+            },
             Action::List { path: ".".into() },
-            Action::Glob { pattern: "*.rs".into() },
-            Action::Grep { pattern: "x".into(), path: Some("src".into()) },
-            Action::Grep { pattern: "x".into(), path: None },
-            Action::Edit { path: "a.rs".into(), edits: Vec::new() },
-            Action::Search { query: "q".into(), max_results: 3 },
+            Action::Glob {
+                pattern: "*.rs".into(),
+            },
+            Action::Grep {
+                pattern: "x".into(),
+                path: Some("src".into()),
+            },
+            Action::Grep {
+                pattern: "x".into(),
+                path: None,
+            },
+            Action::Edit {
+                path: "a.rs".into(),
+                edits: Vec::new(),
+            },
+            Action::Search {
+                query: "q".into(),
+                max_results: 3,
+            },
             Action::DesignStarter,
             Action::CheckContrast { pairs: Vec::new() },
-            Action::Deploy { provider: "vercel".into(), production: true, summary: None },
+            Action::Deploy {
+                provider: "vercel".into(),
+                production: true,
+                summary: None,
+            },
             Action::Publish { path: ".".into() },
             Action::EnableAuth { path: ".".into() },
-            Action::DbQuery { path: ".".into(), sql: "select 1".into() },
+            Action::DbQuery {
+                path: ".".into(),
+                sql: "select 1".into(),
+            },
             Action::ListChangeRequests { path: ".".into() },
-            Action::ResolveChangeRequest { path: ".".into(), id: "1".into() },
-            Action::Agent { task: "look".into(), agent_type: "explore".into() },
+            Action::ResolveChangeRequest {
+                path: ".".into(),
+                id: "1".into(),
+            },
+            Action::Agent {
+                task: "look".into(),
+                agent_type: "explore".into(),
+            },
             Action::Plan(Proposal {
                 title: "t".into(),
                 summary: String::new(),
                 steps: Vec::new(),
                 not_doing: Vec::new(),
             }),
-            Action::Progress { step: 1, done: true, note: None },
+            Action::Progress {
+                step: 1,
+                done: true,
+                note: None,
+            },
         ];
         for action in labels {
             let label = action.label();
@@ -6100,12 +6455,18 @@ mod tests {
         let calls = [
             tool_call(READ_FILE, json!({"path": "src/app.rs"})),
             tool_call(WRITE_FILE, json!({"path": "src/new.rs", "content": "x\n"})),
-            tool_call(EDIT_FILE, json!({"path": "src/app.rs", "old_string": "a", "new_string": "A"})),
+            tool_call(
+                EDIT_FILE,
+                json!({"path": "src/app.rs", "old_string": "a", "new_string": "A"}),
+            ),
             tool_call(LIST_DIR, json!({"path": "."})),
             tool_call(GLOB, json!({"pattern": "*.rs"})),
             tool_call(GREP_SEARCH, json!({"pattern": "A"})),
             tool_call(GET_DESIGN_STARTER, json!({})),
-            tool_call(CHECK_CONTRAST, json!({"pairs": [["#000000", "#ffffff", "text"]]})),
+            tool_call(
+                CHECK_CONTRAST,
+                json!({"pairs": [["#000000", "#ffffff", "text"]]}),
+            ),
             tool_call(PLAN_PROGRESS, json!({"step": 1, "done": true})),
             tool_call("no_such_tool", json!({})),
             // Malformed arguments take a different path to a different
@@ -6169,9 +6530,12 @@ mod tests {
         assert_eq!((previewed.added, previewed.removed), (2, 1));
 
         execute(
-            &tool_call(EDIT_FILE, json!({
-                "path": "src/app.rs", "old_string": "two", "new_string": "TWO\nTWO AND A HALF"
-            })),
+            &tool_call(
+                EDIT_FILE,
+                json!({
+                    "path": "src/app.rs", "old_string": "two", "new_string": "TWO\nTWO AND A HALF"
+                }),
+            ),
             &ws,
             &cfg,
         )
@@ -6189,15 +6553,22 @@ mod tests {
         std::fs::write(ws.root().join("src/app.rs"), "a\nb\nc\n").unwrap();
 
         let out = execute(
-            &tool_call(EDIT_FILE, json!({
-                "path": "src/app.rs", "old_string": "b", "new_string": "B\nB2"
-            })),
+            &tool_call(
+                EDIT_FILE,
+                json!({
+                    "path": "src/app.rs", "old_string": "b", "new_string": "B\nB2"
+                }),
+            ),
             &ws,
             &cfg,
         )
         .await;
 
-        assert!(out.display.contains("2 additions and 1 removal"), "{}", out.display);
+        assert!(
+            out.display.contains("2 additions and 1 removal"),
+            "{}",
+            out.display
+        );
         let diff = out.diff.expect("a diff");
         assert_eq!((diff.added, diff.removed), (2, 1));
         // The model still gets the plain result, not the drawing.
@@ -6212,13 +6583,20 @@ mod tests {
         std::fs::write(ws.root().join("src/app.rs"), "one\ntwo\n").unwrap();
 
         let out = execute(
-            &tool_call(WRITE_FILE, json!({"path": "src/app.rs", "content": "one\nTWO\n"})),
+            &tool_call(
+                WRITE_FILE,
+                json!({"path": "src/app.rs", "content": "one\nTWO\n"}),
+            ),
             &ws,
             &cfg,
         )
         .await;
 
-        assert!(out.display.contains("1 addition and 1 removal"), "{}", out.display);
+        assert!(
+            out.display.contains("1 addition and 1 removal"),
+            "{}",
+            out.display
+        );
         assert_eq!(out.diff.expect("a diff").removed, 1);
     }
 
@@ -6228,7 +6606,10 @@ mod tests {
         let (_d, ws, cfg) = tree();
 
         let out = execute(
-            &tool_call(WRITE_FILE, json!({"path": "src/fresh.rs", "content": "a\nb\n"})),
+            &tool_call(
+                WRITE_FILE,
+                json!({"path": "src/fresh.rs", "content": "a\nb\n"}),
+            ),
             &ws,
             &cfg,
         )
@@ -6246,7 +6627,10 @@ mod tests {
         std::fs::write(ws.root().join("src/app.rs"), "same\n").unwrap();
 
         let out = execute(
-            &tool_call(WRITE_FILE, json!({"path": "src/app.rs", "content": "same\n"})),
+            &tool_call(
+                WRITE_FILE,
+                json!({"path": "src/app.rs", "content": "same\n"}),
+            ),
             &ws,
             &cfg,
         )
@@ -6265,7 +6649,10 @@ mod tests {
         std::fs::write(ws.root().join("src/blob.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
 
         let out = execute(
-            &tool_call(WRITE_FILE, json!({"path": "src/blob.bin", "content": "now text\n"})),
+            &tool_call(
+                WRITE_FILE,
+                json!({"path": "src/blob.bin", "content": "now text\n"}),
+            ),
             &ws,
             &cfg,
         )
@@ -6277,7 +6664,10 @@ mod tests {
         // And the approval prompt would have said nothing about it either --
         // on a file the write above has not already turned into text.
         std::fs::write(ws.root().join("src/other.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
-        let action = Action::Write { path: "src/other.bin".into(), content: "x".into() };
+        let action = Action::Write {
+            path: "src/other.bin".into(),
+            content: "x".into(),
+        };
         assert!(preview_change(&action, ws.root()).is_none());
     }
 
@@ -6288,9 +6678,12 @@ mod tests {
         std::fs::write(ws.root().join("src/app.rs"), "a\n").unwrap();
 
         let out = execute(
-            &tool_call(EDIT_FILE, json!({
-                "path": "src/app.rs", "old_string": "not here", "new_string": "x"
-            })),
+            &tool_call(
+                EDIT_FILE,
+                json!({
+                    "path": "src/app.rs", "old_string": "not here", "new_string": "x"
+                }),
+            ),
             &ws,
             &cfg,
         )
@@ -6309,21 +6702,33 @@ mod tests {
 
         let missing = Action::Edit {
             path: "src/app.rs".into(),
-            edits: vec![EditSpan { old: "absent".into(), new: "y".into(), replace_all: false }],
+            edits: vec![EditSpan {
+                old: "absent".into(),
+                new: "y".into(),
+                replace_all: false,
+            }],
         };
         assert!(preview_change(&missing, ws.root()).is_none());
 
         // Ambiguous without `replace_all`, so the runner would refuse it too.
         let ambiguous = Action::Edit {
             path: "src/app.rs".into(),
-            edits: vec![EditSpan { old: "x = 1;".into(), new: "x = 2;".into(), replace_all: false }],
+            edits: vec![EditSpan {
+                old: "x = 1;".into(),
+                new: "x = 2;".into(),
+                replace_all: false,
+            }],
         };
         assert!(preview_change(&ambiguous, ws.root()).is_none());
 
         // A file that does not exist has nothing to edit.
         let nowhere = Action::Edit {
             path: "src/nope.rs".into(),
-            edits: vec![EditSpan { old: "a".into(), new: "b".into(), replace_all: false }],
+            edits: vec![EditSpan {
+                old: "a".into(),
+                new: "b".into(),
+                replace_all: false,
+            }],
         };
         assert!(preview_change(&nowhere, ws.root()).is_none());
     }
@@ -6333,8 +6738,13 @@ mod tests {
     fn only_file_changes_get_a_preview() {
         let (_d, ws, _cfg) = tree();
         let actions = [
-            Action::Read { path: "src/app.rs".into() },
-            Action::Command { command: "ls".into(), purpose: None },
+            Action::Read {
+                path: "src/app.rs".into(),
+            },
+            Action::Command {
+                command: "ls".into(),
+                purpose: None,
+            },
             Action::List { path: ".".into() },
         ];
         for action in actions {
@@ -6364,7 +6774,11 @@ mod tests {
     #[tokio::test]
     async fn edit_file_replaces_one_span_and_leaves_the_rest() {
         let (_d, ws, cfg) = tree();
-        std::fs::write(ws.root().join("src/app.rs"), "keep\nlet needle = 1;\nkeep too\n").unwrap();
+        std::fs::write(
+            ws.root().join("src/app.rs"),
+            "keep\nlet needle = 1;\nkeep too\n",
+        )
+        .unwrap();
 
         let out = execute(
             &tool_call(EDIT_FILE, json!({
@@ -6388,12 +6802,19 @@ mod tests {
         std::fs::write(ws.root().join("src/app.rs"), "x = 1;\nx = 1;\n").unwrap();
 
         let ambiguous = execute(
-            &tool_call(EDIT_FILE, json!({"path": "src/app.rs", "old_string": "x = 1;", "new_string": "x = 2;"})),
+            &tool_call(
+                EDIT_FILE,
+                json!({"path": "src/app.rs", "old_string": "x = 1;", "new_string": "x = 2;"}),
+            ),
             &ws,
             &cfg,
         )
         .await;
-        assert!(ambiguous.content.contains("appears 2 times"), "{}", ambiguous.content);
+        assert!(
+            ambiguous.content.contains("appears 2 times"),
+            "{}",
+            ambiguous.content
+        );
         // Nothing was written.
         assert_eq!(
             std::fs::read_to_string(ws.root().join("src/app.rs")).unwrap(),
@@ -6420,28 +6841,44 @@ mod tests {
         let (_d, ws, cfg) = tree();
         let before = std::fs::read_to_string(ws.root().join("src/app.rs")).unwrap();
         let out = execute(
-            &tool_call(EDIT_FILE, json!({"path": "src/app.rs", "old_string": "not there", "new_string": "x"})),
+            &tool_call(
+                EDIT_FILE,
+                json!({"path": "src/app.rs", "old_string": "not there", "new_string": "x"}),
+            ),
             &ws,
             &cfg,
         )
         .await;
         assert!(out.content.contains("was not found"), "{}", out.content);
-        assert_eq!(std::fs::read_to_string(ws.root().join("src/app.rs")).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(ws.root().join("src/app.rs")).unwrap(),
+            before
+        );
     }
 
     #[tokio::test]
     async fn edit_file_rejects_an_empty_or_unchanged_span() {
         let (_d, ws, cfg) = tree();
         let empty = execute(
-            &tool_call(EDIT_FILE, json!({"path": "src/app.rs", "old_string": "", "new_string": "x"})),
+            &tool_call(
+                EDIT_FILE,
+                json!({"path": "src/app.rs", "old_string": "", "new_string": "x"}),
+            ),
             &ws,
             &cfg,
         )
         .await;
-        assert!(empty.content.contains("must not be empty"), "{}", empty.content);
+        assert!(
+            empty.content.contains("must not be empty"),
+            "{}",
+            empty.content
+        );
 
         let same = execute(
-            &tool_call(EDIT_FILE, json!({"path": "src/app.rs", "old_string": "a", "new_string": "a"})),
+            &tool_call(
+                EDIT_FILE,
+                json!({"path": "src/app.rs", "old_string": "a", "new_string": "a"}),
+            ),
             &ws,
             &cfg,
         )
@@ -6454,10 +6891,13 @@ mod tests {
         let (_d, ws, cfg) = tree();
         std::fs::write(ws.root().join("src/app.rs"), "alpha\nbeta\ngamma\n").unwrap();
         let out = execute(
-            &tool_call(EDIT_FILE, json!({"path": "src/app.rs", "edits": [
-                {"old_string": "alpha", "new_string": "ALPHA"},
-                {"old_string": "gamma", "new_string": "GAMMA"},
-            ]})),
+            &tool_call(
+                EDIT_FILE,
+                json!({"path": "src/app.rs", "edits": [
+                    {"old_string": "alpha", "new_string": "ALPHA"},
+                    {"old_string": "gamma", "new_string": "GAMMA"},
+                ]}),
+            ),
             &ws,
             &cfg,
         )
@@ -6474,10 +6914,13 @@ mod tests {
         let (_d, ws, cfg) = tree();
         std::fs::write(ws.root().join("src/app.rs"), "one\n").unwrap();
         let out = execute(
-            &tool_call(EDIT_FILE, json!({"path": "src/app.rs", "edits": [
-                {"old_string": "one", "new_string": "two"},
-                {"old_string": "two", "new_string": "three"},
-            ]})),
+            &tool_call(
+                EDIT_FILE,
+                json!({"path": "src/app.rs", "edits": [
+                    {"old_string": "one", "new_string": "two"},
+                    {"old_string": "two", "new_string": "three"},
+                ]}),
+            ),
             &ws,
             &cfg,
         )
@@ -6494,18 +6937,28 @@ mod tests {
         let (_d, ws, cfg) = tree();
         std::fs::write(ws.root().join("src/app.rs"), "alpha\nbeta\n").unwrap();
         let out = execute(
-            &tool_call(EDIT_FILE, json!({"path": "src/app.rs", "edits": [
-                {"old_string": "alpha", "new_string": "ALPHA"},
-                {"old_string": "no such text", "new_string": "x"},
-            ]})),
+            &tool_call(
+                EDIT_FILE,
+                json!({"path": "src/app.rs", "edits": [
+                    {"old_string": "alpha", "new_string": "ALPHA"},
+                    {"old_string": "no such text", "new_string": "x"},
+                ]}),
+            ),
             &ws,
             &cfg,
         )
         .await;
         assert!(out.content.contains("edit 2 of 2"), "{}", out.content);
-        assert!(out.content.contains("None of the edits were applied"), "{}", out.content);
+        assert!(
+            out.content.contains("None of the edits were applied"),
+            "{}",
+            out.content
+        );
         let after = std::fs::read_to_string(ws.root().join("src/app.rs")).unwrap();
-        assert_eq!(after, "alpha\nbeta\n", "the first edit must not have landed");
+        assert_eq!(
+            after, "alpha\nbeta\n",
+            "the first edit must not have landed"
+        );
     }
 
     /// Both argument forms at once is ambiguous about intent, so it is refused
@@ -6514,9 +6967,12 @@ mod tests {
     async fn edit_file_refuses_mixed_or_incomplete_argument_forms() {
         let (_d, ws, cfg) = tree();
         let mixed = execute(
-            &tool_call(EDIT_FILE, json!({"path": "src/app.rs",
+            &tool_call(
+                EDIT_FILE,
+                json!({"path": "src/app.rs",
                 "old_string": "a", "new_string": "b",
-                "edits": [{"old_string": "c", "new_string": "d"}]})),
+                "edits": [{"old_string": "c", "new_string": "d"}]}),
+            ),
             &ws,
             &cfg,
         )
@@ -6529,21 +6985,32 @@ mod tests {
             &cfg,
         )
         .await;
-        assert!(incomplete.content.contains("both required"), "{}", incomplete.content);
+        assert!(
+            incomplete.content.contains("both required"),
+            "{}",
+            incomplete.content
+        );
     }
 
     #[tokio::test]
     async fn edit_file_cannot_escape_the_workspace() {
         let (_d, ws, cfg) = tree();
         let out = execute(
-            &tool_call(EDIT_FILE, json!({
-                "path": "../outside.txt", "old_string": "a", "new_string": "b"
-            })),
+            &tool_call(
+                EDIT_FILE,
+                json!({
+                    "path": "../outside.txt", "old_string": "a", "new_string": "b"
+                }),
+            ),
             &ws,
             &cfg,
         )
         .await;
-        assert!(out.content.contains("outside the workspace"), "{}", out.content);
+        assert!(
+            out.content.contains("outside the workspace"),
+            "{}",
+            out.content
+        );
     }
 
     /// The approval prompt must be able to describe every tool, or a call would
@@ -6563,9 +7030,12 @@ mod tests {
             Some(Action::Glob { .. })
         ));
         assert!(matches!(
-            describe_action(&tool_call(EDIT_FILE, json!({
-                "path": "a.rs", "old_string": "x", "new_string": "y"
-            }))),
+            describe_action(&tool_call(
+                EDIT_FILE,
+                json!({
+                    "path": "a.rs", "old_string": "x", "new_string": "y"
+                })
+            )),
             Some(Action::Edit { .. })
         ));
         // Unusable arguments describe nothing, so the runner reports them back
@@ -6692,11 +7162,7 @@ mod tests {
         let (_dir, ws, mut cfg) = fixture();
         cfg.command_timeout_secs = 5;
         // With inherited stdin this blocks; with /dev/null it returns at once.
-        let command = if cfg!(windows) {
-            "more"
-        } else {
-            "cat"
-        };
+        let command = if cfg!(windows) { "more" } else { "cat" };
         let out = execute(&call(command), &ws, &cfg).await;
         assert!(out.content.contains("exit code"), "{}", out.content);
     }
@@ -6723,7 +7189,11 @@ mod tests {
         let mut bad = call("");
         bad.function.arguments = "{not json".to_string();
         let out = execute(&bad, &ws, &cfg).await;
-        assert!(out.content.contains("could not read the arguments"), "{}", out.content);
+        assert!(
+            out.content.contains("could not read the arguments"),
+            "{}",
+            out.content
+        );
     }
 
     #[tokio::test]
@@ -6785,14 +7255,25 @@ mod tests {
 
     #[test]
     fn plain_read_only_commands_are_recognised() {
-        for cmd in ["ls -la", "cat src/main.rs", "grep -rn TODO src", "pwd", "wc -l file.txt"] {
+        for cmd in [
+            "ls -la",
+            "cat src/main.rs",
+            "grep -rn TODO src",
+            "pwd",
+            "wc -l file.txt",
+        ] {
             assert!(is_read_only(cmd), "expected read-only: {cmd}");
         }
     }
 
     #[test]
     fn narrow_git_subcommands_are_recognised() {
-        for cmd in ["git status", "git diff HEAD~1", "git log --oneline -5", "git show HEAD"] {
+        for cmd in [
+            "git status",
+            "git diff HEAD~1",
+            "git log --oneline -5",
+            "git show HEAD",
+        ] {
             assert!(is_read_only(cmd), "expected read-only: {cmd}");
         }
     }
@@ -6902,7 +7383,11 @@ mod tests {
     fn declining_tells_the_model_not_to_retry() {
         let out = declined(&call("rm -rf /"));
         assert!(out.content.contains("declined"), "{}", out.content);
-        assert!(out.content.contains("Do not try it again"), "{}", out.content);
+        assert!(
+            out.content.contains("Do not try it again"),
+            "{}",
+            out.content
+        );
     }
 
     /// The most common way this tool fails in the wild is a model using `ls` on
@@ -7003,12 +7488,22 @@ mod tests {
         let without = system_prompt(&ws, &cfg, 0, Mode::Normal);
         assert!(!without.contains("PROJECT NOTES"), "{without}");
 
-        std::fs::write(ws.root().join("COVEXCODE.md"), "Run `cargo test` before committing.\n")
-            .unwrap();
-        std::fs::write(ws.root().join("AGENTS.md"), "The API layer lives in src/api.\n").unwrap();
+        std::fs::write(
+            ws.root().join("COVEXCODE.md"),
+            "Run `cargo test` before committing.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.root().join("AGENTS.md"),
+            "The API layer lives in src/api.\n",
+        )
+        .unwrap();
         let with = system_prompt(&ws, &cfg, 0, Mode::Normal);
         assert!(with.contains("PROJECT NOTES from COVEXCODE.md"), "{with}");
-        assert!(with.contains("Run `cargo test` before committing."), "{with}");
+        assert!(
+            with.contains("Run `cargo test` before committing."),
+            "{with}"
+        );
         assert!(with.contains("PROJECT NOTES from AGENTS.md"), "{with}");
         assert!(with.contains("The API layer lives in src/api."), "{with}");
 
@@ -7028,7 +7523,11 @@ mod tests {
         std::fs::write(ws.root().join("COVEXCODE.md"), "x".repeat(100_000)).unwrap();
         let prompt = system_prompt(&ws, &cfg, 0, Mode::Normal);
         assert!(prompt.contains("truncated"), "{prompt}");
-        assert!(prompt.len() < 60_000, "the whole file went through: {}", prompt.len());
+        assert!(
+            prompt.len() < 60_000,
+            "the whole file went through: {}",
+            prompt.len()
+        );
     }
 
     /// An empty or unreadable memory file is treated as absent -- an amenity
@@ -7083,7 +7582,10 @@ mod tests {
         let (_dir, ws, cfg) = fixture();
         let prompt = system_prompt(&ws, &cfg, 0, Mode::Normal);
 
-        assert!(prompt.contains("request all of them in the same turn"), "{prompt}");
+        assert!(
+            prompt.contains("request all of them in the same turn"),
+            "{prompt}"
+        );
         assert!(
             prompt.contains("not a fresh pair around each individual call"),
             "{prompt}"
@@ -7098,7 +7600,10 @@ mod tests {
         let (_dir, ws, cfg) = fixture();
         let prompt = system_prompt(&ws, &cfg, 0, Mode::Normal);
 
-        assert!(prompt.contains("Verify before declaring success"), "{prompt}");
+        assert!(
+            prompt.contains("Verify before declaring success"),
+            "{prompt}"
+        );
         assert!(
             prompt.contains("Do not assume something works because the code looks right"),
             "{prompt}"
@@ -7119,12 +7624,11 @@ mod tests {
         let (_dir, ws, cfg) = fixture();
         let prompt = system_prompt(&ws, &cfg, 0, Mode::Normal);
 
+        assert!(prompt.contains("offer to open it with"), "{prompt}");
         assert!(
-            prompt.contains("offer to open it with"),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("it waits for the same approval as everything else, it does not skip the prompt"),
+            prompt.contains(
+                "it waits for the same approval as everything else, it does not skip the prompt"
+            ),
             "{prompt}"
         );
     }
@@ -7136,12 +7640,20 @@ mod tests {
     fn disabling_deployment_withholds_the_schema_entirely() {
         let names: Vec<String> = schemas(Mode::Normal, false, false, true)
             .iter()
-            .map(|s| s["function"]["name"].as_str().unwrap_or_default().to_string())
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect();
         assert!(!names.iter().any(|n| n == DEPLOY_PROJECT), "{names:?}");
         // ...and the rest are untouched.
         assert!(names.iter().any(|n| n == RUN_COMMAND), "{names:?}");
-        assert_eq!(names.len(), schemas(Mode::Normal, false, true, true).len() - 1);
+        assert_eq!(
+            names.len(),
+            schemas(Mode::Normal, false, true, true).len() - 1
+        );
     }
 
     /// `schemas()` fixes `browser` at `false` -- the TUI has no browser tab
@@ -7152,7 +7664,12 @@ mod tests {
     fn the_browser_schema_is_withheld_unless_explicitly_requested() {
         let names: Vec<String> = schemas(Mode::Normal, false, true, true)
             .iter()
-            .map(|s| s["function"]["name"].as_str().unwrap_or_default().to_string())
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect();
         assert!(!names.iter().any(|n| n == CHECK_IN_BROWSER), "{names:?}");
         assert!(!names.iter().any(|n| n == INTERACT_IN_BROWSER), "{names:?}");
@@ -7160,10 +7677,21 @@ mod tests {
         let with_browser: Vec<String> =
             schemas_for(Mode::Normal, false, true, true, true, SchemaDiet::full())
                 .iter()
-                .map(|s| s["function"]["name"].as_str().unwrap_or_default().to_string())
+                .map(|s| {
+                    s["function"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()
+                })
                 .collect();
-        assert!(with_browser.iter().any(|n| n == CHECK_IN_BROWSER), "{with_browser:?}");
-        assert!(with_browser.iter().any(|n| n == INTERACT_IN_BROWSER), "{with_browser:?}");
+        assert!(
+            with_browser.iter().any(|n| n == CHECK_IN_BROWSER),
+            "{with_browser:?}"
+        );
+        assert!(
+            with_browser.iter().any(|n| n == INTERACT_IN_BROWSER),
+            "{with_browser:?}"
+        );
         assert_eq!(with_browser.len(), names.len() + 2);
     }
 
@@ -7180,7 +7708,10 @@ mod tests {
         assert!(matches!(risk, danger::Risk::Dangerous(_)), "{risk:?}");
 
         let blocked = plan_mode_block(&action);
-        assert!(blocked.is_some(), "must be blocked in plan mode, got {blocked:?}");
+        assert!(
+            blocked.is_some(),
+            "must be blocked in plan mode, got {blocked:?}"
+        );
     }
 
     #[test]
@@ -7215,7 +7746,9 @@ mod tests {
             action,
             Action::InteractInBrowser {
                 url: "http://localhost:3000".to_string(),
-                interaction: BrowserInteraction::Type { text: "hello".to_string() },
+                interaction: BrowserInteraction::Type {
+                    text: "hello".to_string()
+                },
             }
         );
 
@@ -7232,7 +7765,9 @@ mod tests {
             action,
             Action::InteractInBrowser {
                 url: "http://localhost:3000".to_string(),
-                interaction: BrowserInteraction::Key { key: "Enter".to_string() },
+                interaction: BrowserInteraction::Key {
+                    key: "Enter".to_string()
+                },
             }
         );
 
@@ -7267,7 +7802,10 @@ mod tests {
                 .iter()
                 .any(|s| s["function"]["name"] == DEPLOY_PROJECT)
         };
-        assert!(has_deploy(Mode::Normal, true), "the ordinary case offers it");
+        assert!(
+            has_deploy(Mode::Normal, true),
+            "the ordinary case offers it"
+        );
         assert!(!has_deploy(Mode::Normal, false), "turned off in config");
         assert!(!has_deploy(Mode::Plan, true), "plan mode changes nothing");
         assert!(!has_deploy(Mode::Plan, false), "both at once");
@@ -7285,12 +7823,23 @@ mod tests {
     fn an_unpublished_workspace_withholds_the_publish_gated_tools() {
         let names: Vec<String> = schemas(Mode::Normal, false, true, false)
             .iter()
-            .map(|s| s["function"]["name"].as_str().unwrap_or_default().to_string())
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect();
         assert!(!names.iter().any(|n| n == DB_QUERY), "{names:?}");
         assert!(!names.iter().any(|n| n == ENABLE_AUTH), "{names:?}");
-        assert!(!names.iter().any(|n| n == LIST_CHANGE_REQUESTS), "{names:?}");
-        assert!(!names.iter().any(|n| n == RESOLVE_CHANGE_REQUEST), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n == LIST_CHANGE_REQUESTS),
+            "{names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == RESOLVE_CHANGE_REQUEST),
+            "{names:?}"
+        );
         // A backend is served at /api/<project id>/, and that id only exists
         // once the project has been published -- so this one is gated for a
         // stronger reason than the others: without an id there is nowhere to
@@ -7299,7 +7848,10 @@ mod tests {
         // ...and the rest are untouched.
         assert!(names.iter().any(|n| n == RUN_COMMAND), "{names:?}");
         assert!(names.iter().any(|n| n == PUBLISH_ARTIFACT), "{names:?}");
-        assert_eq!(names.len(), schemas(Mode::Normal, false, true, true).len() - 5);
+        assert_eq!(
+            names.len(),
+            schemas(Mode::Normal, false, true, true).len() - 5
+        );
     }
 
     /// Once a workspace has been published they all return -- this is a
@@ -7308,12 +7860,20 @@ mod tests {
     fn a_published_workspace_offers_them_all() {
         let names: Vec<String> = schemas(Mode::Normal, false, true, true)
             .iter()
-            .map(|s| s["function"]["name"].as_str().unwrap_or_default().to_string())
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect();
         assert!(names.iter().any(|n| n == DB_QUERY), "{names:?}");
         assert!(names.iter().any(|n| n == ENABLE_AUTH), "{names:?}");
         assert!(names.iter().any(|n| n == LIST_CHANGE_REQUESTS), "{names:?}");
-        assert!(names.iter().any(|n| n == RESOLVE_CHANGE_REQUEST), "{names:?}");
+        assert!(
+            names.iter().any(|n| n == RESOLVE_CHANGE_REQUEST),
+            "{names:?}"
+        );
         assert!(names.iter().any(|n| n == DEPLOY_BACKEND), "{names:?}");
     }
 
@@ -7325,7 +7885,12 @@ mod tests {
     fn plan_mode_never_offers_to_host_a_backend() {
         let names: Vec<String> = schemas(Mode::Plan, false, true, true)
             .iter()
-            .map(|s| s["function"]["name"].as_str().unwrap_or_default().to_string())
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect();
         assert!(!names.iter().any(|n| n == DEPLOY_BACKEND), "{names:?}");
         assert!(!names.iter().any(|n| n == DEPLOY_PROJECT), "{names:?}");
@@ -7361,13 +7926,19 @@ mod tests {
         assert!(has_db_query(true, true), "the ordinary case offers it");
         assert!(!has_db_query(true, false), "unpublished withholds it");
         assert!(!has_db_query(false, false), "both at once");
-        assert!(has_db_query(false, true), "deploy being off does not touch this gate");
+        assert!(
+            has_db_query(false, true),
+            "deploy being off does not touch this gate"
+        );
     }
 
     #[test]
     fn the_schemas_name_exactly_the_tools_that_execute() {
         let schemas = schemas(Mode::Normal, false, true, true);
-        let names: Vec<_> = schemas.iter().map(|s| s["function"]["name"].clone()).collect();
+        let names: Vec<_> = schemas
+            .iter()
+            .map(|s| s["function"]["name"].clone())
+            .collect();
         assert_eq!(
             names,
             vec![
@@ -7397,7 +7968,12 @@ mod tests {
     fn schema_names(diet: SchemaDiet) -> Vec<String> {
         schemas_for(Mode::Normal, false, true, true, false, diet)
             .iter()
-            .map(|s| s["function"]["name"].as_str().unwrap_or_default().to_string())
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect()
     }
 
@@ -7411,7 +7987,10 @@ mod tests {
         std::fs::write(dir.path().join("style.css"), "body{}").unwrap();
         let diet = SchemaDiet::for_workspace(dir.path());
         assert!(!diet.agent, "a handful of files is below the threshold");
-        assert!(diet.web_search, "search stays; this diet is only the agent schema");
+        assert!(
+            diet.web_search,
+            "search stays; this diet is only the agent schema"
+        );
         let names = schema_names(diet);
         assert!(!names.iter().any(|n| n == AGENT), "{names:?}");
         assert!(names.iter().any(|n| n == WEB_SEARCH), "{names:?}");
@@ -7453,7 +8032,10 @@ mod tests {
 
     #[test]
     fn an_agent_call_describes_with_the_default_type() {
-        let call = tool_call(AGENT, json!({ "task": "find every caller of resolve_in_workspace" }));
+        let call = tool_call(
+            AGENT,
+            json!({ "task": "find every caller of resolve_in_workspace" }),
+        );
         assert_eq!(
             describe_action(&call),
             Some(Action::Agent {
@@ -7466,12 +8048,19 @@ mod tests {
     #[test]
     fn an_agent_call_with_an_empty_task_describes_nothing() {
         let call = tool_call(AGENT, json!({ "task": "   " }));
-        assert_eq!(describe_action(&call), None, "nothing coherent to run or approve");
+        assert_eq!(
+            describe_action(&call),
+            None,
+            "nothing coherent to run or approve"
+        );
     }
 
     #[test]
     fn an_explicit_agent_type_is_kept() {
-        let call = tool_call(AGENT, json!({ "task": "look around", "agent_type": "worker" }));
+        let call = tool_call(
+            AGENT,
+            json!({ "task": "look around", "agent_type": "worker" }),
+        );
         let Some(Action::Agent { agent_type, .. }) = describe_action(&call) else {
             panic!("should describe");
         };
@@ -7486,10 +8075,21 @@ mod tests {
     fn subagent_schemas_offer_exactly_the_read_only_slice() {
         let names: Vec<String> = subagent_schemas()
             .iter()
-            .map(|s| s["function"]["name"].as_str().unwrap_or_default().to_string())
+            .map(|s| {
+                s["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect();
-        assert_eq!(names, SUBAGENT_TOOLS, "same order as the parent list, nothing extra");
-        assert!(!names.iter().any(|n| n == AGENT), "children do not spawn children");
+        assert_eq!(
+            names, SUBAGENT_TOOLS,
+            "same order as the parent list, nothing extra"
+        );
+        assert!(
+            !names.iter().any(|n| n == AGENT),
+            "children do not spawn children"
+        );
         assert!(!names.iter().any(|n| n == WRITE_FILE || n == EDIT_FILE));
     }
 
@@ -7501,7 +8101,10 @@ mod tests {
             WRITE_FILE,
             json!({ "path": "a.txt", "content": "x" }),
         ));
-        assert!(refusal.is_err(), "writing is exactly what a child cannot do");
+        assert!(
+            refusal.is_err(),
+            "writing is exactly what a child cannot do"
+        );
     }
 
     #[test]
@@ -7517,19 +8120,32 @@ mod tests {
     #[test]
     fn a_subagent_cannot_spawn_a_subagent() {
         let refusal = subagent_call_allowed(&tool_call(AGENT, json!({ "task": "recurse" })));
-        assert!(refusal.is_err(), "depth 1 only, until Phase 5 proves the plumbing");
+        assert!(
+            refusal.is_err(),
+            "depth 1 only, until Phase 5 proves the plumbing"
+        );
     }
 
     #[test]
     fn plan_mode_lets_a_subagent_through() {
-        let action = Action::Agent { task: "research".to_string(), agent_type: "explore".to_string() };
-        assert_eq!(plan_mode_block(&action), None, "a read-only child is what plan mode is for");
+        let action = Action::Agent {
+            task: "research".to_string(),
+            agent_type: "explore".to_string(),
+        };
+        assert_eq!(
+            plan_mode_block(&action),
+            None,
+            "a read-only child is what plan mode is for"
+        );
     }
 
     #[test]
     fn a_subagent_is_normal_risk() {
         let (_dir, ws, _config) = fixture();
-        let action = Action::Agent { task: "research".to_string(), agent_type: "explore".to_string() };
+        let action = Action::Agent {
+            task: "research".to_string(),
+            agent_type: "explore".to_string(),
+        };
         assert_eq!(action_risk(&action, ws.root()), danger::Risk::Normal);
     }
 
@@ -7619,8 +8235,8 @@ mod tests {
     /// established for Read/List/Glob/Grep.
     #[test]
     fn both_new_tools_are_read_only_actions() {
-        let starter = describe_action(&tool_call(GET_DESIGN_STARTER, json!({})))
-            .expect("should parse");
+        let starter =
+            describe_action(&tool_call(GET_DESIGN_STARTER, json!({}))).expect("should parse");
         assert!(matches!(starter, Action::DesignStarter));
 
         let contrast = describe_action(&tool_call(
@@ -7637,7 +8253,13 @@ mod tests {
     fn db_query_parses_into_an_action_and_is_normal_risk() {
         let call = tool_call(DB_QUERY, json!({ "path": "dist", "sql": "SELECT 1" }));
         let action = describe_action(&call).expect("should parse");
-        assert_eq!(action, Action::DbQuery { path: "dist".to_string(), sql: "SELECT 1".to_string() });
+        assert_eq!(
+            action,
+            Action::DbQuery {
+                path: "dist".to_string(),
+                sql: "SELECT 1".to_string()
+            }
+        );
 
         // Unlike enable_auth/publish_artifact/deploy_project, this never
         // touches the public internet by itself -- ordinary approval, same
@@ -7645,7 +8267,10 @@ mod tests {
         let risk = action_risk(&action, Path::new("/tmp"));
         assert!(matches!(risk, danger::Risk::Normal), "{risk:?}");
 
-        assert!(plan_mode_block(&action).is_some(), "plan mode must not run real queries");
+        assert!(
+            plan_mode_block(&action).is_some(),
+            "plan mode must not run real queries"
+        );
     }
 
     #[test]
@@ -7660,14 +8285,22 @@ mod tests {
     fn list_change_requests_parses_into_an_action_and_is_normal_risk() {
         let call = tool_call(LIST_CHANGE_REQUESTS, json!({ "path": "dist" }));
         let action = describe_action(&call).expect("should parse");
-        assert_eq!(action, Action::ListChangeRequests { path: "dist".to_string() });
+        assert_eq!(
+            action,
+            Action::ListChangeRequests {
+                path: "dist".to_string()
+            }
+        );
 
         // Same reasoning as db_query: a private call to covexcode's own
         // control-plane, never the public internet by itself.
         let risk = action_risk(&action, Path::new("/tmp"));
         assert!(matches!(risk, danger::Risk::Normal), "{risk:?}");
 
-        assert!(plan_mode_block(&action).is_some(), "plan mode must not check the mailbox");
+        assert!(
+            plan_mode_block(&action).is_some(),
+            "plan mode must not check the mailbox"
+        );
     }
 
     #[test]
@@ -7678,17 +8311,26 @@ mod tests {
 
     #[test]
     fn resolve_change_request_parses_into_an_action_and_is_normal_risk() {
-        let call = tool_call(RESOLVE_CHANGE_REQUEST, json!({ "path": "dist", "id": "abc123" }));
+        let call = tool_call(
+            RESOLVE_CHANGE_REQUEST,
+            json!({ "path": "dist", "id": "abc123" }),
+        );
         let action = describe_action(&call).expect("should parse");
         assert_eq!(
             action,
-            Action::ResolveChangeRequest { path: "dist".to_string(), id: "abc123".to_string() }
+            Action::ResolveChangeRequest {
+                path: "dist".to_string(),
+                id: "abc123".to_string()
+            }
         );
 
         let risk = action_risk(&action, Path::new("/tmp"));
         assert!(matches!(risk, danger::Risk::Normal), "{risk:?}");
 
-        assert!(plan_mode_block(&action).is_some(), "plan mode must not resolve anything");
+        assert!(
+            plan_mode_block(&action).is_some(),
+            "plan mode must not resolve anything"
+        );
     }
 
     #[test]
@@ -7737,7 +8379,10 @@ mod tests {
                     break;
                 }
             }
-            let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").expect("headers");
+            let header_end = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .expect("headers");
             let body = String::from_utf8_lossy(&buf[header_end + 4..]).to_string();
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -7754,7 +8399,11 @@ mod tests {
     /// Same helper `db.rs`'s and `errors.rs`'s own test modules each keep a
     /// private copy of, since `artifacts::remember` is private to that module.
     fn fake_publish(fake_home: &Path, project_dir: &Path, id: &str) {
-        let key = project_dir.canonicalize().expect("canonicalize").to_string_lossy().into_owned();
+        let key = project_dir
+            .canonicalize()
+            .expect("canonicalize")
+            .to_string_lossy()
+            .into_owned();
         let registry_path = fake_home.join(".boxcode").join("artifacts.json");
         std::fs::create_dir_all(registry_path.parent().unwrap()).expect("mkdir");
         let published_at = std::time::SystemTime::now()
@@ -7762,7 +8411,8 @@ mod tests {
             .expect("clock")
             .as_secs();
         let map = serde_json::json!({ key: { "id": id, "published_at": published_at } });
-        std::fs::write(registry_path, serde_json::to_string_pretty(&map).unwrap()).expect("write registry");
+        std::fs::write(registry_path, serde_json::to_string_pretty(&map).unwrap())
+            .expect("write registry");
     }
 
     /// The core proof for the merged mailbox: an id starting with
@@ -7772,7 +8422,9 @@ mod tests {
     /// received exactly the request meant for it.
     #[tokio::test]
     async fn resolve_change_request_routes_by_id_prefix() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -7803,7 +8455,8 @@ mod tests {
         // the literal "err_1" -- a hand-typed id that merely satisfies
         // `starts_with` would make this test tautological about the one
         // thing it exists to prove.
-        let (requests_endpoint2, _requests_handle2_unused) = serve_once_and_capture_body("{}").await;
+        let (requests_endpoint2, _requests_handle2_unused) =
+            serve_once_and_capture_body("{}").await;
         let (errors_endpoint2, errors_handle2) = serve_once_and_capture_body("{}").await;
         let mut config2 = ToolsConfig::default();
         config2.requests_endpoint = requests_endpoint2;
@@ -7833,7 +8486,9 @@ mod tests {
     /// errors side, not a side effect of both being empty.
     #[tokio::test]
     async fn list_change_requests_treats_unconfigured_errors_endpoint_as_zero_pending() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -7857,21 +8512,31 @@ mod tests {
         }
 
         assert!(out.content.contains("No pending"), "{}", out.content);
-        assert!(!out.content.to_lowercase().contains("error:"), "{}", out.content);
+        assert!(
+            !out.content.to_lowercase().contains("error:"),
+            "{}",
+            out.content
+        );
     }
 
     /// A blank `requests_endpoint` gets the same treatment, checked
     /// independently of the errors side.
     #[tokio::test]
     async fn list_change_requests_treats_unconfigured_requests_endpoint_as_zero_pending() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
 
         let project = tempfile::tempdir().expect("project dir");
         std::fs::write(project.path().join("index.html"), "hi").expect("write");
-        fake_publish(fake_home.path(), project.path(), "proj-no-requests-endpoint");
+        fake_publish(
+            fake_home.path(),
+            project.path(),
+            "proj-no-requests-endpoint",
+        );
         let ws = Workspace::new(project.path()).expect("workspace");
 
         let (errors_endpoint, _handle) = serve_once_and_capture_body("[]").await;
@@ -7888,7 +8553,11 @@ mod tests {
         }
 
         assert!(out.content.contains("No pending"), "{}", out.content);
-        assert!(!out.content.to_lowercase().contains("error:"), "{}", out.content);
+        assert!(
+            !out.content.to_lowercase().contains("error:"),
+            "{}",
+            out.content
+        );
     }
 
     /// Corrected shape: a *configured but unreachable* `requests_endpoint`
@@ -7905,7 +8574,9 @@ mod tests {
     /// "both mailboxes down" test below for the actual hard-fail case.)
     #[tokio::test]
     async fn list_change_requests_softens_a_requests_failure_when_errors_still_works() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -7933,7 +8604,11 @@ mod tests {
         // Not a hard failure -- errors genuinely succeeded (with zero
         // items), so the tool reports "no pending" plus a note, never a
         // bare "Error:".
-        assert!(!out.content.to_lowercase().starts_with("error:"), "{}", out.content);
+        assert!(
+            !out.content.to_lowercase().starts_with("error:"),
+            "{}",
+            out.content
+        );
         assert!(out.content.contains("No pending"), "{}", out.content);
         assert!(out.content.contains("note:"), "{}", out.content);
         assert!(out.content.contains("requests"), "{}", out.content);
@@ -7942,7 +8617,9 @@ mod tests {
     /// Same proof, mirrored for the errors mailbox.
     #[tokio::test]
     async fn list_change_requests_softens_an_errors_failure_when_requests_still_works() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -7965,7 +8642,11 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
 
-        assert!(!out.content.to_lowercase().starts_with("error:"), "{}", out.content);
+        assert!(
+            !out.content.to_lowercase().starts_with("error:"),
+            "{}",
+            out.content
+        );
         assert!(out.content.contains("No pending"), "{}", out.content);
         assert!(out.content.contains("note:"), "{}", out.content);
         assert!(out.content.contains("errors"), "{}", out.content);
@@ -7980,7 +8661,9 @@ mod tests {
     /// because an unrelated, not-yet-deployed mailbox failed.
     #[tokio::test]
     async fn list_change_requests_still_shows_real_pending_items_despite_a_partial_failure() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -8015,14 +8698,20 @@ mod tests {
         assert!(out.content.contains("req_real123"), "{}", out.content);
         assert!(out.content.contains("note:"), "{}", out.content);
         assert!(out.content.contains("errors"), "{}", out.content);
-        assert!(!out.content.to_lowercase().starts_with("error:"), "{}", out.content);
+        assert!(
+            !out.content.to_lowercase().starts_with("error:"),
+            "{}",
+            out.content
+        );
     }
 
     /// Both mailboxes down at once must still name both failures, not just
     /// the first one checked.
     #[tokio::test]
     async fn list_change_requests_names_both_failures_when_both_mailboxes_are_down() {
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -8086,7 +8775,9 @@ mod tests {
             format!("http://{addr}")
         }
 
-        let _guard = crate::config::test_support::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fake_home = tempfile::tempdir().expect("temp home");
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", fake_home.path());
@@ -8116,7 +8807,10 @@ mod tests {
         // Sequential would be >=600ms; concurrent should land close to
         // 300ms. 500ms leaves real headroom for CI scheduling jitter while
         // still failing if this regresses back to sequential.
-        assert!(elapsed.as_millis() < 500, "took {elapsed:?}, looks sequential not concurrent");
+        assert!(
+            elapsed.as_millis() < 500,
+            "took {elapsed:?}, looks sequential not concurrent"
+        );
     }
 
     // ---- enable_auth ---------------------------------------------------------
@@ -8125,7 +8819,12 @@ mod tests {
     fn enable_auth_parses_into_an_action_and_is_always_dangerous() {
         let call = tool_call(ENABLE_AUTH, json!({ "path": "dist" }));
         let action = describe_action(&call).expect("should parse");
-        assert_eq!(action, Action::EnableAuth { path: "dist".to_string() });
+        assert_eq!(
+            action,
+            Action::EnableAuth {
+                path: "dist".to_string()
+            }
+        );
 
         // Same reasoning as publish_artifact/deploy_project: it stands up a
         // real service on the public internet, so it must stay `Dangerous`
@@ -8133,7 +8832,10 @@ mod tests {
         let risk = action_risk(&action, Path::new("/tmp"));
         assert!(matches!(risk, danger::Risk::Dangerous(_)), "{risk:?}");
 
-        assert!(plan_mode_block(&action).is_some(), "plan mode must not provision anything");
+        assert!(
+            plan_mode_block(&action).is_some(),
+            "plan mode must not provision anything"
+        );
     }
 
     #[test]
@@ -8150,8 +8852,14 @@ mod tests {
 
     #[test]
     fn a_deploy_call_describes_a_deployment_the_user_can_read() {
-        match describe_action(&deploy_call(json!({"provider": "vercel", "production": true}))) {
-            Some(Action::Deploy { provider, production, .. }) => {
+        match describe_action(&deploy_call(
+            json!({"provider": "vercel", "production": true}),
+        )) {
+            Some(Action::Deploy {
+                provider,
+                production,
+                ..
+            }) => {
                 assert_eq!(provider, "vercel");
                 assert!(production);
             }
@@ -8206,15 +8914,29 @@ mod tests {
     fn ordinary_actions_keep_their_previous_risk() {
         let root = Path::new("/Users/dev/project");
         for action in [
-            Action::Read { path: "a.rs".into() },
+            Action::Read {
+                path: "a.rs".into(),
+            },
             Action::List { path: ".".into() },
-            Action::Glob { pattern: "**/*.rs".into() },
-            Action::Write { path: "a.rs".into(), content: String::new() },
+            Action::Glob {
+                pattern: "**/*.rs".into(),
+            },
+            Action::Write {
+                path: "a.rs".into(),
+                content: String::new(),
+            },
         ] {
-            assert_eq!(action_risk(&action, root), danger::Risk::Normal, "{action:?}");
+            assert_eq!(
+                action_risk(&action, root),
+                danger::Risk::Normal,
+                "{action:?}"
+            );
         }
         // ...and a command is still judged by the classifier.
-        let rm = Action::Command { command: "rm -rf /".into(), purpose: None };
+        let rm = Action::Command {
+            command: "rm -rf /".into(),
+            purpose: None,
+        };
         assert!(matches!(action_risk(&rm, root), danger::Risk::Blocked(_)));
     }
 
@@ -8224,8 +8946,17 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), "hi").unwrap();
         let ws = Workspace::new(dir.path()).unwrap();
 
-        let out = execute(&deploy_call(json!({"provider": "vercel"})), &ws, &ToolsConfig::default()).await;
-        assert!(out.content.contains("nothing to build or serve"), "{}", out.content);
+        let out = execute(
+            &deploy_call(json!({"provider": "vercel"})),
+            &ws,
+            &ToolsConfig::default(),
+        )
+        .await;
+        assert!(
+            out.content.contains("nothing to build or serve"),
+            "{}",
+            out.content
+        );
     }
 
     /// The flow takes a well-formed deployment before this ever runs, so what
@@ -8243,7 +8974,11 @@ mod tests {
 
         let out = execute(&deploy_call(json!({"provider": "vercel"})), &ws, &cfg).await;
         assert!(out.content.contains("only tool call"), "{}", out.content);
-        assert!(out.content.contains("Ask for it on its own"), "{}", out.content);
+        assert!(
+            out.content.contains("Ask for it on its own"),
+            "{}",
+            out.content
+        );
     }
 
     /// The model must never be in a position to name an environment variable,
@@ -8256,8 +8991,17 @@ mod tests {
             .find(|s| s["function"]["name"] == DEPLOY_PROJECT)
             .expect("the deploy schema");
         let properties = &schema["function"]["parameters"]["properties"];
-        let names: Vec<&str> = properties.as_object().unwrap().keys().map(|k| k.as_str()).collect();
-        assert_eq!(names, vec!["production", "provider"], "no other input is accepted");
+        let names: Vec<&str> = properties
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["production", "provider"],
+            "no other input is accepted"
+        );
     }
 
     #[test]
@@ -8269,7 +9013,10 @@ mod tests {
         assert!(prompt.contains("Default to a preview"), "{prompt}");
         // It should just call it: the flow asks the user for whatever it needs.
         assert!(prompt.contains("it asks the user for directly"), "{prompt}");
-        assert!(prompt.contains("never alongside other tool calls"), "{prompt}");
+        assert!(
+            prompt.contains("never alongside other tool calls"),
+            "{prompt}"
+        );
     }
 
     // ---- plan mode ---------------------------------------------------------
@@ -8292,7 +9039,10 @@ mod tests {
         // stays. `run_command` included -- narrowed to read-only commands by
         // `plan_mode_block`, not withheld.
         for tool in [RUN_COMMAND, READ_FILE, LIST_DIR, GLOB, WEB_SEARCH] {
-            assert!(names.contains(&tool.to_string()), "{tool} missing: {names:?}");
+            assert!(
+                names.contains(&tool.to_string()),
+                "{tool} missing: {names:?}"
+            );
         }
     }
 
@@ -8333,18 +9083,31 @@ mod tests {
     #[test]
     fn plan_mode_blocks_writes_and_non_read_only_commands_only() {
         let allowed = [
-            Action::Read { path: "src/main.rs".into() },
+            Action::Read {
+                path: "src/main.rs".into(),
+            },
             Action::List { path: ".".into() },
-            Action::Glob { pattern: "**/*.rs".into() },
-            Action::Search { query: "rust".into(), max_results: 3 },
+            Action::Glob {
+                pattern: "**/*.rs".into(),
+            },
+            Action::Search {
+                query: "rust".into(),
+                max_results: 3,
+            },
             Action::Plan(Proposal {
                 title: "A plan".into(),
                 summary: String::new(),
                 steps: vec!["do it".into()],
                 not_doing: Vec::new(),
             }),
-            Action::Command { command: "git log".into(), purpose: None },
-            Action::Command { command: "grep -rn TODO src".into(), purpose: None },
+            Action::Command {
+                command: "git log".into(),
+                purpose: None,
+            },
+            Action::Command {
+                command: "grep -rn TODO src".into(),
+                purpose: None,
+            },
         ];
         for action in allowed {
             assert!(
@@ -8354,15 +9117,31 @@ mod tests {
         }
 
         let refused = [
-            Action::Write { path: "a.py".into(), content: String::new() },
+            Action::Write {
+                path: "a.py".into(),
+                content: String::new(),
+            },
             Action::Edit {
                 path: "a.py".into(),
-                edits: vec![EditSpan { old: "a".into(), new: "b".into(), replace_all: false }],
+                edits: vec![EditSpan {
+                    old: "a".into(),
+                    new: "b".into(),
+                    replace_all: false,
+                }],
             },
-            Action::Command { command: "cargo build".into(), purpose: None },
-            Action::Command { command: "rm -rf build".into(), purpose: None },
+            Action::Command {
+                command: "cargo build".into(),
+                purpose: None,
+            },
+            Action::Command {
+                command: "rm -rf build".into(),
+                purpose: None,
+            },
             // A read-only prefix chained into something else is not read-only.
-            Action::Command { command: "cat a && rm b".into(), purpose: None },
+            Action::Command {
+                command: "cat a && rm b".into(),
+                purpose: None,
+            },
         ];
         for action in refused {
             let reason = plan_mode_block(&action)
@@ -8482,7 +9261,11 @@ mod tests {
         let good = tool_call(PLAN_PROGRESS, json!({ "step": 2, "status": "done" }));
         assert_eq!(
             describe_action(&good),
-            Some(Action::Progress { step: 2, done: true, note: None })
+            Some(Action::Progress {
+                step: 2,
+                done: true,
+                note: None
+            })
         );
     }
 
@@ -8555,7 +9338,10 @@ mod tests {
         // ...and nowhere in the system prompt, which has to stay identical
         // between rounds for the provider's prefix cache to hit at all.
         let prompt = system_prompt(&ws, &cfg, 0, Mode::Normal);
-        assert!(!prompt.contains("IMPLEMENTING AN APPROVED PLAN"), "{prompt}");
+        assert!(
+            !prompt.contains("IMPLEMENTING AN APPROVED PLAN"),
+            "{prompt}"
+        );
 
         // A finished plan is not restated: there is nothing left to follow,
         // and repeating it invites the model to redo work.
@@ -8579,7 +9365,9 @@ mod tests {
 
         assert!(out.content.contains("Wrote"), "{}", out.content);
         assert_eq!(
-            tokio::fs::read_to_string(dir.path().join("nested/hello.py")).await.unwrap(),
+            tokio::fs::read_to_string(dir.path().join("nested/hello.py"))
+                .await
+                .unwrap(),
             "print('hi')\n"
         );
     }
@@ -8619,8 +9407,7 @@ mod tests {
     #[test]
     fn a_trailing_placeholder_comment_is_caught() {
         let content = "fn main() {\n    println!(\"hi\");\n    // ... rest of code unchanged\n}\n";
-        let err =
-            check_complete(content, false).expect_err("a placeholder stub must be refused");
+        let err = check_complete(content, false).expect_err("a placeholder stub must be refused");
         assert!(err.contains("rest of code unchanged"), "{err}");
     }
 
@@ -8656,7 +9443,10 @@ mod tests {
             "def stub() -> None:\n    ...\n", // real Python Ellipsis body
             "class Proto(Protocol):\n    def run(self) -> int: ...\n",
         ] {
-            assert!(check_complete(content, false).is_ok(), "false positive on: {content:?}");
+            assert!(
+                check_complete(content, false).is_ok(),
+                "false positive on: {content:?}"
+            );
         }
     }
 
@@ -8666,7 +9456,10 @@ mod tests {
         let out = execute_truncated(&write_call("new.rs", "fn f() {\n"), &ws, &cfg, true).await;
         assert!(out.content.starts_with("Error:"), "{}", out.content);
         assert!(out.content.contains("incomplete"), "{}", out.content);
-        assert!(!dir.path().join("new.rs").exists(), "nothing should have been written");
+        assert!(
+            !dir.path().join("new.rs").exists(),
+            "nothing should have been written"
+        );
     }
 
     #[tokio::test]
@@ -8675,7 +9468,10 @@ mod tests {
         let content = "fn main() {}\n// rest of the code unchanged\n";
         let out = execute_truncated(&write_call("new.rs", content), &ws, &cfg, false).await;
         assert!(out.content.starts_with("Error:"), "{}", out.content);
-        assert!(!dir.path().join("new.rs").exists(), "nothing should have been written");
+        assert!(
+            !dir.path().join("new.rs").exists(),
+            "nothing should have been written"
+        );
     }
 
     #[tokio::test]
@@ -8689,7 +9485,9 @@ mod tests {
     #[tokio::test]
     async fn an_edit_from_a_truncated_response_is_refused_and_the_file_is_untouched() {
         let (dir, ws, cfg) = fixture();
-        let before = tokio::fs::read_to_string(dir.path().join("hello.txt")).await.unwrap();
+        let before = tokio::fs::read_to_string(dir.path().join("hello.txt"))
+            .await
+            .unwrap();
         let out = execute_truncated(
             &tool_call(
                 EDIT_FILE,
@@ -8702,7 +9500,9 @@ mod tests {
         .await;
         assert!(out.content.starts_with("Error:"), "{}", out.content);
         assert_eq!(
-            tokio::fs::read_to_string(dir.path().join("hello.txt")).await.unwrap(),
+            tokio::fs::read_to_string(dir.path().join("hello.txt"))
+                .await
+                .unwrap(),
             before,
             "a refused edit must not touch the file"
         );
@@ -8711,7 +9511,9 @@ mod tests {
     #[tokio::test]
     async fn an_edit_whose_replacement_is_a_placeholder_stub_is_refused() {
         let (dir, ws, cfg) = fixture();
-        let before = tokio::fs::read_to_string(dir.path().join("hello.txt")).await.unwrap();
+        let before = tokio::fs::read_to_string(dir.path().join("hello.txt"))
+            .await
+            .unwrap();
         let out = execute_truncated(
             &tool_call(
                 EDIT_FILE,
@@ -8728,7 +9530,9 @@ mod tests {
         .await;
         assert!(out.content.starts_with("Error:"), "{}", out.content);
         assert_eq!(
-            tokio::fs::read_to_string(dir.path().join("hello.txt")).await.unwrap(),
+            tokio::fs::read_to_string(dir.path().join("hello.txt"))
+                .await
+                .unwrap(),
             before
         );
     }
@@ -8748,7 +9552,9 @@ mod tests {
         .await;
         assert!(out.content.contains("Replaced"), "{}", out.content);
         assert_eq!(
-            tokio::fs::read_to_string(dir.path().join("hello.txt")).await.unwrap(),
+            tokio::fs::read_to_string(dir.path().join("hello.txt"))
+                .await
+                .unwrap(),
             "one\nTWO\nthree\n"
         );
     }
@@ -8764,7 +9570,10 @@ mod tests {
         assert_eq!(args["path"], "index.html");
         let content = args["content"].as_str().unwrap();
         assert!(content.contains("already on disk"), "{content}");
-        assert!(content.contains(&format!("{} bytes", large.len())), "{content}");
+        assert!(
+            content.contains(&format!("{} bytes", large.len())),
+            "{content}"
+        );
         assert!(!content.contains(&large), "the body itself must be gone");
 
         let small = stub_heavy_tool_args(&write_call("hello.py", "print('hi')\n"));
@@ -8786,13 +9595,22 @@ mod tests {
         let stubbed = stub_heavy_tool_args(&call);
         let args: serde_json::Value = serde_json::from_str(&stubbed.function.arguments).unwrap();
         assert_eq!(args["path"], "app.css");
-        assert!(args["old_string"].as_str().unwrap().contains("already on disk"));
-        assert!(args["new_string"].as_str().unwrap().contains("already on disk"));
+        assert!(args["old_string"]
+            .as_str()
+            .unwrap()
+            .contains("already on disk"));
+        assert!(args["new_string"]
+            .as_str()
+            .unwrap()
+            .contains("already on disk"));
     }
 
     #[test]
     fn other_tools_are_not_stubbed() {
-        let call = tool_call(RUN_COMMAND, json!({ "command": "x".repeat(STUB_BODY_AFTER + 1) }));
+        let call = tool_call(
+            RUN_COMMAND,
+            json!({ "command": "x".repeat(STUB_BODY_AFTER + 1) }),
+        );
         let stubbed = stub_heavy_tool_args(&call);
         assert_eq!(stubbed.function.arguments, call.function.arguments);
     }
@@ -8806,7 +9624,10 @@ mod tests {
         assert!(stubbed.contains("style.css"), "{stubbed}");
         assert!(!stubbed.contains("color:red"), "{stubbed}");
 
-        let err = stub_heavy_tool_result(&call, &format!("Error: {}", "x".repeat(STUB_BODY_AFTER + 1)));
+        let err = stub_heavy_tool_result(
+            &call,
+            &format!("Error: {}", "x".repeat(STUB_BODY_AFTER + 1)),
+        );
         assert!(err.starts_with("Error:"), "{err}");
     }
 
@@ -8821,8 +9642,16 @@ mod tests {
         assert!(out.contains("exit code: 0"), "{out}");
         assert!(out.contains("quiet build/install lines omitted"), "{out}");
         assert!(out.contains("added 412 packages in 3s"), "{out}");
-        assert!(!out.contains("added package 0\n"), "the progress spam must be gone: {out}");
-        assert!(out.len() < log.len() / 2, "should be far shorter: {} vs {}", out.len(), log.len());
+        assert!(
+            !out.contains("added package 0\n"),
+            "the progress spam must be gone: {out}"
+        );
+        assert!(
+            out.len() < log.len() / 2,
+            "should be far shorter: {} vs {}",
+            out.len(),
+            log.len()
+        );
     }
 
     #[test]
@@ -8831,7 +9660,9 @@ mod tests {
         for i in 0..60 {
             log.push_str(&format!("compiling file {i}.ts\n"));
         }
-        log.push_str("src/App.tsx(12,5): error TS2322: Type 'string' is not assignable to type 'number'.\n");
+        log.push_str(
+            "src/App.tsx(12,5): error TS2322: Type 'string' is not assignable to type 'number'.\n",
+        );
         log.push_str("Found 1 error.\n");
         let out = compact_command_output("npx tsc --noEmit", &log);
         assert!(out.contains("exit code: 2"), "{out}");
@@ -8864,7 +9695,10 @@ mod tests {
     async fn a_ranged_read_returns_a_numbered_slice() {
         let (_dir, ws, cfg) = fixture();
         let out = execute(
-            &tool_call(READ_FILE, json!({"path": "hello.txt", "offset": 2, "limit": 1})),
+            &tool_call(
+                READ_FILE,
+                json!({"path": "hello.txt", "offset": 2, "limit": 1}),
+            ),
             &ws,
             &cfg,
         )
@@ -8916,7 +9750,8 @@ mod tests {
         cfg.max_output_bytes = 8;
         let out = execute(&read_call("hello.txt"), &ws, &cfg).await;
         assert!(
-            out.content.contains(&format!("Call {READ_FILE} again with offset=")),
+            out.content
+                .contains(&format!("Call {READ_FILE} again with offset=")),
             "{}",
             out.content
         );
@@ -9006,19 +9841,31 @@ mod tests {
     fn web_search_action_defaults_and_clamps_max_results() {
         assert_eq!(
             describe_action(&search_call("rust")),
-            Some(Action::Search { query: "rust".to_string(), max_results: 5 })
+            Some(Action::Search {
+                query: "rust".to_string(),
+                max_results: 5
+            })
         );
         assert_eq!(
             describe_action(&search_call_with_max("rust", 0)),
-            Some(Action::Search { query: "rust".to_string(), max_results: 1 })
+            Some(Action::Search {
+                query: "rust".to_string(),
+                max_results: 1
+            })
         );
         assert_eq!(
             describe_action(&search_call_with_max("rust", 999)),
-            Some(Action::Search { query: "rust".to_string(), max_results: 10 })
+            Some(Action::Search {
+                query: "rust".to_string(),
+                max_results: 10
+            })
         );
         assert_eq!(
             describe_action(&search_call_with_max("rust", 3)),
-            Some(Action::Search { query: "rust".to_string(), max_results: 3 })
+            Some(Action::Search {
+                query: "rust".to_string(),
+                max_results: 3
+            })
         );
     }
 
@@ -9037,9 +9884,21 @@ mod tests {
         let out = format_search_result("call_1", "rust", json, 8192);
         assert!(out.display.contains("2 results"), "{}", out.display);
         assert!(out.content.contains("1. Rust\n"), "{}", out.content);
-        assert!(out.content.contains("https://rust-lang.org"), "{}", out.content);
-        assert!(out.content.contains("A systems language"), "{}", out.content);
-        assert!(out.content.contains("2. Rust (Wikipedia)"), "{}", out.content);
+        assert!(
+            out.content.contains("https://rust-lang.org"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("A systems language"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("2. Rust (Wikipedia)"),
+            "{}",
+            out.content
+        );
         // Order matters: result 1 must appear before result 2.
         assert!(out.content.find("1. Rust\n").unwrap() < out.content.find("2. Rust").unwrap());
     }
@@ -9056,7 +9915,12 @@ mod tests {
     fn format_search_result_reports_no_results_plainly_rather_than_as_an_error() {
         let out = format_search_result("call_1", "an obscure query", r#"{"results": []}"#, 8192);
         assert!(!out.content.starts_with("Error:"), "{}", out.content);
-        assert!(out.content.contains("No results found for 'an obscure query'"), "{}", out.content);
+        assert!(
+            out.content
+                .contains("No results found for 'an obscure query'"),
+            "{}",
+            out.content
+        );
     }
 
     #[test]
@@ -9067,13 +9931,30 @@ mod tests {
 
     #[test]
     fn format_search_result_surfaces_a_generic_search_failure() {
-        let out = format_search_result("call_1", "q", r#"{"error": "RatelimitException: 202"}"#, 8192);
-        assert!(out.content.contains("RatelimitException: 202"), "{}", out.content);
+        let out = format_search_result(
+            "call_1",
+            "q",
+            r#"{"error": "RatelimitException: 202"}"#,
+            8192,
+        );
+        assert!(
+            out.content.contains("RatelimitException: 202"),
+            "{}",
+            out.content
+        );
     }
 
     #[test]
     fn format_search_result_handles_garbage_output_without_panicking() {
-        for garbage in ["not json at all", "", "   ", "[1,2,3]", "\"just a string\"", "null", "{}"] {
+        for garbage in [
+            "not json at all",
+            "",
+            "   ",
+            "[1,2,3]",
+            "\"just a string\"",
+            "null",
+            "{}",
+        ] {
             let out = format_search_result("call_1", "q", garbage, 8192);
             assert!(!out.content.is_empty(), "garbage={garbage:?}");
         }
@@ -9101,7 +9982,11 @@ mod tests {
         let mut bad = search_call("");
         bad.function.arguments = "{not json".to_string();
         let out = execute(&bad, &ws, &cfg).await;
-        assert!(out.content.contains("could not read the arguments"), "{}", out.content);
+        assert!(
+            out.content.contains("could not read the arguments"),
+            "{}",
+            out.content
+        );
     }
 
     #[tokio::test]
@@ -9234,7 +10119,8 @@ mod tests {
     /// spawn without one.
     #[cfg(unix)]
     #[tokio::test]
-    async fn web_search_falls_back_to_the_embedded_python_when_configured_one_is_the_windows_stub() {
+    async fn web_search_falls_back_to_the_embedded_python_when_configured_one_is_the_windows_stub()
+    {
         use std::os::unix::fs::PermissionsExt;
         let _guard = crate::config::test_support::HOME_LOCK
             .lock()
@@ -9305,7 +10191,11 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
 
-        assert!(out.content.contains("App Execution Alias"), "{}", out.content);
+        assert!(
+            out.content.contains("App Execution Alias"),
+            "{}",
+            out.content
+        );
         assert!(out.content.contains("pip install ddgs"), "{}", out.content);
     }
 
@@ -9328,7 +10218,11 @@ mod tests {
         );
         let out = execute(&search_call("rust programming language"), &ws, &cfg).await;
         assert!(out.content.contains("Rust"), "{}", out.content);
-        assert!(out.content.contains("https://rust-lang.org"), "{}", out.content);
+        assert!(
+            out.content.contains("https://rust-lang.org"),
+            "{}",
+            out.content
+        );
         assert!(out.display.contains("1 result"), "{}", out.display);
     }
 
@@ -9358,10 +10252,13 @@ mod tests {
     #[tokio::test]
     async fn web_search_surfaces_a_reported_backend_failure() {
         let (dir, ws, mut cfg) = fixture();
-        cfg.python_bin =
-            fake_interpreter(dir.path(), r#"echo '{"error": "RatelimitException"}'"#);
+        cfg.python_bin = fake_interpreter(dir.path(), r#"echo '{"error": "RatelimitException"}'"#);
         let out = execute(&search_call("rust"), &ws, &cfg).await;
-        assert!(out.content.contains("RatelimitException"), "{}", out.content);
+        assert!(
+            out.content.contains("RatelimitException"),
+            "{}",
+            out.content
+        );
     }
 
     #[cfg(unix)]
@@ -9436,7 +10333,10 @@ mod tests {
         // longer than one retry's backoff but well within the retry
         // budget, so the first attempt(s) must hit real ETXTBSY and only a
         // later retry can succeed -- proving the loop, not just its syntax.
-        let held_open = std::fs::OpenOptions::new().write(true).open(&script_path).unwrap();
+        let held_open = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&script_path)
+            .unwrap();
         let release = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(80)).await;
             drop(held_open);
@@ -9461,7 +10361,10 @@ mod tests {
         let (_dir, ws, cfg) = fixture();
         let out = execute(&search_call("rust programming language"), &ws, &cfg).await;
         if out.content.contains("could not run") || out.content.contains("pip install ddgs") {
-            eprintln!("skipping: python3/ddgs not available in this environment ({})", out.content);
+            eprintln!(
+                "skipping: python3/ddgs not available in this environment ({})",
+                out.content
+            );
             return;
         }
         assert!(
@@ -9471,92 +10374,126 @@ mod tests {
         );
     }
 
-	// --- MCP approval invariants ------------------------------------------
-	//
-	// These pin the property the MCP dispatch path depends on. MCP tool names
-	// are dynamic, so `describe_action` cannot list them as constants, and a
-	// name it does not recognise is classified `Risk::Normal` with
-	// `needs_approval = false` -- i.e. auto-approved. That is only harmless
-	// because the runner rejects unknown names outright, so these tests fail if
-	// MCP ever stops asking *before* it can start executing.
+    // --- MCP approval invariants ------------------------------------------
+    //
+    // These pin the property the MCP dispatch path depends on. MCP tool names
+    // are dynamic, so `describe_action` cannot list them as constants, and a
+    // name it does not recognise is classified `Risk::Normal` with
+    // `needs_approval = false` -- i.e. auto-approved. That is only harmless
+    // because the runner rejects unknown names outright, so these tests fail if
+    // MCP ever stops asking *before* it can start executing.
 
-	#[test]
-	fn an_mcp_tool_name_is_recognised_as_an_action() {
-		let call = tool_call("mcp__github__create_issue", serde_json::json!({"title": "x"}));
-		match describe_action(&call) {
-			Some(Action::Mcp { server, tool, arguments }) => {
-				assert_eq!(server, "github");
-				assert_eq!(tool, "create_issue");
-				assert_eq!(arguments["title"], "x");
-			}
-			other => panic!("expected Action::Mcp, got {other:?}"),
-		}
-	}
+    #[test]
+    fn an_mcp_tool_name_is_recognised_as_an_action() {
+        let call = tool_call(
+            "mcp__github__create_issue",
+            serde_json::json!({"title": "x"}),
+        );
+        match describe_action(&call) {
+            Some(Action::Mcp {
+                server,
+                tool,
+                arguments,
+            }) => {
+                assert_eq!(server, "github");
+                assert_eq!(tool, "create_issue");
+                assert_eq!(arguments["title"], "x");
+            }
+            other => panic!("expected Action::Mcp, got {other:?}"),
+        }
+    }
 
-	#[test]
-	fn an_mcp_tool_asks_even_in_always_mode() {
-		// `is_read_only_action` exists twice (tools.rs and approval.rs), both with
-		// a `_ => false` catch-all. This fails if either grows an MCP arm
-		// returning true.
-		let call = tool_call("mcp__github__get_me", serde_json::json!({}));
-		let verdict = crate::approval::verdict_for(
-			&call, Path::new("."), Mode::Normal, crate::config::ApprovalMode::Always,
-		);
-		assert!(matches!(verdict, crate::approval::Verdict::Ask(_)), "an MCP tool must ask, got {verdict:?}");
-	}
+    #[test]
+    fn an_mcp_tool_asks_even_in_always_mode() {
+        // `is_read_only_action` exists twice (tools.rs and approval.rs), both with
+        // a `_ => false` catch-all. This fails if either grows an MCP arm
+        // returning true.
+        let call = tool_call("mcp__github__get_me", serde_json::json!({}));
+        let verdict = crate::approval::verdict_for(
+            &call,
+            Path::new("."),
+            Mode::Normal,
+            crate::config::ApprovalMode::Always,
+        );
+        assert!(
+            matches!(verdict, crate::approval::Verdict::Ask(_)),
+            "an MCP tool must ask, got {verdict:?}"
+        );
+    }
 
-	#[test]
-	fn an_mcp_tool_asks_even_with_approval_switched_off() {
-		// Reads are auto-approved in the default mode. MCP must not inherit that:
-		// the risk is dangerous, which short-circuits every approval mode.
-		let call = tool_call("mcp__aws__terminate_instance", serde_json::json!({}));
-		let verdict = crate::approval::verdict_for(
-			&call, Path::new("."), Mode::Normal, crate::config::ApprovalMode::Destructive,
-		);
-		assert!(matches!(verdict, crate::approval::Verdict::Ask(_)), "an MCP tool must not be auto-approved, got {verdict:?}");
-	}
+    #[test]
+    fn an_mcp_tool_asks_even_with_approval_switched_off() {
+        // Reads are auto-approved in the default mode. MCP must not inherit that:
+        // the risk is dangerous, which short-circuits every approval mode.
+        let call = tool_call("mcp__aws__terminate_instance", serde_json::json!({}));
+        let verdict = crate::approval::verdict_for(
+            &call,
+            Path::new("."),
+            Mode::Normal,
+            crate::config::ApprovalMode::Destructive,
+        );
+        assert!(
+            matches!(verdict, crate::approval::Verdict::Ask(_)),
+            "an MCP tool must not be auto-approved, got {verdict:?}"
+        );
+    }
 
-	#[test]
-	fn an_mcp_tool_is_refused_in_plan_mode() {
-		let call = tool_call("mcp__github__create_issue", serde_json::json!({}));
-		let verdict = crate::approval::verdict_for(
-			&call, Path::new("."), Mode::Plan, crate::config::ApprovalMode::Destructive,
-		);
-		assert!(matches!(verdict, crate::approval::Verdict::PlanRefused(_)), "got {verdict:?}");
-	}
+    #[test]
+    fn an_mcp_tool_is_refused_in_plan_mode() {
+        let call = tool_call("mcp__github__create_issue", serde_json::json!({}));
+        let verdict = crate::approval::verdict_for(
+            &call,
+            Path::new("."),
+            Mode::Plan,
+            crate::config::ApprovalMode::Destructive,
+        );
+        assert!(
+            matches!(verdict, crate::approval::Verdict::PlanRefused(_)),
+            "got {verdict:?}"
+        );
+    }
 
-	#[test]
-	fn an_mcp_tool_is_dangerous_not_merely_normal() {
-		// The `action_risk` catch-all returns `Risk::Normal`, which auto-approves.
-		// This is the direct test that MCP never falls through to it.
-		let action = Action::Mcp {
-			server: "github".to_string(),
-			tool: "create_issue".to_string(),
-			arguments: serde_json::Value::Null,
-		};
-		assert!(action_risk(&action, Path::new(".")).is_dangerous());
-	}
+    #[test]
+    fn an_mcp_tool_is_dangerous_not_merely_normal() {
+        // The `action_risk` catch-all returns `Risk::Normal`, which auto-approves.
+        // This is the direct test that MCP never falls through to it.
+        let action = Action::Mcp {
+            server: "github".to_string(),
+            tool: "create_issue".to_string(),
+            arguments: serde_json::Value::Null,
+        };
+        assert!(action_risk(&action, Path::new(".")).is_dangerous());
+    }
 
-	#[test]
-	fn an_mcp_tool_splits_at_the_first_separator() {
-		// A tool name may contain `__`; a server fragment cannot, because
-		// `server_id_fragment` maps `_` to `-`.
-		let call = tool_call("mcp__srv__a__b", serde_json::json!({}));
-		match describe_action(&call) {
-			Some(Action::Mcp { server, tool, .. }) => {
-				assert_eq!(server, "srv");
-				assert_eq!(tool, "a__b");
-			}
-			other => panic!("expected Action::Mcp, got {other:?}"),
-		}
-	}
+    #[test]
+    fn an_mcp_tool_splits_at_the_first_separator() {
+        // A tool name may contain `__`; a server fragment cannot, because
+        // `server_id_fragment` maps `_` to `-`.
+        let call = tool_call("mcp__srv__a__b", serde_json::json!({}));
+        match describe_action(&call) {
+            Some(Action::Mcp { server, tool, .. }) => {
+                assert_eq!(server, "srv");
+                assert_eq!(tool, "a__b");
+            }
+            other => panic!("expected Action::Mcp, got {other:?}"),
+        }
+    }
 
-	#[test]
-	fn a_lookalike_name_is_not_treated_as_mcp() {
-		for name in ["mcp", "mcp_srv_tool", "mcp__", "mcp__srv__", "x__y__z", "read_file"] {
-			let call = tool_call(name, serde_json::json!({}));
-			assert!(!matches!(describe_action(&call), Some(Action::Mcp { .. })), "{name} must not parse as an MCP tool");
-		}
-	}
-
+    #[test]
+    fn a_lookalike_name_is_not_treated_as_mcp() {
+        for name in [
+            "mcp",
+            "mcp_srv_tool",
+            "mcp__",
+            "mcp__srv__",
+            "x__y__z",
+            "read_file",
+        ] {
+            let call = tool_call(name, serde_json::json!({}));
+            assert!(
+                !matches!(describe_action(&call), Some(Action::Mcp { .. })),
+                "{name} must not parse as an MCP tool"
+            );
+        }
+    }
 }

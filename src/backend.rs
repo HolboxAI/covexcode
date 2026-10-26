@@ -135,8 +135,16 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
         out.push(B64[(n >> 12 & 63) as usize] as char);
         // Padding is not decoration: without it a decoder cannot tell three
         // bytes from one, because both produce the same leading characters.
-        out.push(if chunk.len() > 1 { B64[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { B64[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            B64[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -151,7 +159,9 @@ fn registry_path() -> Option<PathBuf> {
 }
 
 fn load_registry() -> HashMap<String, String> {
-    let Some(path) = registry_path() else { return HashMap::new() };
+    let Some(path) = registry_path() else {
+        return HashMap::new();
+    };
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -285,10 +295,15 @@ pub fn mine() -> Vec<Mine> {
     // Read once. `all_local` re-reads and re-sorts a file on every call, and
     // an earlier version of this called it from inside the sort comparator.
     let published = crate::artifacts::all_local();
-    let path_of: std::collections::HashMap<&str, &str> =
-        published.iter().map(|(path, id)| (id.as_str(), path.as_str())).collect();
-    let rank_of: std::collections::HashMap<&str, usize> =
-        published.iter().enumerate().map(|(i, (_, id))| (id.as_str(), i)).collect();
+    let path_of: std::collections::HashMap<&str, &str> = published
+        .iter()
+        .map(|(path, id)| (id.as_str(), path.as_str()))
+        .collect();
+    let rank_of: std::collections::HashMap<&str, usize> = published
+        .iter()
+        .enumerate()
+        .map(|(i, (_, id))| (id.as_str(), i))
+        .collect();
 
     let mut out: Vec<Mine> = owned
         .keys()
@@ -322,7 +337,10 @@ pub fn mine() -> Vec<Mine> {
 /// information, not a failure.
 pub async fn statuses(endpoint: &str, mut projects: Vec<Mine>) -> Vec<Mine> {
     let base = endpoint.trim_end_matches('/').to_string();
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(10)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return projects,
     };
@@ -331,7 +349,9 @@ pub async fn statuses(endpoint: &str, mut projects: Vec<Mine>) -> Vec<Mine> {
         let client = client.clone();
         async move {
             let text = client.get(&url).send().await.ok()?.text().await.ok()?;
-            serde_json::from_str::<StatusResponse>(&text).ok().map(|s| s.state)
+            serde_json::from_str::<StatusResponse>(&text)
+                .ok()
+                .map(|s| s.state)
         }
     });
     let states = futures::future::join_all(lookups).await;
@@ -367,7 +387,8 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Candidate>, depth: usize) -> Resu
     if depth > 20 {
         return Ok(());
     }
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("could not read {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("could not read {}: {e}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -398,7 +419,11 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Candidate>, depth: usize) -> Resu
             .map(|c| c.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        out.push(Candidate { key, source: path, size: meta.len() });
+        out.push(Candidate {
+            key,
+            source: path,
+            size: meta.len(),
+        });
     }
     Ok(())
 }
@@ -449,16 +474,14 @@ pub async fn deploy(
                 .to_string(),
         );
     }
-    let entrypoint = profile
-        .start_command()
-        .ok_or_else(|| {
-            format!(
-                "could not work out how to start this {}. Name the file that starts the server \
+    let entrypoint = profile.start_command().ok_or_else(|| {
+        format!(
+            "could not work out how to start this {}. Name the file that starts the server \
                  -- for Node that is usually the `main` field in package.json or a top-level \
                  index.js/server.js.",
-                profile.framework.label()
-            )
-        })?;
+            profile.framework.label()
+        )
+    })?;
 
     let files = collect(path)?;
     let total = check_limits(&files)?;
@@ -468,7 +491,10 @@ pub async fn deploy(
         .map(|f| {
             let bytes = std::fs::read(&f.source)
                 .map_err(|e| format!("could not read {}: {e}", f.source.display()))?;
-            Ok(FileEntry { path: f.key.clone(), content: base64_encode(&bytes) })
+            Ok(FileEntry {
+                path: f.key.clone(),
+                content: base64_encode(&bytes),
+            })
         })
         .collect::<Result<_, String>>()?;
 
@@ -504,7 +530,9 @@ pub async fn deploy(
         let detail = serde_json::from_str::<ErrorResponse>(&text)
             .map(|e| e.error)
             .unwrap_or_else(|_| text.trim().to_string());
-        return Err(format!("the hosting service refused this ({status}): {detail}"));
+        return Err(format!(
+            "the hosting service refused this ({status}): {detail}"
+        ));
     }
 
     let accepted: AcceptResponse = serde_json::from_str(&text)
@@ -517,7 +545,11 @@ pub async fn deploy(
     Ok(Deployed {
         id: accepted.id,
         url: accepted.url,
-        expires_in_hours: if accepted.expires_in_hours == 0 { 48 } else { accepted.expires_in_hours },
+        expires_in_hours: if accepted.expires_in_hours == 0 {
+            48
+        } else {
+            accepted.expires_in_hours
+        },
         verified,
     })
 }
@@ -535,8 +567,12 @@ async fn await_ready(client: &reqwest::Client, endpoint: &str, id: &str) -> Resu
             // taking a whole CPU and nginx is on the same box.
             continue;
         };
-        let Ok(text) = response.text().await else { continue };
-        let Ok(status) = serde_json::from_str::<StatusResponse>(&text) else { continue };
+        let Ok(text) = response.text().await else {
+            continue;
+        };
+        let Ok(status) = serde_json::from_str::<StatusResponse>(&text) else {
+            continue;
+        };
 
         last = status.state.clone();
         match status.state.as_str() {
@@ -590,7 +626,12 @@ async fn probe(client: &reqwest::Client, url: &str, id: &str) -> bool {
 /// deploy reports a URL that serves nothing. Checking the status alone is not
 /// enough: the edge answers, it just does not answer for this project.
 async fn probe_once(client: &reqwest::Client, url: &str, id: &str) -> bool {
-    let Ok(r) = client.get(url).timeout(Duration::from_secs(20)).send().await else {
+    let Ok(r) = client
+        .get(url)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+    else {
         return false;
     };
     let routed = r
@@ -625,7 +666,9 @@ mod tests {
         let all: Vec<u8> = (0u8..=255).collect();
         let encoded = base64_encode(&all);
         assert_eq!(encoded.len(), 344, "256 bytes is 344 base64 characters");
-        assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c)));
+        assert!(encoded
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c)));
         assert_eq!(base64_encode(&[0, 0, 0]), "AAAA");
         assert_eq!(base64_encode(&[255, 255, 255]), "////");
     }
@@ -707,7 +750,11 @@ mod tests {
         assert!(err.contains("big.bin"), "{err}");
 
         let many: Vec<Candidate> = (0..MAX_FILES + 1)
-            .map(|i| Candidate { key: format!("f{i}"), source: PathBuf::from("f"), size: 1 })
+            .map(|i| Candidate {
+                key: format!("f{i}"),
+                source: PathBuf::from("f"),
+                size: 1,
+            })
             .collect();
         let err = check_limits(&many).unwrap_err();
         // A tree over the file limit is nearly always a directory that should
@@ -770,7 +817,11 @@ app.listen(process.env.PORT || 3000, "0.0.0.0");
         .unwrap();
 
         let profile = crate::deploy::backend::detect_backend(dir.path()).expect("detect");
-        eprintln!("detected: {} on {}", profile.framework.label(), profile.runtime.label());
+        eprintln!(
+            "detected: {} on {}",
+            profile.framework.label(),
+            profile.runtime.label()
+        );
         eprintln!("start:    {:?}", profile.start_command());
 
         match deploy(dir.path(), &id, &profile, &endpoint).await {
@@ -818,7 +869,10 @@ app.listen(process.env.PORT || 3000, "0.0.0.0");
                 !listed.iter().any(|m| m.id == MACHINE_TOKEN_KEY),
                 "the machine's own token is not a project: {listed:?}"
             );
-            assert!(listed.iter().all(|m| m.state.is_none()), "state is asked for separately");
+            assert!(
+                listed.iter().all(|m| m.state.is_none()),
+                "state is asked for separately"
+            );
         });
     }
 
@@ -852,7 +906,11 @@ app.listen(process.env.PORT || 3000, "0.0.0.0");
             let first = token_for("k9depef6");
             assert_eq!(first.len(), 64, "32 bytes hex-encoded");
             assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
-            assert_eq!(token_for("k9depef6"), first, "the same project must keep its token");
+            assert_eq!(
+                token_for("k9depef6"),
+                first,
+                "the same project must keep its token"
+            );
         });
     }
 
@@ -885,8 +943,16 @@ app.listen(process.env.PORT || 3000, "0.0.0.0");
             registry.insert("oldproj12".to_string(), legacy.clone());
             save_registry(&registry);
 
-            assert_eq!(token_for("oldproj12"), legacy, "the old token still owns the old id");
-            assert_ne!(token_for("newproj34"), legacy, "a new project uses the machine token");
+            assert_eq!(
+                token_for("oldproj12"),
+                legacy,
+                "the old token still owns the old id"
+            );
+            assert_ne!(
+                token_for("newproj34"),
+                legacy,
+                "a new project uses the machine token"
+            );
             assert_eq!(
                 token_for("newproj34"),
                 token_for("othernew5"),
@@ -900,6 +966,9 @@ app.listen(process.env.PORT || 3000, "0.0.0.0");
         // Ids are ^[a-z2-9]{4,16}$ server-side. If the key ever became a legal
         // id, a project could claim the machine's own token.
         let id_re = regex::Regex::new("^[a-z2-9]{4,16}$").unwrap();
-        assert!(!id_re.is_match(MACHINE_TOKEN_KEY), "{MACHINE_TOKEN_KEY} must not be a valid id");
+        assert!(
+            !id_re.is_match(MACHINE_TOKEN_KEY),
+            "{MACHINE_TOKEN_KEY} must not be a valid id"
+        );
     }
 }

@@ -321,7 +321,11 @@ pub enum StreamEvent {
     /// call's id, the child call's one-line label, and which round the child
     /// is on. The transcript's live area shows the latest one under the
     /// agent's entry, and `/subagents` replays the whole trail afterwards.
-    AgentActivity { call_id: String, label: String, rounds: usize },
+    AgentActivity {
+        call_id: String,
+        label: String,
+        rounds: usize,
+    },
     /// Exact token counts for the request that just finished, when the endpoint
     /// reports them. Absent rather than guessed: the caller keeps its own
     /// character estimate as the fallback, and knowing which one it has is the
@@ -435,7 +439,15 @@ async fn run(
     request_id: u64,
     tx: &mpsc::Sender<(u64, StreamEvent)>,
 ) -> Result<(), String> {
-    let Target { endpoint, model, api_key, max_tokens, context_window, include_usage, temperature } = target;
+    let Target {
+        endpoint,
+        model,
+        api_key,
+        max_tokens,
+        context_window,
+        include_usage,
+        temperature,
+    } = target;
     // A lone system prompt is not a conversation.
     if messages.iter().all(|m| m.role == "system") {
         return Err("Nothing to send.".to_string());
@@ -463,7 +475,9 @@ async fn run(
         stream: true,
         max_tokens,
         tools,
-        stream_options: include_usage.then_some(StreamOptions { include_usage: true }),
+        stream_options: include_usage.then_some(StreamOptions {
+            include_usage: true,
+        }),
         temperature,
     };
 
@@ -567,8 +581,12 @@ async fn run(
             .text()
             .await
             .map_err(|e| format!("Could not read response body: {e}"))?;
-        let parsed: StreamDelta = serde_json::from_str(&body)
-            .map_err(|e| format!("Unexpected response from {url}: {e}\n{}", truncate(&body, 800)))?;
+        let parsed: StreamDelta = serde_json::from_str(&body).map_err(|e| {
+            format!(
+                "Unexpected response from {url}: {e}\n{}",
+                truncate(&body, 800)
+            )
+        })?;
         if let Some(usage) = parsed.usage.filter(|u| u.total() > 0) {
             let _ = tx.send((request_id, StreamEvent::Usage(usage))).await;
         }
@@ -580,7 +598,9 @@ async fn run(
                 }
                 let calls = finalize_tool_calls(message.tool_calls);
                 if !calls.is_empty() {
-                    let _ = tx.send((request_id, StreamEvent::ToolCalls(calls, truncated))).await;
+                    let _ = tx
+                        .send((request_id, StreamEvent::ToolCalls(calls, truncated)))
+                        .await;
                 }
             }
         }
@@ -618,9 +638,8 @@ async fn run(
         // Mid-stream, so the connection was fine a moment ago -- said in those
         // terms rather than as reqwest's chain, for the same reason
         // `network_failure` exists.
-        let chunk = chunk.map_err(|_| {
-            format!("Lost the connection to {} mid-reply.", host_of(&url))
-        })?;
+        let chunk =
+            chunk.map_err(|_| format!("Lost the connection to {} mid-reply.", host_of(&url)))?;
         buf.extend_from_slice(&chunk);
 
         while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
@@ -674,7 +693,9 @@ async fn run(
     let calls = finalize_tool_calls(pending);
     if !calls.is_empty() {
         let truncated = finish_reason.as_deref() == Some("length");
-        let _ = tx.send((request_id, StreamEvent::ToolCalls(calls, truncated))).await;
+        let _ = tx
+            .send((request_id, StreamEvent::ToolCalls(calls, truncated)))
+            .await;
     }
 
     // Truncation is otherwise silent: a cut-off answer looks like a finished
@@ -713,7 +734,11 @@ async fn apply_delta(
         }
     }
     if let Some(text) = delta.content.filter(|s| !s.is_empty()) {
-        if tx.send((request_id, StreamEvent::Token(text))).await.is_err() {
+        if tx
+            .send((request_id, StreamEvent::Token(text)))
+            .await
+            .is_err()
+        {
             return false;
         }
     }
@@ -864,7 +889,11 @@ fn backoff_delay(attempt: u32) -> Duration {
 /// telling us exactly how long it wants; clamped so a misbehaving endpoint
 /// cannot stall a retry indefinitely.
 fn retry_after_duration(response: &reqwest::Response) -> Option<Duration> {
-    let raw = response.headers().get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let raw = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?;
     let secs: u64 = raw.trim().parse().ok()?;
     Some(Duration::from_secs(secs).min(Duration::from_secs(60)))
 }
@@ -984,7 +1013,10 @@ mod tests {
             Some("Let me check")
         );
         // And it must not be confused with the answer.
-        assert!(token(r#"data: {"choices":[{"delta":{"reasoning_content":"Let me check"}}]}"#).is_none());
+        assert!(
+            token(r#"data: {"choices":[{"delta":{"reasoning_content":"Let me check"}}]}"#)
+                .is_none()
+        );
     }
 
     /// Reasoning and content on the same chunk: both come through, and the
@@ -1059,10 +1091,21 @@ mod tests {
         let error = error.expect("an unreachable endpoint must report something");
 
         assert_eq!(error.lines().count(), 1, "should be one line: {error:?}");
-        assert!(error.contains("127.0.0.1:1"), "should name the host: {error:?}");
+        assert!(
+            error.contains("127.0.0.1:1"),
+            "should name the host: {error:?}"
+        );
         // The layers that made the old message unreadable.
-        for noise in ["error sending request", "error trying to connect", "hyper", "os error"] {
-            assert!(!error.contains(noise), "{noise:?} leaked through: {error:?}");
+        for noise in [
+            "error sending request",
+            "error trying to connect",
+            "hyper",
+            "os error",
+        ] {
+            assert!(
+                !error.contains(noise),
+                "{noise:?} leaked through: {error:?}"
+            );
         }
         // And the URL is named once, not at every layer.
         assert_eq!(error.matches("127.0.0.1").count(), 1, "{error:?}");
@@ -1161,8 +1204,14 @@ mod tests {
 
     #[test]
     fn the_host_is_taken_from_whatever_shape_of_url_arrives() {
-        assert_eq!(host_of("https://api.deepseek.com/v1/chat/completions"), "api.deepseek.com");
-        assert_eq!(host_of("http://127.0.0.1:1/v1/chat/completions"), "127.0.0.1:1");
+        assert_eq!(
+            host_of("https://api.deepseek.com/v1/chat/completions"),
+            "api.deepseek.com"
+        );
+        assert_eq!(
+            host_of("http://127.0.0.1:1/v1/chat/completions"),
+            "127.0.0.1:1"
+        );
         assert_eq!(host_of("https://llm.internal:8443"), "llm.internal:8443");
         // Not a URL at all: better to echo it than to produce an empty message.
         assert_eq!(host_of("nonsense"), "nonsense");
@@ -1490,7 +1539,10 @@ mod tests {
         });
         let notice = notice.expect("a truncated reply must say so");
         assert!(notice.contains("cut off"), "{notice}");
-        assert!(notice.contains("max_tokens"), "it must name the setting: {notice}");
+        assert!(
+            notice.contains("max_tokens"),
+            "it must name the setting: {notice}"
+        );
 
         // The partial text still arrives -- half an answer beats none.
         assert_eq!(text_of(&events), "half a sen");
@@ -1711,8 +1763,9 @@ mod tests {
     /// `"choices": []`.
     #[test]
     fn usage_is_read_from_a_trailing_chunk_with_no_choices() {
-        let u = usage_of(r#"data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":8}}"#)
-            .expect("usage");
+        let u =
+            usage_of(r#"data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":8}}"#)
+                .expect("usage");
         assert_eq!(u.prompt_tokens, 7);
         assert_eq!(u.completion_tokens, 8);
     }
@@ -1732,7 +1785,10 @@ mod tests {
     /// indistinguishable from one that does not report at all.
     #[test]
     fn an_all_zero_report_is_treated_as_no_report() {
-        assert!(usage_of(r#"data: {"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}"#).is_none());
+        assert!(usage_of(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}"#
+        )
+        .is_none());
         assert!(usage_of(r#"data: {"choices":[{"delta":{"content":"x"}}]}"#).is_none());
         assert!(usage_of("data: [DONE]").is_none());
     }
@@ -1750,9 +1806,16 @@ mod tests {
             stream_options: None,
             temperature: None,
         };
-        assert!(!serde_json::to_string(&base).unwrap().contains("stream_options"));
+        assert!(!serde_json::to_string(&base)
+            .unwrap()
+            .contains("stream_options"));
 
-        let with = ChatRequest { stream_options: Some(StreamOptions { include_usage: true }), ..base };
+        let with = ChatRequest {
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
+            ..base
+        };
         assert!(serde_json::to_string(&with)
             .unwrap()
             .contains(r#""stream_options":{"include_usage":true}"#));
@@ -1775,11 +1838,16 @@ mod tests {
             stream_options: None,
             temperature: None,
         };
-        assert!(!serde_json::to_string(&base).unwrap().contains("temperature"));
+        assert!(!serde_json::to_string(&base)
+            .unwrap()
+            .contains("temperature"));
 
         // What `effective_temperature` resolves to for the DeepSeek provider
         // when `config.toml` sets nothing: an explicit, deterministic 0.0.
-        let deepseek_default = ChatRequest { temperature: Some(0.0), ..base };
+        let deepseek_default = ChatRequest {
+            temperature: Some(0.0),
+            ..base
+        };
         assert!(serde_json::to_string(&deepseek_default)
             .unwrap()
             .contains(r#""temperature":0.0"#));
@@ -1804,7 +1872,11 @@ mod tests {
         });
         assert_eq!(
             usage,
-            Some(ApiUsage { prompt_tokens: 123, completion_tokens: 45, ..Default::default() })
+            Some(ApiUsage {
+                prompt_tokens: 123,
+                completion_tokens: 45,
+                ..Default::default()
+            })
         );
     }
 

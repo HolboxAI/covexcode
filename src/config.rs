@@ -247,7 +247,8 @@ impl LlmConfig {
     /// `providers::default_temperature`), which is `None` for every provider
     /// without a specific reason to disagree with the endpoint's own default.
     pub fn effective_temperature(&self) -> Option<f32> {
-        self.temperature.or_else(|| crate::providers::default_temperature(&self.provider))
+        self.temperature
+            .or_else(|| crate::providers::default_temperature(&self.provider))
     }
 
     /// The context window to report as `usage_update.size`: the configured value
@@ -625,9 +626,8 @@ impl Config {
             // that only ran on save would leave almost every existing install
             // world-readable forever.
             harden(&config_path);
-            toml::from_str::<Config>(&contents).map_err(|e| {
-                format!("{} is not valid TOML: {e}", config_path.display())
-            })?
+            toml::from_str::<Config>(&contents)
+                .map_err(|e| format!("{} is not valid TOML: {e}", config_path.display()))?
         } else {
             Self::default()
         };
@@ -1099,7 +1099,12 @@ mod tests {
     #[test]
     fn covexcode_provider_env_var_sets_config_llm_provider() {
         with_isolated_home(|| {
-            for key in ["COVEXCODE_ENDPOINT", "COVEXCODE_MODEL", "COVEXCODE_API_KEY", "COVEXCODE_PROVIDER"] {
+            for key in [
+                "COVEXCODE_ENDPOINT",
+                "COVEXCODE_MODEL",
+                "COVEXCODE_API_KEY",
+                "COVEXCODE_PROVIDER",
+            ] {
                 std::env::remove_var(key);
             }
             std::env::set_var("COVEXCODE_PROVIDER", "deepseek");
@@ -1149,11 +1154,15 @@ mod tests {
             // COVEXCODE_* env vars win over the file (by design), so a developer
             // machine that happens to have one exported must not leak into this
             // assertion.
-            let saved_env: Vec<(&str, Option<String>)> =
-                ["COVEXCODE_ENDPOINT", "COVEXCODE_MODEL", "COVEXCODE_API_KEY", "COVEXCODE_PROVIDER"]
-                    .iter()
-                    .map(|&k| (k, std::env::var(k).ok()))
-                    .collect();
+            let saved_env: Vec<(&str, Option<String>)> = [
+                "COVEXCODE_ENDPOINT",
+                "COVEXCODE_MODEL",
+                "COVEXCODE_API_KEY",
+                "COVEXCODE_PROVIDER",
+            ]
+            .iter()
+            .map(|&k| (k, std::env::var(k).ok()))
+            .collect();
             for (k, _) in &saved_env {
                 std::env::remove_var(k);
             }
@@ -1267,10 +1276,9 @@ mod tests {
     /// must get the new default rather than failing to parse.
     #[test]
     fn a_ui_table_without_clear_on_exit_still_loads() {
-        let parsed: Config = toml::from_str(
-            "[llm]\nendpoint = \"http://x\"\n\n[ui]\ntheme = \"dark\"\n",
-        )
-        .expect("should parse");
+        let parsed: Config =
+            toml::from_str("[llm]\nendpoint = \"http://x\"\n\n[ui]\ntheme = \"dark\"\n")
+                .expect("should parse");
         assert_eq!(parsed.ui.theme, "dark");
         assert!(parsed.ui.clear_on_exit);
     }
@@ -1278,10 +1286,9 @@ mod tests {
     /// And someone who turns it off keeps it off across a save.
     #[test]
     fn clear_on_exit_survives_a_round_trip() {
-        let mut parsed: Config = toml::from_str(
-            "[llm]\nendpoint = \"http://x\"\n\n[ui]\nclear_on_exit = false\n",
-        )
-        .expect("should parse");
+        let mut parsed: Config =
+            toml::from_str("[llm]\nendpoint = \"http://x\"\n\n[ui]\nclear_on_exit = false\n")
+                .expect("should parse");
         parsed.normalize();
         assert!(!parsed.ui.clear_on_exit);
         let written = toml::to_string_pretty(&parsed).unwrap();
@@ -1358,12 +1365,19 @@ mod tests {
     #[test]
     fn the_new_key_is_the_only_one_that_decides() {
         for (extra, expected) in [
-            ("approval = \"always\"\nrequire_approval = false\n", ApprovalMode::Always),
-            ("approval = \"destructive\"\nrequire_approval = true\n", ApprovalMode::Destructive),
+            (
+                "approval = \"always\"\nrequire_approval = false\n",
+                ApprovalMode::Always,
+            ),
+            (
+                "approval = \"destructive\"\nrequire_approval = true\n",
+                ApprovalMode::Destructive,
+            ),
         ] {
-            let mut parsed: Config =
-                toml::from_str(&format!("[llm]\nendpoint = \"http://x\"\n\n[tools]\n{extra}"))
-                    .expect("should parse");
+            let mut parsed: Config = toml::from_str(&format!(
+                "[llm]\nendpoint = \"http://x\"\n\n[tools]\n{extra}"
+            ))
+            .expect("should parse");
             parsed.normalize();
             assert_eq!(parsed.tools.approval, expected);
         }
@@ -1409,7 +1423,10 @@ mod tests {
             "[llm]\nendpoint = \"https://api.deepseek.com\"\nprovider = \"deepseek\"\n",
         )
         .expect("parses");
-        assert_eq!(deepseek.llm.temperature, None, "nothing written to disk yet");
+        assert_eq!(
+            deepseek.llm.temperature, None,
+            "nothing written to disk yet"
+        );
         assert_eq!(deepseek.llm.effective_temperature(), Some(0.0));
 
         let openai: Config =
@@ -1417,8 +1434,8 @@ mod tests {
                 .expect("parses");
         assert_eq!(openai.llm.effective_temperature(), None);
 
-        let custom: Config = toml::from_str("[llm]\nendpoint = \"http://localhost:8000\"\n")
-            .expect("parses");
+        let custom: Config =
+            toml::from_str("[llm]\nendpoint = \"http://localhost:8000\"\n").expect("parses");
         assert_eq!(custom.llm.effective_temperature(), None);
 
         // An explicit setting overrides the built-in default in either
@@ -1449,7 +1466,10 @@ mod tests {
 
             let dir = Config::config_dir();
             assert!(dir.ends_with(".covexcode"), "{dir:?}");
-            assert!(!legacy.exists(), "the old directory should have been moved, not copied");
+            assert!(
+                !legacy.exists(),
+                "the old directory should have been moved, not copied"
+            );
             assert_eq!(
                 std::fs::read_to_string(dir.join("device_id")).unwrap(),
                 "device-kept",
@@ -1476,7 +1496,10 @@ mod tests {
             std::fs::write(home.join(".tuisample-code/device_id"), "stale").unwrap();
 
             let dir = Config::config_dir();
-            assert_eq!(std::fs::read_to_string(dir.join("device_id")).unwrap(), "current");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("device_id")).unwrap(),
+                "current"
+            );
             assert!(
                 home.join(".tuisample-code").exists(),
                 "the old directory is left alone once there is a current one"

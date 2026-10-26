@@ -32,8 +32,8 @@
 
 use crate::config::Config;
 use crate::headless::{
-    BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult, HeadlessSession,
-    PermissionAsk,
+    BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult,
+    HeadlessSession, PermissionAsk,
 };
 use crate::protocol::{
     CheckInBrowserOutcome, CheckInBrowserRequest, Implementation, InitializeRequest,
@@ -57,10 +57,23 @@ use tokio::sync::{mpsc, oneshot};
 /// shape, is what the JSON-RPC 2.0 spec itself says a receiver does.
 #[derive(Debug, Clone, PartialEq)]
 enum Incoming {
-    Request { id: RequestId, method: String, params: serde_json::Value },
-    Notification { method: String, params: serde_json::Value },
-    Response { id: RequestId, result: serde_json::Value },
-    Error { id: RequestId, error: serde_json::Value },
+    Request {
+        id: RequestId,
+        method: String,
+        params: serde_json::Value,
+    },
+    Notification {
+        method: String,
+        params: serde_json::Value,
+    },
+    Response {
+        id: RequestId,
+        result: serde_json::Value,
+    },
+    Error {
+        id: RequestId,
+        error: serde_json::Value,
+    },
     /// Present but not a well-formed JSON-RPC message of any of the above
     /// shapes -- kept as its own case rather than silently dropped, so a
     /// caller can decide whether to log it.
@@ -69,7 +82,10 @@ enum Incoming {
 
 fn classify(value: &serde_json::Value) -> Incoming {
     let id = value.get("id").cloned();
-    let method = value.get("method").and_then(|m| m.as_str()).map(str::to_string);
+    let method = value
+        .get("method")
+        .and_then(|m| m.as_str())
+        .map(str::to_string);
     match (id, method) {
         (Some(id), Some(method)) => match serde_json::from_value::<RequestId>(id) {
             Ok(id) => Incoming::Request {
@@ -79,15 +95,22 @@ fn classify(value: &serde_json::Value) -> Incoming {
             },
             Err(_) => Incoming::Malformed,
         },
-        (None, Some(method)) => {
-            Incoming::Notification { method, params: value.get("params").cloned().unwrap_or(json!({})) }
-        }
+        (None, Some(method)) => Incoming::Notification {
+            method,
+            params: value.get("params").cloned().unwrap_or(json!({})),
+        },
         (Some(id), None) => match serde_json::from_value::<RequestId>(id) {
             Ok(id) => {
                 if let Some(result) = value.get("result") {
-                    Incoming::Response { id, result: result.clone() }
+                    Incoming::Response {
+                        id,
+                        result: result.clone(),
+                    }
                 } else if let Some(error) = value.get("error") {
-                    Incoming::Error { id, error: error.clone() }
+                    Incoming::Error {
+                        id,
+                        error: error.clone(),
+                    }
                 } else {
                     Incoming::Malformed
                 }
@@ -100,17 +123,27 @@ fn classify(value: &serde_json::Value) -> Incoming {
 
 /// A message sent to one session's own task.
 enum SessionMsg {
-    Prompt { text: String, images: Vec<crate::llm::ImageAttachment>, mode: Option<crate::tools::Mode>, respond: oneshot::Sender<PromptResponse> },
+    Prompt {
+        text: String,
+        images: Vec<crate::llm::ImageAttachment>,
+        mode: Option<crate::tools::Mode>,
+        respond: oneshot::Sender<PromptResponse>,
+    },
     /// `session/rollback`. Queued behind whatever `Prompt` this actor's
     /// task is already working through -- one message at a time, same as
     /// `Prompt` itself -- which is exactly right: rolling back files the
     /// model might still be mid-turn writing to would be undoing work out
     /// from under it, not after it. Carries the request (with its optional
     /// `files`/`turn` filters) through to the session.
-    Rollback { req: RollbackRequest, respond: oneshot::Sender<RollbackResponse> },
+    Rollback {
+        req: RollbackRequest,
+        respond: oneshot::Sender<RollbackResponse>,
+    },
     /// `session/list_changes` -- a read-only peek at the journal, answered
     /// synchronously like `Rollback`.
-    ListChanges { respond: oneshot::Sender<ListChangesResponse> },
+    ListChanges {
+        respond: oneshot::Sender<ListChangesResponse>,
+    },
 }
 
 /// Everything a spawned task can produce for the outgoing stdout stream,
@@ -155,7 +188,12 @@ impl SessionActor {
                 "connected mcp servers");
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    SessionMsg::Prompt { text, images, mode, respond } => {
+                    SessionMsg::Prompt {
+                        text,
+                        images,
+                        mode,
+                        respond,
+                    } => {
                         // A fresh channel per prompt, not one shared for
                         // the session's whole lifetime: a session answers
                         // many `session/prompt` calls over time, and each
@@ -182,11 +220,22 @@ impl SessionActor {
                             }
                         });
                         let stop_reason = session
-                            .prompt(text, images, mode, &updates_tx, &permission_relay, &browser_relay, &browser_interact_relay)
+                            .prompt(
+                                text,
+                                images,
+                                mode,
+                                &updates_tx,
+                                &permission_relay,
+                                &browser_relay,
+                                &browser_interact_relay,
+                            )
                             .await;
                         drop(updates_tx); // let the drain task see the channel close
                         let _ = drain.await;
-                        let _ = respond.send(PromptResponse { stop_reason, turn: session.current_turn() });
+                        let _ = respond.send(PromptResponse {
+                            stop_reason,
+                            turn: session.current_turn(),
+                        });
                     }
                     SessionMsg::Rollback { req, respond } => {
                         let _ = respond.send(session.rollback(&req));
@@ -264,13 +313,19 @@ impl Router {
             Incoming::Request { id, method, params } => {
                 let result = self.dispatch_request(&method, params).await;
                 let line = match result {
-                    Ok(value) => {
-                        serde_json::to_string(&RpcResponse { jsonrpc: JsonRpcVersion, id, result: value })
-                    }
+                    Ok(value) => serde_json::to_string(&RpcResponse {
+                        jsonrpc: JsonRpcVersion,
+                        id,
+                        result: value,
+                    }),
                     Err((code, message)) => serde_json::to_string(&RpcError {
                         jsonrpc: JsonRpcVersion,
                         id,
-                        error: RpcErrorObject { code, message, data: None },
+                        error: RpcErrorObject {
+                            code,
+                            message,
+                            data: None,
+                        },
                     }),
                 };
                 Some(format!("{}\n", line.expect("response always serializes")))
@@ -288,7 +343,8 @@ impl Router {
             }
             Incoming::Response { id, result } => {
                 if let Some(respond) = self.pending_permission_responses.remove(&id) {
-                    if let Ok(outcome) = serde_json::from_value::<RequestPermissionOutcome>(result) {
+                    if let Ok(outcome) = serde_json::from_value::<RequestPermissionOutcome>(result)
+                    {
                         let _ = respond.send(outcome);
                     }
                 } else if let Some(respond) = self.pending_browser_responses.remove(&id) {
@@ -296,7 +352,8 @@ impl Router {
                         let _ = respond.send(outcome.into());
                     }
                 } else if let Some(respond) = self.pending_browser_interact_responses.remove(&id) {
-                    if let Ok(outcome) = serde_json::from_value::<InteractInBrowserOutcome>(result) {
+                    if let Ok(outcome) = serde_json::from_value::<InteractInBrowserOutcome>(result)
+                    {
                         let _ = respond.send(outcome.into());
                     }
                 }
@@ -376,7 +433,8 @@ impl Router {
                     .map_err(|e| (-32602, format!("invalid mcpServers: {e}")))?;
 
                 let session_id = SessionId(format!("sess_{}", self.sessions.len() + 1));
-                let session = HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
+                let session =
+                    HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
                 let handle = SessionActor::spawn(
                     session,
                     self.outgoing_tx.clone(),
@@ -421,7 +479,9 @@ impl Router {
                     .send(SessionMsg::Rollback { req, respond })
                     .await
                     .map_err(|_| (-32002, "session actor gone".to_string()))?;
-                let response = receive.await.map_err(|_| (-32002, "session actor gone".to_string()))?;
+                let response = receive
+                    .await
+                    .map_err(|_| (-32002, "session actor gone".to_string()))?;
                 Ok(serde_json::to_value(response).expect("serializes"))
             }
             // Same synchronous, local-read shape as session/rollback: a peek
@@ -440,7 +500,9 @@ impl Router {
                     .send(SessionMsg::ListChanges { respond })
                     .await
                     .map_err(|_| (-32002, "session actor gone".to_string()))?;
-                let response = receive.await.map_err(|_| (-32002, "session actor gone".to_string()))?;
+                let response = receive
+                    .await
+                    .map_err(|_| (-32002, "session actor gone".to_string()))?;
                 Ok(serde_json::to_value(response).expect("serializes"))
             }
             other => Err((-32601, format!("method not found: {other}"))),
@@ -464,7 +526,11 @@ impl Router {
                 serde_json::to_string(&RpcError {
                     jsonrpc: JsonRpcVersion,
                     id,
-                    error: RpcErrorObject { code, message, data: None },
+                    error: RpcErrorObject {
+                        code,
+                        message,
+                        data: None
+                    },
                 })
                 .expect("error response always serializes")
             )
@@ -489,14 +555,26 @@ impl Router {
             match block {
                 crate::protocol::ContentBlock::Text { text } => text_parts.push(text),
                 crate::protocol::ContentBlock::Image { data, mime_type } => {
-                    images.push(crate::llm::ImageAttachment { mime_type, data_base64: data });
+                    images.push(crate::llm::ImageAttachment {
+                        mime_type,
+                        data_base64: data,
+                    });
                 }
             }
         }
         let text = text_parts.join("\n");
 
         let (respond, receive) = oneshot::channel();
-        if handle.send(SessionMsg::Prompt { text, images, mode: req.mode, respond }).await.is_err() {
+        if handle
+            .send(SessionMsg::Prompt {
+                text,
+                images,
+                mode: req.mode,
+                respond,
+            })
+            .await
+            .is_err()
+        {
             let line = error_line(id, -32002, "session actor gone".to_string());
             let _ = outgoing_tx.send(Outgoing::Line(line)).await;
             return;
@@ -551,7 +629,8 @@ impl Router {
         self.next_outgoing_id += 1;
         let request = match ready {
             Ready::Permission(ask) => {
-                self.pending_permission_responses.insert(id.clone(), ask.respond);
+                self.pending_permission_responses
+                    .insert(id.clone(), ask.respond);
                 RpcRequest {
                     jsonrpc: JsonRpcVersion,
                     id,
@@ -567,7 +646,8 @@ impl Router {
                 }
             }
             Ready::Browser(ask) => {
-                self.pending_browser_responses.insert(id.clone(), ask.respond);
+                self.pending_browser_responses
+                    .insert(id.clone(), ask.respond);
                 RpcRequest {
                     jsonrpc: JsonRpcVersion,
                     id,
@@ -582,7 +662,8 @@ impl Router {
                 }
             }
             Ready::BrowserInteract(ask) => {
-                self.pending_browser_interact_responses.insert(id.clone(), ask.respond);
+                self.pending_browser_interact_responses
+                    .insert(id.clone(), ask.respond);
                 RpcRequest {
                     jsonrpc: JsonRpcVersion,
                     id,
@@ -686,16 +767,23 @@ mod tests {
         let value = json!({ "jsonrpc": "2.0", "id": 7, "result": { "outcome": "cancelled" } });
         assert_eq!(
             classify(&value),
-            Incoming::Response { id: RequestId::Number(7), result: json!({ "outcome": "cancelled" }) }
+            Incoming::Response {
+                id: RequestId::Number(7),
+                result: json!({ "outcome": "cancelled" })
+            }
         );
     }
 
     #[test]
     fn an_error_response_is_distinguished_from_a_result() {
-        let value = json!({ "jsonrpc": "2.0", "id": 7, "error": { "code": -32000, "message": "boom" } });
+        let value =
+            json!({ "jsonrpc": "2.0", "id": 7, "error": { "code": -32000, "message": "boom" } });
         assert_eq!(
             classify(&value),
-            Incoming::Error { id: RequestId::Number(7), error: json!({ "code": -32000, "message": "boom" }) }
+            Incoming::Error {
+                id: RequestId::Number(7),
+                error: json!({ "code": -32000, "message": "boom" })
+            }
         );
     }
 
@@ -742,7 +830,10 @@ mod tests {
             .dispatch_request("initialize", json!({ "protocolVersion": 1 }))
             .await
             .expect("initialize always succeeds");
-        assert_eq!(response["agentCapabilities"]["promptCapabilities"]["image"], json!(true));
+        assert_eq!(
+            response["agentCapabilities"]["promptCapabilities"]["image"],
+            json!(true)
+        );
     }
 
     /// The actual end-to-end proof: initialize, open a session, send a
@@ -844,7 +935,10 @@ mod tests {
                 "result": { "outcome": "selected", "optionId": reject_option }
             })))
             .await;
-        assert_eq!(response_ack, None, "a response to our own request never produces a line");
+        assert_eq!(
+            response_ack, None,
+            "a response to our own request never produces a line"
+        );
 
         // Now the deferred session/prompt response arrives on the outgoing
         // channel, proving the whole turn -- including the permission round
@@ -854,7 +948,11 @@ mod tests {
         // status, the model's follow-up message chunk) legitimately
         // interleave ahead of it, same as a real client would see.
         let final_line = loop {
-            match outgoing_in.recv().await.expect("the deferred response arrives") {
+            match outgoing_in
+                .recv()
+                .await
+                .expect("the deferred response arrives")
+            {
                 Outgoing::Line(line) => break line,
                 Outgoing::Update(_) => continue,
             }
@@ -944,10 +1042,17 @@ mod tests {
                 "result": { "outcome": "screenshot", "mimeType": "image/png", "data": "aGVsbG8=" }
             })))
             .await;
-        assert_eq!(response_ack, None, "a response to our own request never produces a line");
+        assert_eq!(
+            response_ack, None,
+            "a response to our own request never produces a line"
+        );
 
         let final_line = loop {
-            match outgoing_in.recv().await.expect("the deferred response arrives") {
+            match outgoing_in
+                .recv()
+                .await
+                .expect("the deferred response arrives")
+            {
                 Outgoing::Line(line) => break line,
                 Outgoing::Update(_) => continue,
             }
@@ -1024,12 +1129,19 @@ mod tests {
         // response is deferred, so the write is only guaranteed done once
         // that deferred response arrives.
         loop {
-            match outgoing_in.recv().await.expect("the deferred prompt response arrives") {
+            match outgoing_in
+                .recv()
+                .await
+                .expect("the deferred prompt response arrives")
+            {
                 Outgoing::Line(_) => break,
                 Outgoing::Update(_) => continue,
             }
         }
-        assert_eq!(std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(), "bye\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "bye\n"
+        );
 
         let rollback_line = router
             .handle(classify(&json!({
@@ -1042,9 +1154,15 @@ mod tests {
             serde_json::from_str(rollback_line.trim()).expect("valid JSON line");
         assert_eq!(rollback_value["id"], 4);
         assert!(
-            rollback_value["result"]["summary"].as_str().unwrap().contains("Rolled back 1 file"),
+            rollback_value["result"]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("Rolled back 1 file"),
             "{rollback_value}"
         );
-        assert_eq!(std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(), "hi\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "hi\n"
+        );
     }
 }
