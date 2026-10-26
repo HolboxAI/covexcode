@@ -208,6 +208,11 @@ pub struct HeadlessSession {
     /// undid. Recorded before the user message is pushed, so a turn boundary
     /// is always `messages.len()` at that moment.
     turn_starts: Vec<usize>,
+    /// Prompt tokens the endpoint reported for the most recent response.
+    /// Preferred over the character estimate when deciding whether the
+    /// context has grown past `[compact] auto_at_tokens`, because the
+    /// endpoint's own count is what the context actually cost.
+    last_prompt_tokens: Option<usize>,
     /// The same journal `App::rollback`/`/rollback` reads and writes,
     /// populated the identical way `App::push_tool_outcome` does (see
     /// `decide_and_run`/`ask_permission`'s own calls to `.record(...)`) --
@@ -228,6 +233,7 @@ impl HeadlessSession {
             mode: Mode::Normal,
             active_plan: None,
             turn_starts: Vec::new(),
+            last_prompt_tokens: None,
             rollback: crate::rollback::Journal::default(),
             mcp: crate::mcp::McpRegistry::default(),
         }
@@ -387,7 +393,12 @@ impl HeadlessSession {
             let round = self.run_one_round(history, schemas, updates).await;
 
             match round {
-                RoundOutcome::Answered => return StopReason::EndTurn,
+                RoundOutcome::Answered => {
+                    // Same moment as the TUI: only after an ordinary completed
+                    // turn, never after a failure or a compaction itself.
+                    self.maybe_auto_compact(updates).await;
+                    return StopReason::EndTurn;
+                }
                 RoundOutcome::Error(message) => {
                     let _ = updates
                         .send(SessionUpdate::AgentMessageChunk {
@@ -469,6 +480,150 @@ impl HeadlessSession {
         }
     }
 
+    /// The context size used to decide whether auto-compaction is due: the
+    /// endpoint's exact prompt-token count when it reported one, otherwise the
+    /// same character estimate the preflight uses.
+    fn context_tokens(&self) -> usize {
+        self.last_prompt_tokens.unwrap_or_else(|| {
+            crate::llm::estimate_request_tokens(&self.messages, &[]) as usize
+        })
+    }
+
+    /// Compact automatically after an ordinary completed turn, matching the
+    /// TUI's `[compact] auto` behavior. ACP sessions used to grow forever even
+    /// though `/compact` existed in the TUI -- this is that feature in the
+    /// headless path, not a replacement for it.
+    async fn maybe_auto_compact(&mut self, updates: &mpsc::Sender<SessionUpdate>) {
+        if !self.config.compact.auto || self.messages.len() < 2 {
+            return;
+        }
+        let context = self.context_tokens();
+        let threshold = self.config.compact.auto_at_tokens as usize;
+        if threshold == 0 || context < threshold {
+            return;
+        }
+
+        let _ = updates
+            .send(SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text {
+                    text: format!(
+                        "\n\nContext reached ~{context} tokens, past the auto-compact threshold \
+                         ({threshold}); summarizing the conversation to free it up.\n\n"
+                    ),
+                },
+                message_id: None,
+            })
+            .await;
+
+        match self.request_summary(updates).await {
+            Ok(summary) if !summary.trim().is_empty() => {
+                let summary = summary.trim().to_string();
+                self.messages = vec![crate::compact::summary_message(&summary)];
+                // The old turn boundaries index a conversation that no longer
+                // exists. Keep the rollback journal (its file before-states are
+                // still valid), but start the conversation afresh.
+                self.turn_starts.clear();
+                self.last_prompt_tokens = None;
+                let _ = updates
+                    .send(SessionUpdate::AgentMessageChunk {
+                        content: ContentBlock::Text {
+                            text: format!(
+                                "\n\nConversation compacted: the earlier messages were replaced \
+                                 by a summary. Context is now ~{} tokens.\n\n",
+                                self.context_tokens()
+                            ),
+                        },
+                        message_id: None,
+                    })
+                    .await;
+            }
+            Ok(_) => {
+                let _ = updates
+                    .send(SessionUpdate::AgentMessageChunk {
+                        content: ContentBlock::Text {
+                            text: "\n\nAuto-compaction returned an empty summary; the \
+                                   conversation is unchanged.\n\n"
+                                .to_string(),
+                        },
+                        message_id: None,
+                    })
+                    .await;
+            }
+            Err(error) => {
+                let _ = updates
+                    .send(SessionUpdate::AgentMessageChunk {
+                        content: ContentBlock::Text {
+                            text: format!(
+                                "\n\nAuto-compaction failed ({error}); the conversation is \
+                                 unchanged.\n\n"
+                            ),
+                        },
+                        message_id: None,
+                    })
+                    .await;
+            }
+        }
+    }
+
+    /// Ask the model to summarize the current conversation. This request has
+    /// no tools and no workspace system prompt: its only job is to read what is
+    /// already in history and write a replacement for it.
+    async fn request_summary(
+        &mut self,
+        updates: &mpsc::Sender<SessionUpdate>,
+    ) -> Result<String, String> {
+        let mut history = self.messages.clone();
+        history.push(ChatMessage::text(
+            "user",
+            crate::compact::COMPACT_INSTRUCTION,
+        ));
+
+        self.request_id += 1;
+        let (tx, mut rx) = mpsc::channel(64);
+        let target = Target {
+            endpoint: &self.config.llm.endpoint,
+            model: &self.config.llm.model,
+            api_key: &self.config.llm.api_key,
+            max_tokens: self.config.llm.max_tokens,
+            context_window: self.config.llm.effective_context_window(),
+            include_usage: self.config.quota.include_usage,
+            temperature: self.config.llm.effective_temperature(),
+        };
+        let stream = llm::stream_chat(target, history, Vec::new(), self.request_id, tx);
+        tokio::pin!(stream);
+
+        let mut stream_finished = false;
+        let mut text = String::new();
+        let mut usage: Option<ApiUsage> = None;
+        let mut error = None;
+        loop {
+            tokio::select! {
+                _ = &mut stream, if !stream_finished => stream_finished = true,
+                received = rx.recv() => match received {
+                    Some((_, StreamEvent::Token(token))) => text.push_str(&token),
+                    Some((_, StreamEvent::Usage(u))) => usage = Some(u),
+                    Some((_, StreamEvent::Error(message))) => {
+                        error = Some(message);
+                        break;
+                    }
+                    Some((_, StreamEvent::Done)) | None => break,
+                    Some(_) => {}
+                },
+            }
+        }
+
+        if let Some(u) = usage {
+            let _ = updates
+                .send(u.to_usage_update(self.config.llm.effective_context_window()))
+                .await;
+        }
+
+        match error {
+            Some(error) => Err(error),
+            None => Ok(text),
+        }
+    }
+
     /// One `stream_chat` round, consumed the same way `agent::run_subagent`
     /// already does -- see that function's own comments for why
     /// `tokio::select!` over the pinned future is the right shape here
@@ -544,6 +699,9 @@ impl HeadlessSession {
         }
 
         if let Some(u) = usage {
+            if u.prompt_tokens > 0 {
+                self.last_prompt_tokens = Some(u.prompt_tokens);
+            }
             let _ = updates
                 .send(u.to_usage_update(self.config.llm.effective_context_window()))
                 .await;
@@ -1805,6 +1963,215 @@ mod tests {
             } => assert!(text.contains("empty response"), "{text}"),
             other => panic!("expected a text chunk, got {other:?}"),
         }
+    }
+
+    /// The TUI's `[compact] auto` behavior, now in the headless path: after a
+    /// completed turn whose context passed the threshold, the conversation is
+    /// replaced by the model's summary and the client sees what happened.
+    #[tokio::test]
+    async fn auto_compaction_replaces_history_once_the_context_passes_the_threshold() {
+        let (_dir, ws) = workspace();
+        let answer = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n\
+             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5000,\"completion_tokens\":10}}\n\n\
+             data: [DONE]\n\n",
+        );
+        let summary = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Notes about the work.\"}}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let endpoint = serve_rounds(vec![answer, summary]).await;
+        let mut config = config_for(&endpoint);
+        config.compact.auto = true;
+        config.compact.auto_at_tokens = 4_000;
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(64);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(session.messages.len(), 1, "history must be the summary only");
+        assert_eq!(session.messages[0].role, "system");
+        let content = session.messages[0].content.as_deref().unwrap_or("");
+        assert!(content.contains("Summary of the conversation so far"), "{content}");
+        assert!(content.contains("Notes about the work."), "{content}");
+        assert!(
+            session
+                .messages
+                .iter()
+                .all(|m| m.content.as_deref() != Some("answer")),
+            "the pre-compaction answer must not survive"
+        );
+
+        let mut visible = String::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } = update
+            {
+                visible.push_str(&text);
+            }
+        }
+        assert!(visible.contains("auto-compact"), "{visible}");
+        assert!(visible.contains("Conversation compacted"), "{visible}");
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_can_be_turned_off() {
+        let (_dir, ws) = workspace();
+        let answer = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n\
+             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5000,\"completion_tokens\":10}}\n\n\
+             data: [DONE]\n\n",
+        );
+        let summary = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"unused\"}}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let endpoint = serve_rounds(vec![answer, summary]).await;
+        let mut config = config_for(&endpoint);
+        config.compact.auto = false;
+        config.compact.auto_at_tokens = 4_000;
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(64);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(session.messages.len(), 2, "user + assistant must remain");
+        let mut visible = String::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } = update
+            {
+                visible.push_str(&text);
+            }
+        }
+        assert!(!visible.contains("auto-compact"), "{visible}");
+    }
+
+    #[tokio::test]
+    async fn an_empty_compaction_summary_leaves_history_unchanged() {
+        let (_dir, ws) = workspace();
+        let answer = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n\
+             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5000,\"completion_tokens\":10}}\n\n\
+             data: [DONE]\n\n",
+        );
+        let empty = sse("data: [DONE]\n\n");
+        let endpoint = serve_rounds(vec![answer, empty]).await;
+        let mut config = config_for(&endpoint);
+        config.compact.auto = true;
+        config.compact.auto_at_tokens = 4_000;
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(64);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(session.messages.len(), 2, "a failed summary must not discard history");
+        let mut visible = String::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } = update
+            {
+                visible.push_str(&text);
+            }
+        }
+        assert!(visible.contains("empty summary"), "{visible}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_below_the_threshold_does_not_compact() {
+        let (_dir, ws) = workspace();
+        let answer = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n\
+             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10}}\n\n\
+             data: [DONE]\n\n",
+        );
+        let summary = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"unused\"}}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let endpoint = serve_rounds(vec![answer, summary]).await;
+        let mut config = config_for(&endpoint);
+        config.compact.auto = true;
+        config.compact.auto_at_tokens = 4_000;
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(64);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(session.messages.len(), 2);
+        let mut visible = String::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } = update
+            {
+                visible.push_str(&text);
+            }
+        }
+        assert!(!visible.contains("auto-compact"), "{visible}");
     }
 
     #[test]

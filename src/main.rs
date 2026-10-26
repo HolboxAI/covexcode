@@ -5,6 +5,7 @@ mod artifacts;
 mod auth;
 mod backend;
 mod clipboard;
+mod compact;
 mod config;
 mod contrast;
 mod danger;
