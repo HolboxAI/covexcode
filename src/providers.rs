@@ -45,12 +45,18 @@ pub fn find_provider(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.id == id)
 }
 
-/// Whether the active provider can read images. Unknown/custom endpoints are
-/// assumed capable: the user opted into "any OpenAI-compatible endpoint", which
-/// may well be a multimodal server, and guessing wrong on the pessimistic side
-/// would silently strip an image a real model could read.
-pub fn supports_images(provider_id: &str) -> bool {
-    find_provider(provider_id).map_or(true, |p| p.vision)
+/// Whether the configured model accepts image prompt blocks.
+///
+/// A registry provider answers from its `vision` flag. Unknown providers --
+/// the managed proxy logs in with `provider = ""`, and custom endpoints also
+/// leave it empty -- have no registry entry, so the model id decides: DeepSeek
+/// models are text-only. Anything else stays permissive, preserving the old
+/// "assume a custom endpoint can read images" default.
+pub fn supports_images(provider_id: &str, model_id: &str) -> bool {
+    match find_provider(provider_id) {
+        Some(provider) => provider.vision,
+        None => !model_id.trim().to_ascii_lowercase().starts_with("deepseek"),
+    }
 }
 
 /// The conventional env var a user is likely to already have exported for this
@@ -93,6 +99,21 @@ pub fn default_context_window(provider_id: &str) -> u64 {
     }
 }
 
+/// The model's context window when only the model id is known -- the managed
+/// Covexcode proxy and custom endpoints leave `provider` empty on purpose (a
+/// `bx-live-` key is not a DeepSeek BYOK key), so `default_context_window`
+/// cannot answer for them. The model name still identifies the family.
+///
+/// Only families whose window is unambiguous are listed. An unknown model
+/// returns `0`, keeping the "unknown" sentinel rather than guessing a limit.
+pub fn default_context_window_for_model(model_id: &str) -> u64 {
+    if model_id.trim().to_ascii_lowercase().starts_with("deepseek") {
+        131_072
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +135,14 @@ mod tests {
     fn env_var_name_uppercases_the_id() {
         assert_eq!(env_var_name("deepseek"), "DEEPSEEK_API_KEY");
         assert_eq!(env_var_name("openai"), "OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn a_deepseek_model_keeps_its_window_when_no_provider_is_set() {
+        assert_eq!(default_context_window_for_model("deepseek-v4-flash"), 131_072);
+        assert_eq!(default_context_window_for_model("DeepSeek-V4-Pro"), 131_072);
+        assert_eq!(default_context_window_for_model("gpt-5.6-sol"), 0);
+        assert_eq!(default_context_window_for_model(""), 0);
     }
 
     /// `covexcode --providers-json`'s whole reason to exist: an ACP client reads
@@ -152,11 +181,19 @@ mod tests {
 
     #[test]
     fn deepseek_is_text_only_and_openai_reads_images() {
-        assert!(!supports_images("deepseek"));
-        assert!(supports_images("openai"));
-        // Unknown/custom endpoints are assumed capable rather than silently
+        assert!(!supports_images("deepseek", "deepseek-v4-flash"));
+        assert!(supports_images("openai", "gpt-5.6-sol"));
+        assert!(
+            supports_images("openai", "deepseek-v4-flash"),
+            "a known provider's own vision flag wins over the model name"
+        );
+        // The managed proxy signs in with no provider id; the model still
+        // identifies DeepSeek as text-only.
+        assert!(!supports_images("", "deepseek-v4-flash"));
+        assert!(!supports_images("some-custom-endpoint", "DeepSeek-V4-Pro"));
+        // Other unknown/custom models are assumed capable rather than silently
         // stripped of a possibly-valid image.
-        assert!(supports_images(""));
-        assert!(supports_images("some-custom-endpoint"));
+        assert!(supports_images("", "my-vision-model"));
+        assert!(supports_images("some-custom-endpoint", "gpt-5.6-sol"));
     }
 }

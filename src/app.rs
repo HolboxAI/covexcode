@@ -1105,12 +1105,20 @@ impl App {
                 self.insert_str(&c.to_string());
                 self.command_menu_selected = 0;
             }
+            // Shift+Tab cycles the session's permission posture (auto ↔ manual).
+            // Most terminals report this as `BackTab`; the kitty keyboard
+            // enhancement this app enables reports it as `Tab` + SHIFT instead,
+            // so both spellings have to land on the same action.
+            KeyCode::BackTab => self.cycle_permission_mode(),
+
             // Completes to the highlighted command's full name without
             // running it, so there's still a chance to review before Enter --
             // only while the menu actually has something to complete to;
             // otherwise Tab keeps its ordinary meaning of inserting a stop.
             KeyCode::Tab => {
-                if let Some(cmd) = self.selected_command() {
+                if shift {
+                    self.cycle_permission_mode();
+                } else if let Some(cmd) = self.selected_command() {
                     self.set_input(cmd.to_string());
                 } else {
                     self.insert_str("    ");
@@ -1258,7 +1266,7 @@ impl App {
     /// next prompt. Says so either way -- a silent no-op on "no image" would
     /// read as the key being dead.
     fn attach_clipboard_image(&mut self) {
-        if !providers::supports_images(&self.config.llm.provider) {
+        if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
             self.explain_no_vision();
             return;
         }
@@ -1311,7 +1319,7 @@ impl App {
         let Some(mime) = mime_for_path(&candidate) else {
             return false;
         };
-        if !providers::supports_images(&self.config.llm.provider) {
+        if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
             self.explain_no_vision();
             // Consume the path -- inserting it as text would be the *worse*
             // fallback: it would look like a prompt about a file the model
@@ -1816,6 +1824,34 @@ impl App {
                  before it happens."
             }
             Mode::Edit => "Inline edit is headless-only and not available in the terminal.",
+        };
+        self.messages.push(Message::new(Role::System, note));
+        self.greeted = true;
+        self.follow_tail = true;
+    }
+
+    /// Shift+Tab — cycle the session's permission posture between auto and manual.
+    ///
+    /// A session-scoped override, not a config write: it flips the in-memory
+    /// `approval` field only, so it lasts until `/provider` or `/model` saves a
+    /// config (which rewrites the field from disk) or the app exits. Plan mode
+    /// is deliberately left alone — that stays `/plan`'s axis — because the two
+    /// are independent: plan mode refuses writes outright whatever the approval
+    /// posture says.
+    fn cycle_permission_mode(&mut self) {
+        self.config.tools.approval = match self.config.tools.approval {
+            ApprovalMode::Destructive => ApprovalMode::Always,
+            ApprovalMode::Always => ApprovalMode::Destructive,
+        };
+        let note = match self.config.tools.approval {
+            ApprovalMode::Destructive => {
+                "Auto mode: ordinary reads, writes and commands run without asking — only \
+                 destructive actions stop for approval. Shift+Tab for manual mode."
+            }
+            ApprovalMode::Always => {
+                "Manual mode: every write and every command stops for approval. Shift+Tab for \
+                 auto mode."
+            }
         };
         self.messages.push(Message::new(Role::System, note));
         self.greeted = true;
@@ -3776,7 +3812,10 @@ impl App {
                     // where the wire message is built, is the real guarantee
                     // that a base64 image never reaches an endpoint that would
                     // garble it.
-                    images: if providers::supports_images(&self.config.llm.provider) {
+                    images: if providers::supports_images(
+                        &self.config.llm.provider,
+                        &self.config.llm.model,
+                    ) {
                         message.images.clone()
                     } else {
                         Vec::new()
@@ -7485,6 +7524,67 @@ mod tests {
         type_str(&mut a, "hello");
         a.handle_key(key(KeyCode::Tab));
         assert_eq!(a.input_buffer, "hello    ");
+    }
+
+    /// Shift+Tab (as `BackTab`) flips the default posture to manual, the
+    /// in-memory setting rather than a config write.
+    #[test]
+    fn shift_tab_cycles_from_auto_to_manual() {
+        let mut a = app();
+        assert_eq!(a.config.tools.approval, ApprovalMode::Destructive);
+
+        a.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+
+        assert_eq!(a.config.tools.approval, ApprovalMode::Always);
+    }
+
+    /// A second Shift+Tab returns to auto -- the cycle is a toggle, not a
+    /// one-way switch into the stricter posture.
+    #[test]
+    fn shift_tab_cycles_back_from_manual_to_auto() {
+        let mut a = app();
+        a.config.tools.approval = ApprovalMode::Always;
+
+        a.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+
+        assert_eq!(a.config.tools.approval, ApprovalMode::Destructive);
+    }
+
+    /// Terminals on the kitty keyboard protocol report Shift+Tab as `Tab` with
+    /// the SHIFT modifier instead of `BackTab`; both spellings must cycle.
+    #[test]
+    fn shift_tab_reported_as_tab_with_shift_also_cycles() {
+        let mut a = app();
+
+        a.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+
+        assert_eq!(a.config.tools.approval, ApprovalMode::Always);
+    }
+
+    /// The switch is announced in the transcript, so the change is never a
+    /// silent posture shift.
+    #[test]
+    fn cycling_permission_mode_announces_itself() {
+        let mut a = app();
+        let before = a.messages.len();
+
+        a.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+
+        assert!(a.messages.len() > before, "a system note must be pushed");
+        assert!(matches!(a.messages.last(), Some(Message { role: Role::System, .. })));
+    }
+
+    /// Plan mode is untouched by Shift+Tab: it cycles the approval posture
+    /// (irrelevant while planning) but never exits or enters plan mode.
+    #[test]
+    fn shift_tab_does_not_touch_plan_mode() {
+        let mut a = app();
+        a.mode = Mode::Plan;
+
+        a.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+
+        assert!(a.mode.is_plan(), "plan mode must be left alone");
+        assert_eq!(a.config.tools.approval, ApprovalMode::Always);
     }
 
     /// Prompt history recall must still work exactly as before once the
