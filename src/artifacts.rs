@@ -24,9 +24,34 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// own table -- anything missing there is rejected at signing time anyway, so
 /// checking here only means a clearer message and no wasted round trip.
 const PUBLISHABLE: &[&str] = &[
-    "html", "htm", "css", "js", "mjs", "json", "map", "webmanifest", "csv", "tsv", "txt", "md",
-    "log", "xml", "yml", "yaml", "svg", "png", "jpg", "jpeg", "gif", "webp", "ico", "woff",
-    "woff2", "ttf", "pdf", "wasm",
+    "html",
+    "htm",
+    "css",
+    "js",
+    "mjs",
+    "json",
+    "map",
+    "webmanifest",
+    "csv",
+    "tsv",
+    "txt",
+    "md",
+    "log",
+    "xml",
+    "yml",
+    "yaml",
+    "svg",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp",
+    "ico",
+    "woff",
+    "woff2",
+    "ttf",
+    "pdf",
+    "wasm",
 ];
 
 /// Ceilings, matching the signer's. Checked here as well so an oversized
@@ -133,8 +158,16 @@ fn collect(root: &Path) -> Result<Vec<Candidate>, String> {
         let wrapper = wrap_single(name)?;
         let wrapper_size = file_size(&wrapper)?;
         return Ok(vec![
-            Candidate { source: root.to_path_buf(), key: name.to_string(), size },
-            Candidate { source: wrapper, key: "index.html".to_string(), size: wrapper_size },
+            Candidate {
+                source: root.to_path_buf(),
+                key: name.to_string(),
+                size,
+            },
+            Candidate {
+                source: wrapper,
+                key: "index.html".to_string(),
+                size: wrapper_size,
+            },
         ]);
     }
 
@@ -161,7 +194,8 @@ fn collect(root: &Path) -> Result<Vec<Candidate>, String> {
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<Candidate>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("could not read {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("could not read {}: {e}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -191,7 +225,11 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Candidate>) -> Result<(), String>
             .map(|c| c.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        out.push(Candidate { source: path, key, size });
+        out.push(Candidate {
+            source: path,
+            key,
+            size,
+        });
     }
     Ok(())
 }
@@ -242,7 +280,10 @@ fn wrap_single(name: &str) -> Result<PathBuf, String> {
          <header><strong>{escaped}</strong><a href=\"{escaped}\" download>download</a></header>\n\
          <iframe src=\"{escaped}\"></iframe>\n"
     );
-    let path = std::env::temp_dir().join(format!("covexcode-artifact-index-{}.html", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "covexcode-artifact-index-{}.html",
+        std::process::id()
+    ));
     std::fs::write(&path, html).map_err(|e| format!("could not prepare a viewer page: {e}"))?;
     Ok(path)
 }
@@ -273,7 +314,10 @@ fn load_registry() -> HashMap<String, RegistryEntry> {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The id `path` was last published under, keyed by its canonicalized form
@@ -305,8 +349,12 @@ pub(crate) fn remembered_id(path: &Path) -> Option<String> {
 /// tools that manage it stop being relevant to a workspace that has
 /// genuinely published from before.
 pub(crate) fn any_published_under(root: &Path) -> bool {
-    let Ok(root) = root.canonicalize() else { return false };
-    load_registry().keys().any(|key| Path::new(key).starts_with(&root))
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    load_registry()
+        .keys()
+        .any(|key| Path::new(key).starts_with(&root))
 }
 
 /// The artifact id(s) published at or under `root`, newest publish first
@@ -336,7 +384,9 @@ pub(crate) fn any_published_under(root: &Path) -> bool {
 /// same reason; deliberately not filtered by `EXPIRY_HOURS` like
 /// `all_local` is, though, for the same reasoning as `remembered_id`.
 pub(crate) fn ids_published_under(root: &Path) -> Vec<String> {
-    let Ok(root) = root.canonicalize() else { return Vec::new() };
+    let Ok(root) = root.canonicalize() else {
+        return Vec::new();
+    };
     let mut entries: Vec<(u64, String)> = load_registry()
         .into_iter()
         .filter(|(key, _)| Path::new(key).starts_with(&root))
@@ -366,7 +416,11 @@ pub(crate) fn all_local() -> Vec<(String, String)> {
     // Newest first (what a developer picking up recent work wants); ties
     // broken by path so the order is still deterministic, not by whichever
     // way the HashMap happened to iterate.
-    all.sort_by(|a, b| b.1.published_at.cmp(&a.1.published_at).then_with(|| a.0.cmp(&b.0)));
+    all.sort_by(|a, b| {
+        b.1.published_at
+            .cmp(&a.1.published_at)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     all.into_iter().map(|(path, e)| (path, e.id)).collect()
 }
 
@@ -375,16 +429,30 @@ pub(crate) fn all_local() -> Vec<(String, String)> {
 /// updating the old one, so every failure here is swallowed rather than
 /// surfaced.
 fn remember(path: &Path, id: &str) {
-    let Some(key) = path.canonicalize().ok().map(|p| p.to_string_lossy().into_owned()) else {
+    let Some(key) = path
+        .canonicalize()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+    else {
         return;
     };
-    let Some(reg_path) = registry_path() else { return };
-    let Some(parent) = reg_path.parent() else { return };
+    let Some(reg_path) = registry_path() else {
+        return;
+    };
+    let Some(parent) = reg_path.parent() else {
+        return;
+    };
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
     let mut map = load_registry();
-    map.insert(key, RegistryEntry { id: id.to_string(), published_at: now_secs() });
+    map.insert(
+        key,
+        RegistryEntry {
+            id: id.to_string(),
+            published_at: now_secs(),
+        },
+    );
     if let Ok(s) = serde_json::to_string_pretty(&map) {
         let _ = std::fs::write(reg_path, s);
     }
@@ -686,7 +754,10 @@ fn rebase_css_urls(input: &[u8], prefix: &str) -> Vec<u8> {
             }
             let val_start = i;
             let val_end = match quote {
-                Some(q) => text[i..].find(q as char).map(|n| i + n).unwrap_or(text.len()),
+                Some(q) => text[i..]
+                    .find(q as char)
+                    .map(|n| i + n)
+                    .unwrap_or(text.len()),
                 None => {
                     let mut k = i;
                     while k < bytes.len() && bytes[k] != b')' && !bytes[k].is_ascii_whitespace() {
@@ -718,7 +789,8 @@ fn rebase_css_urls(input: &[u8], prefix: &str) -> Vec<u8> {
 }
 
 fn extension(name: &str) -> Option<String> {
-    name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase())
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
 }
 
 fn check_extension(name: &str) -> Result<(), String> {
@@ -795,7 +867,10 @@ pub async fn publish(path: &Path, endpoint: &str) -> Result<Published, String> {
 
     let manifest: Vec<ManifestEntry> = files
         .iter()
-        .map(|f| ManifestEntry { path: f.key.clone(), size: f.size })
+        .map(|f| ManifestEntry {
+            path: f.key.clone(),
+            size: f.size,
+        })
         .collect();
     // Republishing the same path sends back the id it got last time, so the
     // signer reuses that S3 prefix instead of minting a new one -- an unknown
@@ -829,7 +904,10 @@ pub async fn publish(path: &Path, endpoint: &str) -> Result<Published, String> {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("the artifact service refused this ({status}): {}", text.trim()));
+        return Err(format!(
+            "the artifact service refused this ({status}): {}",
+            text.trim()
+        ));
     }
     let signed: SignResponse = serde_json::from_str(&text)
         .map_err(|e| format!("the artifact service returned something unexpected ({e})"))?;
@@ -845,15 +923,22 @@ pub async fn publish(path: &Path, endpoint: &str) -> Result<Published, String> {
     let mut prepared = Vec::with_capacity(signed.uploads.len());
     let mut index_len = None;
     for upload in &signed.uploads {
-        let candidate = files
-            .iter()
-            .find(|f| f.key == upload.path)
-            .ok_or_else(|| format!("the service asked for a file that was not offered: {}", upload.path))?;
+        let candidate = files.iter().find(|f| f.key == upload.path).ok_or_else(|| {
+            format!(
+                "the service asked for a file that was not offered: {}",
+                upload.path
+            )
+        })?;
         let bytes = upload_bytes(candidate, &prefix)?;
         if candidate.key == "index.html" {
             index_len = Some(bytes.len());
         }
-        prepared.push((upload.path.clone(), upload.content_type.clone(), upload.url.clone(), bytes));
+        prepared.push((
+            upload.path.clone(),
+            upload.content_type.clone(),
+            upload.url.clone(),
+            bytes,
+        ));
     }
 
     // The PUTs have no ordering: each URL is already signed for one object.
@@ -913,13 +998,22 @@ pub async fn publish(path: &Path, endpoint: &str) -> Result<Published, String> {
 /// come back as a reported failure. Same "no-cache" header set on every
 /// upload above is what makes this check meaningful the moment it runs,
 /// not just eventually -- see that header's own comment.
-async fn verify_live(client: &reqwest::Client, url: &str, expected_index_len: Option<usize>) -> bool {
+async fn verify_live(
+    client: &reqwest::Client,
+    url: &str,
+    expected_index_len: Option<usize>,
+) -> bool {
     // Bounded well under the client's own 60s request timeout: this check
     // exists to make a publish more trustworthy, not to let a slow CDN edge
     // make every publish take up to a minute longer. A timeout here reports
     // as unverified, same as any other failure -- never as an error the
     // whole publish has to fail over.
-    let Ok(response) = client.get(url).timeout(Duration::from_secs(10)).send().await else {
+    let Ok(response) = client
+        .get(url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    else {
         return false;
     };
     if !response.status().is_success() {
@@ -942,7 +1036,10 @@ async fn verify_live(client: &reqwest::Client, url: &str, expected_index_len: Op
     // 404s -- a blank screen that reported as confirmed, which is the exact
     // failure this walk exists to catch. Asking for what the served markup
     // asks for is the only way to know.
-    for asset in referenced_assets(html, url).into_iter().take(MAX_VERIFIED_ASSETS) {
+    for asset in referenced_assets(html, url)
+        .into_iter()
+        .take(MAX_VERIFIED_ASSETS)
+    {
         let ok = client
             .get(&asset)
             .timeout(Duration::from_secs(10))
@@ -1030,7 +1127,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1060,7 +1161,11 @@ mod tests {
 <link rel="stylesheet" crossorigin href="/assets/app.css">
 </head><body><div id="root"></div></body></html>"#,
         );
-        write(&dir, "assets/app.js", "console.log('hello from the bundle');\n");
+        write(
+            &dir,
+            "assets/app.js",
+            "console.log('hello from the bundle');\n",
+        );
         write(&dir, "assets/app.css", "body{background:#fff;color:#111}\n");
 
         let published = publish(&dir, "https://covexcode.com/api/artifact")
@@ -1085,7 +1190,9 @@ mod tests {
         let mut checked = 0;
         for attr in ["src=\"", "href=\""] {
             for piece in html.split(attr).skip(1) {
-                let Some(url) = piece.split('"').next() else { continue };
+                let Some(url) = piece.split('"').next() else {
+                    continue;
+                };
                 if !url.starts_with('/') || url.starts_with("//") {
                     continue;
                 }
@@ -1105,7 +1212,10 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 2, "both the script and the stylesheet were checked");
+        assert_eq!(
+            checked, 2,
+            "both the script and the stylesheet were checked"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1137,7 +1247,10 @@ mod tests {
             !broken_ok,
             "the page whose assets all 404 must not report as confirmed live"
         );
-        assert!(fixed_ok, "the rebased page serves its assets and must confirm");
+        assert!(
+            fixed_ok,
+            "the rebased page serves its assets and must confirm"
+        );
     }
 
     // ---- what the post-publish check actually looks at -----------------------
@@ -1146,11 +1259,17 @@ mod tests {
     fn the_origin_and_directory_come_apart_the_way_a_browser_splits_them() {
         assert_eq!(
             split_origin_and_dir("https://covexcode.com/artifacts/k9depef6"),
-            ("https://covexcode.com".to_string(), "/artifacts/".to_string())
+            (
+                "https://covexcode.com".to_string(),
+                "/artifacts/".to_string()
+            )
         );
         assert_eq!(
             split_origin_and_dir("https://covexcode.com/artifacts/k9depef6/"),
-            ("https://covexcode.com".to_string(), "/artifacts/k9depef6/".to_string())
+            (
+                "https://covexcode.com".to_string(),
+                "/artifacts/k9depef6/".to_string()
+            )
         );
         assert_eq!(
             split_origin_and_dir("https://example.test"),
@@ -1252,8 +1371,14 @@ mod tests {
 
     #[test]
     fn the_served_path_is_read_off_the_signed_url() {
-        assert_eq!(served_under("https://covexcode.com/artifacts/k9depef6"), "/artifacts/k9depef6");
-        assert_eq!(served_under("https://covexcode.com/artifacts/k9depef6/"), "/artifacts/k9depef6");
+        assert_eq!(
+            served_under("https://covexcode.com/artifacts/k9depef6"),
+            "/artifacts/k9depef6"
+        );
+        assert_eq!(
+            served_under("https://covexcode.com/artifacts/k9depef6/"),
+            "/artifacts/k9depef6"
+        );
         assert_eq!(served_under("https://example.test/a/b/c"), "/a/b/c");
         // A signer serving from the domain root has no prefix to add, and
         // rebasing must then be a no-op rather than inventing one.
@@ -1282,7 +1407,10 @@ mod tests {
             text.contains(r#"href="/artifacts/k9depef6/assets/index-8NRPCoXr.css""#),
             "{text}"
         );
-        assert!(!text.contains(r#"src="/assets/"#), "the broken form must be gone: {text}");
+        assert!(
+            !text.contains(r#"src="/assets/"#),
+            "the broken form must be gone: {text}"
+        );
     }
 
     /// Another origin's URL is not ours to rewrite. Protocol-relative `//host`
@@ -1298,9 +1426,15 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
 
         assert!(text.contains(r#"href="//fonts.googleapis.com"#), "{text}");
-        assert!(text.contains(r#"href="https://fonts.gstatic.com"#), "{text}");
+        assert!(
+            text.contains(r#"href="https://fonts.gstatic.com"#),
+            "{text}"
+        );
         assert!(text.contains(r#"src="http://example.test"#), "{text}");
-        assert!(!text.contains("/artifacts/abc"), "nothing should have been rewritten: {text}");
+        assert!(
+            !text.contains("/artifacts/abc"),
+            "nothing should have been rewritten: {text}"
+        );
     }
 
     /// Relative URLs do *not* resolve correctly on an artifact URL: there is
@@ -1313,9 +1447,15 @@ mod tests {
         let html = br#"<link rel="stylesheet" href="style.css"><img src="./a/b.png"><script src="assets/app.js">"#;
         let out = rebase_absolute_urls(html, "/artifacts/abc");
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains(r#"href="/artifacts/abc/style.css""#), "{text}");
+        assert!(
+            text.contains(r#"href="/artifacts/abc/style.css""#),
+            "{text}"
+        );
         assert!(text.contains(r#"src="/artifacts/abc/a/b.png""#), "{text}");
-        assert!(text.contains(r#"src="/artifacts/abc/assets/app.js""#), "{text}");
+        assert!(
+            text.contains(r#"src="/artifacts/abc/assets/app.js""#),
+            "{text}"
+        );
         // After rewrite, a browser opening the artifact URL fetches the
         // stylesheet from the prefix -- the path that actually exists --
         // instead of one directory too high.
@@ -1336,8 +1476,14 @@ mod tests {
         let html = br#"<link rel="stylesheet" href="../style.css"><img src="./photo.png">"#;
         let out = rebase_page_urls(html, "/artifacts/abc", "pages/about.html");
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains(r#"href="/artifacts/abc/style.css""#), "{text}");
-        assert!(text.contains(r#"src="/artifacts/abc/pages/photo.png""#), "{text}");
+        assert!(
+            text.contains(r#"href="/artifacts/abc/style.css""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"src="/artifacts/abc/pages/photo.png""#),
+            "{text}"
+        );
     }
 
     /// A stylesheet that assumes it owns the domain root 404s its fonts
@@ -1351,9 +1497,15 @@ body{background:url(/img/bg.png)}
 h1{background:url(logo.png)}"#;
         let out = rebase_css_urls(css, "/artifacts/abc");
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains(r#"url("/artifacts/abc/fonts/figtree.css")"#), "{text}");
+        assert!(
+            text.contains(r#"url("/artifacts/abc/fonts/figtree.css")"#),
+            "{text}"
+        );
         assert!(text.contains("url(/artifacts/abc/img/bg.png)"), "{text}");
-        assert!(text.contains("url(logo.png)"), "relative css urls must be left alone: {text}");
+        assert!(
+            text.contains("url(logo.png)"),
+            "relative css urls must be left alone: {text}"
+        );
     }
 
     /// Republishing HTML that was already rebased (or a page that linked
@@ -1391,7 +1543,10 @@ h1{background:url(logo.png)}"#;
         let bytes = [0xff, 0xfe, b'=', b'"', b'/', b'a', 0x00];
         let out = rebase_absolute_urls(&bytes, "/p");
         // The rewrite still applies (it is byte-wise), and nothing else moved.
-        assert_eq!(out, vec![0xff, 0xfe, b'=', b'"', b'/', b'p', b'/', b'a', 0x00]);
+        assert_eq!(
+            out,
+            vec![0xff, 0xfe, b'=', b'"', b'/', b'p', b'/', b'a', 0x00]
+        );
     }
 
     /// The two transforms compose: assets are rebased and the reload script is
@@ -1401,8 +1556,14 @@ h1{background:url(logo.png)}"#;
         let html = br#"<html><body><script src="/assets/a.js"></script></body></html>"#;
         let out = inject_live_reload(rebase_absolute_urls(html, "/artifacts/abc"));
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains(r#"src="/artifacts/abc/assets/a.js""#), "{text}");
-        assert!(text.contains("location.reload"), "the reload script survived: {text}");
+        assert!(
+            text.contains(r#"src="/artifacts/abc/assets/a.js""#),
+            "{text}"
+        );
+        assert!(
+            text.contains("location.reload"),
+            "the reload script survived: {text}"
+        );
     }
 
     /// Parallel PUTs still send the rebased HTML, not the file on disk.
@@ -1427,7 +1588,10 @@ h1{background:url(logo.png)}"#;
             text.contains("/artifacts/abc/style.css"),
             "relative href must be rebased before the PUT: {text}"
         );
-        assert!(text.contains("location.reload"), "reload script is part of the served bytes: {text}");
+        assert!(
+            text.contains("location.reload"),
+            "reload script is part of the served bytes: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1440,7 +1604,8 @@ h1{background:url(logo.png)}"#;
     }
 
     fn temp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("covexcode-artifact-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("covexcode-artifact-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         dir
@@ -1528,8 +1693,14 @@ h1{background:url(logo.png)}"#;
             assert!(!any_published_under(&dir), "nothing published yet");
 
             remember(&file, "hs3c6cb7");
-            assert!(any_published_under(&dir), "todo.html is published, root should see it");
-            assert!(any_published_under(&file), "the exact published path itself still counts");
+            assert!(
+                any_published_under(&dir),
+                "todo.html is published, root should see it"
+            );
+            assert!(
+                any_published_under(&file),
+                "the exact published path itself still counts"
+            );
 
             let _ = std::fs::remove_dir_all(&dir);
         });
@@ -1546,14 +1717,23 @@ h1{background:url(logo.png)}"#;
             let file = dir.join("todo.html");
             write(&dir, "todo.html", "hi");
 
-            assert!(ids_published_under(&dir).is_empty(), "nothing published yet");
-            assert!(remembered_id(&dir).is_none(), "exact match on the dir must fail too -- sanity check");
+            assert!(
+                ids_published_under(&dir).is_empty(),
+                "nothing published yet"
+            );
+            assert!(
+                remembered_id(&dir).is_none(),
+                "exact match on the dir must fail too -- sanity check"
+            );
 
             remember(&file, "hs3c6cb7");
 
             // The bug: remembered_id on the workspace root itself never
             // finds it, because the registry key is the file, not the dir.
-            assert!(remembered_id(&dir).is_none(), "exact match still fails after publishing");
+            assert!(
+                remembered_id(&dir).is_none(),
+                "exact match still fails after publishing"
+            );
             // The fix: ids_published_under sees through that the same way
             // any_published_under already does.
             assert_eq!(ids_published_under(&dir), vec!["hs3c6cb7".to_string()]);
@@ -1631,7 +1811,10 @@ h1{background:url(logo.png)}"#;
             write(&sibling, "todo.html", "hi");
 
             remember(&sibling.join("todo.html"), "zzz99999");
-            assert!(!any_published_under(&root), "covexcode-other is not under covexcode");
+            assert!(
+                !any_published_under(&root),
+                "covexcode-other is not under covexcode"
+            );
 
             let _ = std::fs::remove_dir_all(&dir);
         });
@@ -1685,7 +1868,11 @@ h1{background:url(logo.png)}"#;
             // picker test in app.rs uses to seed the registry.
             let reg_path = crate::config::Config::config_dir().join("artifacts.json");
             let mut map = load_registry();
-            let stale_key = stale.canonicalize().expect("canonicalize").to_string_lossy().into_owned();
+            let stale_key = stale
+                .canonicalize()
+                .expect("canonicalize")
+                .to_string_lossy()
+                .into_owned();
             map.insert(
                 stale_key,
                 RegistryEntry {
@@ -1693,7 +1880,8 @@ h1{background:url(logo.png)}"#;
                     published_at: now_secs() - (EXPIRY_HOURS as u64 * 3600) - 1,
                 },
             );
-            std::fs::write(&reg_path, serde_json::to_string(&map).expect("serialize")).expect("write");
+            std::fs::write(&reg_path, serde_json::to_string(&map).expect("serialize"))
+                .expect("write");
 
             let all = all_local();
             assert_eq!(all.len(), 1, "{all:?}");
@@ -1711,7 +1899,11 @@ h1{background:url(logo.png)}"#;
         write(&dir, "assets/app.js", "console.log(1)");
         write(&dir, "assets/app.css", "body{}");
 
-        let mut keys: Vec<String> = collect(&dir).expect("collect").into_iter().map(|c| c.key).collect();
+        let mut keys: Vec<String> = collect(&dir)
+            .expect("collect")
+            .into_iter()
+            .map(|c| c.key)
+            .collect();
         keys.sort();
         assert_eq!(keys, vec!["assets/app.css", "assets/app.js", "index.html"]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1724,13 +1916,29 @@ h1{background:url(logo.png)}"#;
     #[test]
     fn a_js_project_root_publishes_its_build_output() {
         let dir = temp("js-root");
-        write(&dir, "package.json", r#"{"name":"app","scripts":{"build":"vite build"}}"#);
-        write(&dir, "index.html", "<script type=module src=/src/main.js></script>");
+        write(
+            &dir,
+            "package.json",
+            r#"{"name":"app","scripts":{"build":"vite build"}}"#,
+        );
+        write(
+            &dir,
+            "index.html",
+            "<script type=module src=/src/main.js></script>",
+        );
         write(&dir, "src/main.js", "import './style.css'");
-        write(&dir, "dist/index.html", r#"<link rel="stylesheet" href="/assets/app.css">"#);
+        write(
+            &dir,
+            "dist/index.html",
+            r#"<link rel="stylesheet" href="/assets/app.css">"#,
+        );
         write(&dir, "dist/assets/app.css", "body{}");
 
-        let mut keys: Vec<String> = collect(&dir).expect("collect").into_iter().map(|c| c.key).collect();
+        let mut keys: Vec<String> = collect(&dir)
+            .expect("collect")
+            .into_iter()
+            .map(|c| c.key)
+            .collect();
         keys.sort();
         assert_eq!(
             keys,
@@ -1746,10 +1954,18 @@ h1{background:url(logo.png)}"#;
     fn a_static_site_with_package_json_is_not_forced_into_a_missing_dist() {
         let dir = temp("static-pkg");
         write(&dir, "package.json", r#"{"name":"site"}"#);
-        write(&dir, "index.html", r#"<link rel="stylesheet" href="style.css">"#);
+        write(
+            &dir,
+            "index.html",
+            r#"<link rel="stylesheet" href="style.css">"#,
+        );
         write(&dir, "style.css", "body{}");
 
-        let mut keys: Vec<String> = collect(&dir).expect("collect").into_iter().map(|c| c.key).collect();
+        let mut keys: Vec<String> = collect(&dir)
+            .expect("collect")
+            .into_iter()
+            .map(|c| c.key)
+            .collect();
         keys.sort();
         assert_eq!(keys, vec!["index.html", "package.json", "style.css"]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1765,7 +1981,11 @@ h1{background:url(logo.png)}"#;
         write(&dir, ".git/config", "[core]");
         write(&dir, "node_modules/left-pad/index.js", "module.exports=1");
 
-        let keys: Vec<String> = collect(&dir).expect("collect").into_iter().map(|c| c.key).collect();
+        let keys: Vec<String> = collect(&dir)
+            .expect("collect")
+            .into_iter()
+            .map(|c| c.key)
+            .collect();
         assert_eq!(keys, vec!["index.html"], "got {keys:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1785,7 +2005,10 @@ h1{background:url(logo.png)}"#;
         let files = collect(&dir.join("data.csv")).expect("collect");
         let keys: Vec<&str> = files.iter().map(|c| c.key.as_str()).collect();
         assert!(keys.contains(&"data.csv"), "{keys:?}");
-        assert!(keys.contains(&"index.html"), "a lone CSV needs a viewer page: {keys:?}");
+        assert!(
+            keys.contains(&"index.html"),
+            "a lone CSV needs a viewer page: {keys:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1798,7 +2021,10 @@ h1{background:url(logo.png)}"#;
         write(&dir, "style.css", "body{}");
         let error = collect(&dir).expect_err("should refuse");
         assert!(error.contains("no index.html"), "{error}");
-        assert!(error.contains("dist/"), "should say where to point instead: {error}");
+        assert!(
+            error.contains("dist/"),
+            "should say where to point instead: {error}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1813,9 +2039,15 @@ h1{background:url(logo.png)}"#;
         assert!(error.contains("per-file limit"), "{error}");
 
         let many: Vec<Candidate> = (0..MAX_FILES + 1)
-            .map(|i| Candidate { source: PathBuf::from("x"), key: format!("{i}.js"), size: 1 })
+            .map(|i| Candidate {
+                source: PathBuf::from("x"),
+                key: format!("{i}.js"),
+                size: 1,
+            })
             .collect();
-        assert!(check_limits(&many).expect_err("should refuse").contains("at most"));
+        assert!(check_limits(&many)
+            .expect_err("should refuse")
+            .contains("at most"));
     }
 
     #[test]
@@ -1823,7 +2055,10 @@ h1{background:url(logo.png)}"#;
         assert!(check_extension("app.exe").is_err());
         assert!(check_extension("noextension").is_err());
         assert!(check_extension("chart.svg").is_ok());
-        assert!(check_extension("DATA.CSV").is_ok(), "extensions are case-insensitive");
+        assert!(
+            check_extension("DATA.CSV").is_ok(),
+            "extensions are case-insensitive"
+        );
     }
 
     /// Empty rather than a panic, and with a message that says what to set.
@@ -1854,7 +2089,11 @@ h1{background:url(logo.png)}"#;
             let _ = socket.read(&mut buf).await;
             let response = [
                 status_line.as_bytes(),
-                format!("\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).as_bytes(),
+                format!(
+                    "\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
                 body,
             ]
             .concat();
@@ -1923,7 +2162,11 @@ mod live_check {
         let dir = std::env::temp_dir().join("covexcode-live-artifact");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("assets")).unwrap();
-        std::fs::write(dir.join("index.html"), "<h1>live</h1><script src=assets/app.js></script>").unwrap();
+        std::fs::write(
+            dir.join("index.html"),
+            "<h1>live</h1><script src=assets/app.js></script>",
+        )
+        .unwrap();
         std::fs::write(dir.join("assets/app.js"), "console.log('spa')").unwrap();
         std::fs::write(dir.join("data.csv"), "a,b\n1,2\n").unwrap();
 
@@ -1934,18 +2177,32 @@ mod live_check {
         }
         let published = publish(&dir, &endpoint).await.expect("publish");
         println!("PUBLISHED_URL={}", published.url);
-        println!("files={} bytes={} expires={}h", published.files, published.bytes, published.expires_in_hours);
+        println!(
+            "files={} bytes={} expires={}h",
+            published.files, published.bytes, published.expires_in_hours
+        );
         // publish() already did this exact check against the real bucket and
         // CDN; asserting it here confirms verify_live's own logic (unit-
         // tested above against a fake server) also holds against the real
         // one, not just a stand-in.
-        assert!(published.verified, "publish()'s own live read-back failed against the real infra");
+        assert!(
+            published.verified,
+            "publish()'s own live read-back failed against the real infra"
+        );
 
         // Confirms the live-reload script actually reaches a real visitor's
         // browser through the real CDN, not just that inject_live_reload's
         // own unit tests are internally consistent.
-        let body = reqwest::get(&published.url).await.expect("fetch published page").text().await.expect("body");
-        assert!(body.contains(LIVE_RELOAD_SCRIPT), "published page missing live-reload script: {body}");
+        let body = reqwest::get(&published.url)
+            .await
+            .expect("fetch published page")
+            .text()
+            .await
+            .expect("body");
+        assert!(
+            body.contains(LIVE_RELOAD_SCRIPT),
+            "published page missing live-reload script: {body}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

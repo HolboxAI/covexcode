@@ -340,7 +340,10 @@ fn installer_command(script_path: &std::path::Path, windows: bool) -> Command {
     cmd
 }
 
-async fn fetch_installer(client: &reqwest::Client, windows: bool) -> Result<String, Box<dyn Error>> {
+async fn fetch_installer(
+    client: &reqwest::Client,
+    windows: bool,
+) -> Result<String, Box<dyn Error>> {
     let url = raw_url(installer_filename(windows));
     let response = client
         .get(&url)
@@ -353,7 +356,11 @@ async fn fetch_installer(client: &reqwest::Client, windows: bool) -> Result<Stri
     }
     let body = response.text().await?;
     if !looks_like_installer(&body, windows) {
-        return Err(format!("downloaded {} does not look like the installer", installer_filename(windows)).into());
+        return Err(format!(
+            "downloaded {} does not look like the installer",
+            installer_filename(windows)
+        )
+        .into());
     }
     Ok(body)
 }
@@ -460,7 +467,11 @@ mod tests {
     /// launch, not once and then not again until tomorrow.
     #[tokio::test]
     async fn a_pending_update_is_offered_on_every_launch() {
-        let base = serve_repo("[package]\nversion = \"99.9.9\"\n".to_string(), String::new()).await;
+        let base = serve_repo(
+            "[package]\nversion = \"99.9.9\"\n".to_string(),
+            String::new(),
+        )
+        .await;
         let dir = cache_dir("every");
         let cache = dir.join("latest_known_version");
 
@@ -470,14 +481,26 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(first.as_deref(), Some("99.9.9"));
-        assert_eq!(second.as_deref(), Some("99.9.9"), "the second launch went quiet");
-        assert_eq!(third.as_deref(), Some("99.9.9"), "the third launch went quiet");
+        assert_eq!(
+            second.as_deref(),
+            Some("99.9.9"),
+            "the second launch went quiet"
+        );
+        assert_eq!(
+            third.as_deref(),
+            Some("99.9.9"),
+            "the third launch went quiet"
+        );
     }
 
     /// The version the user already has must not be offered to them.
     #[tokio::test]
     async fn the_current_version_is_not_offered_as_an_update() {
-        let base = serve_repo(format!("[package]\nversion = \"{CURRENT}\"\n"), String::new()).await;
+        let base = serve_repo(
+            format!("[package]\nversion = \"{CURRENT}\"\n"),
+            String::new(),
+        )
+        .await;
         let dir = cache_dir("same");
         let cache = dir.join("latest_known_version");
 
@@ -507,7 +530,11 @@ mod tests {
     /// silently stop reporting an update the previous launch already knew of.
     #[tokio::test]
     async fn an_update_already_found_survives_going_offline() {
-        let base = serve_repo("[package]\nversion = \"99.9.9\"\n".to_string(), String::new()).await;
+        let base = serve_repo(
+            "[package]\nversion = \"99.9.9\"\n".to_string(),
+            String::new(),
+        )
+        .await;
         let dir = cache_dir("cached");
         let cache = dir.join("latest_known_version");
 
@@ -516,7 +543,11 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(online.as_deref(), Some("99.9.9"));
-        assert_eq!(offline.as_deref(), Some("99.9.9"), "the cache did not answer");
+        assert_eq!(
+            offline.as_deref(),
+            Some("99.9.9"),
+            "the cache did not answer"
+        );
     }
 
     /// The cache must not outlive its usefulness: once the endpoint says the
@@ -527,14 +558,21 @@ mod tests {
         let cache = dir.join("latest_known_version");
         std::fs::write(&cache, "99.9.9").expect("seed");
 
-        let base = serve_repo(format!("[package]\nversion = \"{CURRENT}\"\n"), String::new()).await;
+        let base = serve_repo(
+            format!("[package]\nversion = \"{CURRENT}\"\n"),
+            String::new(),
+        )
+        .await;
         let verdict = check_against(&base, &cache).await;
         // And the next offline launch is quiet too, not just this one.
         let offline = check_against("http://127.0.0.1:1", &cache).await;
 
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(verdict, None, "a version the user has must not be offered");
-        assert_eq!(offline, None, "the stale entry outlived the check that disproved it");
+        assert_eq!(
+            offline, None,
+            "the stale entry outlived the check that disproved it"
+        );
     }
 
     /// A cache naming a version already installed answers nothing, however it
@@ -549,10 +587,18 @@ mod tests {
         assert_eq!(cached_update(&cache).as_deref(), Some("99.9.9"));
 
         std::fs::write(&cache, CURRENT).expect("write");
-        assert_eq!(cached_update(&cache), None, "the installed version is not an update");
+        assert_eq!(
+            cached_update(&cache),
+            None,
+            "the installed version is not an update"
+        );
 
         std::fs::write(&cache, "0.0.1").expect("write");
-        assert_eq!(cached_update(&cache), None, "an older version is not an update");
+        assert_eq!(
+            cached_update(&cache),
+            None,
+            "an older version is not an update"
+        );
 
         std::fs::write(&cache, "   \n").expect("write");
         assert_eq!(cached_update(&cache), None, "a blank cache says nothing");
@@ -576,7 +622,11 @@ mod tests {
         assert!(version_is_newer("2026-08-13", CURRENT));
 
         let cache = dir.join("latest_known_version");
-        assert_eq!(cached_update(&cache), None, "the day-stamp must not be read");
+        assert_eq!(
+            cached_update(&cache),
+            None,
+            "the day-stamp must not be read"
+        );
 
         remember_latest(&cache, "99.9.9");
         let swept = !legacy.exists();
@@ -598,7 +648,10 @@ mod tests {
         assert!(!version_is_newer("1.9.0", "1.10.0"));
         assert!(!version_is_newer("1.10.0", "1.10.0"));
         // The string comparison this guards against, stated.
-        assert!("1.10.0" < "1.6.2", "the trap is real, and it is why this test exists");
+        assert!(
+            "1.10.0" < "1.6.2",
+            "the trap is real, and it is why this test exists"
+        );
     }
 
     #[test]
@@ -631,7 +684,10 @@ version = \"9.9.9\"
 
     #[test]
     fn missing_package_version_is_none() {
-        assert_eq!(parse_package_version("[dependencies]\nversion = \"1.0\"\n"), None);
+        assert_eq!(
+            parse_package_version("[dependencies]\nversion = \"1.0\"\n"),
+            None
+        );
         assert_eq!(parse_package_version(""), None);
     }
 
@@ -673,7 +729,10 @@ version = \"9.9.9\"
             join_url(&github, "install.sh"),
             "https://raw.githubusercontent.com/HolboxAI/covexcode/main/install.sh"
         );
-        assert_eq!(join_url("http://mirror.internal/", "Cargo.toml"), "http://mirror.internal/Cargo.toml");
+        assert_eq!(
+            join_url("http://mirror.internal/", "Cargo.toml"),
+            "http://mirror.internal/Cargo.toml"
+        );
     }
 
     #[test]
@@ -692,10 +751,19 @@ version = \"9.9.9\"
 
     #[test]
     fn only_a_real_installer_reaches_bash() {
-        assert!(looks_like_installer("#!/bin/bash\ninstall covexcode\n", false));
-        assert!(looks_like_installer("#!/bin/bash\ninstall boxcode\n", false));
+        assert!(looks_like_installer(
+            "#!/bin/bash\ninstall covexcode\n",
+            false
+        ));
+        assert!(looks_like_installer(
+            "#!/bin/bash\ninstall boxcode\n",
+            false
+        ));
         // What a captive portal or an error page would return.
-        assert!(!looks_like_installer("<html><body>Sign in to continue</body></html>", false));
+        assert!(!looks_like_installer(
+            "<html><body>Sign in to continue</body></html>",
+            false
+        ));
         assert!(!looks_like_installer("404: Not Found", false));
         // Right shebang, wrong script.
         assert!(!looks_like_installer("#!/bin/bash\nrm -rf /\n", false));
@@ -707,12 +775,24 @@ version = \"9.9.9\"
     /// a captive-portal page or an error blob to PowerShell instead.
     #[test]
     fn only_a_real_installer_reaches_powershell() {
-        assert!(looks_like_installer("# covexcode installer\nWrite-Host 'hi'\n", true));
-        assert!(looks_like_installer("# boxcode installer\nWrite-Host 'hi'\n", true));
-        assert!(!looks_like_installer("<html><body>Sign in to continue</body></html>", true));
+        assert!(looks_like_installer(
+            "# covexcode installer\nWrite-Host 'hi'\n",
+            true
+        ));
+        assert!(looks_like_installer(
+            "# boxcode installer\nWrite-Host 'hi'\n",
+            true
+        ));
+        assert!(!looks_like_installer(
+            "<html><body>Sign in to continue</body></html>",
+            true
+        ));
         assert!(!looks_like_installer("404: Not Found", true));
         // Right leading comment, wrong script.
-        assert!(!looks_like_installer("# just a comment\nRemove-Item -Recurse C:\\\n", true));
+        assert!(!looks_like_installer(
+            "# just a comment\nRemove-Item -Recurse C:\\\n",
+            true
+        ));
         assert!(!looks_like_installer("", true));
     }
 
@@ -736,7 +816,13 @@ version = \"9.9.9\"
         let windows_args: Vec<_> = windows_cmd.get_args().collect();
         assert_eq!(
             windows_args,
-            vec!["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.to_str().unwrap()]
+            vec![
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                script.to_str().unwrap()
+            ]
         );
     }
 
@@ -792,7 +878,8 @@ version = \"9.9.9\"
             "#!/bin/bash\n# stand-in for the covexcode installer\necho ran > \"{}\"\n",
             marker.display()
         );
-        let manifest = |version: &str| format!("[package]\nname = \"covexcode\"\nversion = \"{version}\"\n");
+        let manifest =
+            |version: &str| format!("[package]\nname = \"covexcode\"\nversion = \"{version}\"\n");
         let ran = || marker.exists();
         let reset = || {
             let _ = std::fs::remove_file(&marker);
@@ -809,14 +896,18 @@ version = \"9.9.9\"
         reset();
         let base = serve_repo(manifest(CURRENT), installer.clone()).await;
         std::env::set_var(URL_BASE_ENV, &base);
-        run_for(false, false).await.expect("up-to-date check should succeed");
+        run_for(false, false)
+            .await
+            .expect("up-to-date check should succeed");
         assert!(!ran(), "an up-to-date build must not reinstall");
 
         // ...unless --force is given.
         reset();
         let base = serve_repo(manifest(CURRENT), installer.clone()).await;
         std::env::set_var(URL_BASE_ENV, &base);
-        run_for(true, false).await.expect("forced upgrade should succeed");
+        run_for(true, false)
+            .await
+            .expect("forced upgrade should succeed");
         assert!(ran(), "--force should reinstall even when up to date");
 
         // A body that isn't the installer must never be executed.
@@ -864,7 +955,8 @@ version = \"9.9.9\"
             return;
         };
 
-        let shim_dir = std::env::temp_dir().join(format!("covexcode-pwsh-shim-{}", std::process::id()));
+        let shim_dir =
+            std::env::temp_dir().join(format!("covexcode-pwsh-shim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&shim_dir);
         std::fs::create_dir_all(&shim_dir).expect("create shim dir");
         let shim_path = shim_dir.join("powershell.exe");
@@ -873,8 +965,10 @@ version = \"9.9.9\"
         #[cfg(not(unix))]
         std::fs::copy(&real_interpreter, &shim_path).expect("copy shim");
 
-        let marker =
-            std::env::temp_dir().join(format!("covexcode-upgrade-windows-test-{}", std::process::id()));
+        let marker = std::env::temp_dir().join(format!(
+            "covexcode-upgrade-windows-test-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&marker);
         // PowerShell, not batch: `install.ps1` is what actually ships.
         let installer = format!(
@@ -884,7 +978,8 @@ version = \"9.9.9\"
         let manifest = "[package]\nname = \"covexcode\"\nversion = \"99.0.0\"\n";
         let base = serve_repo(manifest.to_string(), installer).await;
 
-        let script_path = std::env::temp_dir().join(format!("covexcode-install-{}.ps1", std::process::id()));
+        let script_path =
+            std::env::temp_dir().join(format!("covexcode-install-{}.ps1", std::process::id()));
         // Mirrors fetch_installer's download, minus the HTTP round trip --
         // the point of this test is proving the *interpreter invocation*
         // works for real, which fetch_installer's own logic already has
@@ -917,8 +1012,14 @@ version = \"9.9.9\"
         let _ = std::fs::remove_file(&script_path);
         let _ = std::fs::remove_dir_all(&shim_dir);
 
-        assert!(status.success(), "the real PowerShell interpreter should have run the stand-in installer");
-        assert!(marker.exists(), "the stand-in installer should have run and left its marker");
+        assert!(
+            status.success(),
+            "the real PowerShell interpreter should have run the stand-in installer"
+        );
+        assert!(
+            marker.exists(),
+            "the stand-in installer should have run and left its marker"
+        );
         let _ = std::fs::remove_file(&marker);
     }
 }

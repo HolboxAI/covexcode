@@ -239,10 +239,7 @@ impl HeadlessSession {
     /// because the handshake spawns a process and can take seconds. Returns the
     /// problems so the caller can surface them; a server that fails to start must
     /// not cost you the ones that work.
-    pub async fn connect_mcp(
-        &mut self,
-        configs: &[crate::mcp::McpServerConfig],
-    ) -> Vec<String> {
+    pub async fn connect_mcp(&mut self, configs: &[crate::mcp::McpServerConfig]) -> Vec<String> {
         let (registry, problems) = crate::mcp::McpRegistry::connect_all(configs).await;
         self.mcp = registry;
         problems
@@ -350,7 +347,8 @@ impl HeadlessSession {
         }
 
         loop {
-            let budget_left = self.config.tools.max_steps == 0 || self.tool_steps < self.config.tools.max_steps;
+            let budget_left =
+                self.config.tools.max_steps == 0 || self.tool_steps < self.config.tools.max_steps;
             if !budget_left {
                 // Same reasoning as agent::fire_request: withholding the
                 // schemas is what actually stops a runaway loop, not asking
@@ -363,16 +361,25 @@ impl HeadlessSession {
                     self.active_plan.is_some(),
                     false, // no deploy tool in v1 -- see module docs
                     false, // published-artifact detection not wired yet
-                    true, // check_in_browser -- the one action only an ACP client can fulfill
+                    true,  // check_in_browser -- the one action only an ACP client can fulfill
                     tools::SchemaDiet::for_workspace(self.workspace.root()),
                 )
             } else {
                 Vec::new()
             };
-            let system = tools::system_prompt(&self.workspace, &self.config.tools, self.tool_steps, self.mode);
+            let system = tools::system_prompt(
+                &self.workspace,
+                &self.config.tools,
+                self.tool_steps,
+                self.mode,
+            );
             let mut history = self.messages.clone();
             history.insert(0, ChatMessage::text("system", system));
-            if let Some(status) = tools::turn_status(&self.config.tools, self.tool_steps, self.active_plan.as_ref()) {
+            if let Some(status) = tools::turn_status(
+                &self.config.tools,
+                self.tool_steps,
+                self.active_plan.as_ref(),
+            ) {
                 history.push(ChatMessage::text("user", status));
             }
 
@@ -384,7 +391,9 @@ impl HeadlessSession {
                 RoundOutcome::Error(message) => {
                     let _ = updates
                         .send(SessionUpdate::AgentMessageChunk {
-                            content: ContentBlock::Text { text: format!("Error: {message}") },
+                            content: ContentBlock::Text {
+                                text: format!("Error: {message}"),
+                            },
                             message_id: None,
                         })
                         .await;
@@ -392,8 +401,9 @@ impl HeadlessSession {
                 }
                 RoundOutcome::ToolCalls(calls) => {
                     self.tool_steps += 1;
-                    let outcomes =
-                        self.decide_and_run(calls, updates, permissions, browser, browser_interact).await;
+                    let outcomes = self
+                        .decide_and_run(calls, updates, permissions, browser, browser_interact)
+                        .await;
                     // An image attached below rides in `self.messages` for
                     // exactly one round: it needs to be there for the very
                     // next `run_one_round` call so the model can react to
@@ -441,7 +451,9 @@ impl HeadlessSession {
                         if !images.is_empty() && images_supported {
                             self.messages.push(ChatMessage {
                                 role: "user".to_string(),
-                                content: Some("Screenshot from the browser check above:".to_string()),
+                                content: Some(
+                                    "Screenshot from the browser check above:".to_string(),
+                                ),
                                 tool_calls: Vec::new(),
                                 tool_call_id: None,
                                 images,
@@ -571,7 +583,8 @@ impl HeadlessSession {
                 let action = tools::describe_action(&calls[i]);
                 let is_write_or_edit = matches!(
                     &action,
-                    Some(crate::tools::Action::Write { .. }) | Some(crate::tools::Action::Edit { .. })
+                    Some(crate::tools::Action::Write { .. })
+                        | Some(crate::tools::Action::Edit { .. })
                 );
                 let is_read = matches!(
                     &action,
@@ -599,7 +612,9 @@ impl HeadlessSession {
                             title: None,
                             kind: None,
                             status: Some(ToolCallStatus::Failed),
-                            content: Some(ToolCallContent::Text { text: reason.clone() }),
+                            content: Some(ToolCallContent::Text {
+                                text: reason.clone(),
+                            }),
                         }))
                         .await;
                     results.push((calls[i].id.clone(), reason, Vec::new()));
@@ -691,7 +706,9 @@ impl HeadlessSession {
                             title: None,
                             kind: None,
                             status: Some(ToolCallStatus::Failed),
-                            content: Some(ToolCallContent::Text { text: reason.clone() }),
+                            content: Some(ToolCallContent::Text {
+                                text: reason.clone(),
+                            }),
                         }))
                         .await;
                     reason
@@ -713,7 +730,8 @@ impl HeadlessSession {
                     // same way `Action::Agent` is intercepted below rather
                     // than offered to `tools::execute`.
                     if let Some(Action::CheckInBrowser { url }) = &action {
-                        let (text, screenshot_images) = self.check_browser(call, url, updates, browser).await;
+                        let (text, screenshot_images) =
+                            self.check_browser(call, url, updates, browser).await;
                         images = screenshot_images;
                         text
                     } else {
@@ -727,7 +745,8 @@ impl HeadlessSession {
                                 status: ToolCallStatus::InProgress,
                             }))
                             .await;
-                        let mut outcome = tools::execute(call, &self.workspace, &self.config.tools).await;
+                        let mut outcome =
+                            tools::execute(call, &self.workspace, &self.config.tools).await;
                         // Same call, same place in the flow as
                         // `App::push_tool_outcome`'s own -- before the
                         // outcome is taken apart, since `.content` moves out
@@ -735,12 +754,16 @@ impl HeadlessSession {
                         if let Some(record) = outcome.rollback.take() {
                             self.rollback.record_turn(record, self.turn);
                         }
-                        let _ = updates.send(SessionUpdate::ToolCallUpdate((&outcome).into())).await;
+                        let _ = updates
+                            .send(SessionUpdate::ToolCallUpdate((&outcome).into()))
+                            .await;
                         outcome.content
                     }
                 }
                 Verdict::Ask(action) => {
-                    if action.label() == "agent" || matches!(action, crate::tools::Action::Agent { .. }) {
+                    if action.label() == "agent"
+                        || matches!(action, crate::tools::Action::Agent { .. })
+                    {
                         // No subagents in v1 -- see module docs.
                         "Subagents aren't supported in this session yet.".to_string()
                     } else {
@@ -867,8 +890,15 @@ impl HeadlessSession {
             ],
         };
         let (respond, receive) = oneshot::channel();
-        if permissions.send(PermissionAsk { request, respond }).await.is_err() {
-            return ("The client disconnected before answering.".to_string(), Vec::new());
+        if permissions
+            .send(PermissionAsk { request, respond })
+            .await
+            .is_err()
+        {
+            return (
+                "The client disconnected before answering.".to_string(),
+                Vec::new(),
+            );
         }
         let outcome = receive.await;
 
@@ -888,7 +918,9 @@ impl HeadlessSession {
                 kind: "function".to_string(),
                 function: llm::FunctionCall {
                     name: crate::tools::WRITE_FILE.to_string(),
-                    arguments: serde_json::json!({ "path": path.as_str(), "content": new_text.as_str() }).to_string(),
+                    arguments:
+                        serde_json::json!({ "path": path.as_str(), "content": new_text.as_str() })
+                            .to_string(),
                 },
             };
             let mut applied = tools::execute(&synthetic, &self.workspace, &self.config.tools).await;
@@ -927,7 +959,12 @@ impl HeadlessSession {
             // Reaching this point already means `verdict_for` classified the
             // call as `Dangerous` and the user allowed it. Nothing below
             // re-checks that, and no call runs that was not approved.
-            if let Action::Mcp { server, tool, arguments } = action {
+            if let Action::Mcp {
+                server,
+                tool,
+                arguments,
+            } = action
+            {
                 let (result, ok) = match self.mcp.client_mut(server) {
                     None => (
                         format!(
@@ -937,9 +974,7 @@ impl HeadlessSession {
                     ),
                     Some(client) => match client.call_tool(tool, arguments.clone()).await {
                         Ok(text) => (text, true),
-                        Err(err) => {
-                            (format!("{server} could not run `{tool}`: {err}"), false)
-                        }
+                        Err(err) => (format!("{server} could not run `{tool}`: {err}"), false),
                     },
                 };
                 let _ = updates
@@ -952,7 +987,9 @@ impl HeadlessSession {
                         } else {
                             ToolCallStatus::Failed
                         }),
-                        content: Some(ToolCallContent::Text { text: result.clone() }),
+                        content: Some(ToolCallContent::Text {
+                            text: result.clone(),
+                        }),
                     }))
                     .await;
                 return (result, Vec::new());
@@ -961,7 +998,9 @@ impl HeadlessSession {
             if let Some(record) = outcome.rollback.take() {
                 self.rollback.record_turn(record, self.turn);
             }
-            let _ = updates.send(SessionUpdate::ToolCallUpdate((&outcome).into())).await;
+            let _ = updates
+                .send(SessionUpdate::ToolCallUpdate((&outcome).into()))
+                .await;
             (outcome.content, Vec::new())
         } else {
             let _ = updates
@@ -970,7 +1009,9 @@ impl HeadlessSession {
                     title: None,
                     kind: None,
                     status: Some(ToolCallStatus::Failed),
-                    content: Some(ToolCallContent::Text { text: "Refused by user.".to_string() }),
+                    content: Some(ToolCallContent::Text {
+                        text: "Refused by user.".to_string(),
+                    }),
                 }))
                 .await;
             ("The user declined this action.".to_string(), Vec::new())
@@ -1018,8 +1059,15 @@ impl HeadlessSession {
             ],
         };
         let (respond, receive) = oneshot::channel();
-        if permissions.send(PermissionAsk { request, respond }).await.is_err() {
-            return ("The client disconnected before answering.".to_string(), Vec::new());
+        if permissions
+            .send(PermissionAsk { request, respond })
+            .await
+            .is_err()
+        {
+            return (
+                "The client disconnected before answering.".to_string(),
+                Vec::new(),
+            );
         }
         let outcome = receive.await;
         let decision: Decision = match outcome {
@@ -1053,7 +1101,9 @@ impl HeadlessSession {
                     self.active_plan = Some(plan);
                     let approved = tools::plan_approved(call, &shown, steps);
                     let content = approved.content.clone();
-                    let _ = updates.send(SessionUpdate::ToolCallUpdate((&approved).into())).await;
+                    let _ = updates
+                        .send(SessionUpdate::ToolCallUpdate((&approved).into()))
+                        .await;
                     (content, Vec::new())
                 }
                 Err(reason) => {
@@ -1065,7 +1115,9 @@ impl HeadlessSession {
                             title: Some(format!("plan: {}", proposal.title)),
                             kind: None,
                             status: Some(ToolCallStatus::Completed),
-                            content: Some(ToolCallContent::Text { text: content.clone() }),
+                            content: Some(ToolCallContent::Text {
+                                text: content.clone(),
+                            }),
                         }))
                         .await;
                     (content, Vec::new())
@@ -1074,7 +1126,9 @@ impl HeadlessSession {
         } else {
             let declined = tools::plan_declined(call);
             let content = declined.content.clone();
-            let _ = updates.send(SessionUpdate::ToolCallUpdate((&declined).into())).await;
+            let _ = updates
+                .send(SessionUpdate::ToolCallUpdate((&declined).into()))
+                .await;
             (content, Vec::new())
         }
     }
@@ -1111,9 +1165,16 @@ impl HeadlessSession {
             .await;
 
         let (respond, receive) = oneshot::channel();
-        let ask = BrowserCheckAsk { session_id: self.session_id.clone(), url: url.to_string(), respond };
+        let ask = BrowserCheckAsk {
+            session_id: self.session_id.clone(),
+            url: url.to_string(),
+            respond,
+        };
         if browser.send(ask).await.is_err() {
-            return ("The client disconnected before taking the screenshot.".to_string(), Vec::new());
+            return (
+                "The client disconnected before taking the screenshot.".to_string(),
+                Vec::new(),
+            );
         }
         // Defense in depth, not the primary fix: the client's own CDP
         // commands (extension.ts's CdpClient.send) now carry their own
@@ -1138,18 +1199,28 @@ impl HeadlessSession {
         };
 
         match result {
-            BrowserCheckResult::Screenshot { mime_type, data, ax_tree } => {
+            BrowserCheckResult::Screenshot {
+                mime_type,
+                data,
+                ax_tree,
+            } => {
                 let _ = updates
                     .send(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                         tool_call_id: ToolCallId(call.id.clone()),
                         title: None,
                         kind: None,
                         status: Some(ToolCallStatus::Completed),
-                        content: Some(ToolCallContent::Image { mime_type: mime_type.clone(), data: data.clone() }),
+                        content: Some(ToolCallContent::Image {
+                            mime_type: mime_type.clone(),
+                            data: data.clone(),
+                        }),
                     }))
                     .await;
                 let images = if self.config.tools.attach_browser_screenshots {
-                    vec![llm::ImageAttachment { mime_type, data_base64: data }]
+                    vec![llm::ImageAttachment {
+                        mime_type,
+                        data_base64: data,
+                    }]
                 } else {
                     Vec::new()
                 };
@@ -1168,10 +1239,15 @@ impl HeadlessSession {
                         title: None,
                         kind: None,
                         status: Some(ToolCallStatus::Failed),
-                        content: Some(ToolCallContent::Text { text: reason.clone() }),
+                        content: Some(ToolCallContent::Text {
+                            text: reason.clone(),
+                        }),
                     }))
                     .await;
-                (format!("Could not check {url} in the browser: {reason}"), Vec::new())
+                (
+                    format!("Could not check {url} in the browser: {reason}"),
+                    Vec::new(),
+                )
             }
         }
     }
@@ -1208,34 +1284,47 @@ impl HeadlessSession {
             respond,
         };
         if browser_interact.send(ask).await.is_err() {
-            return ("The client disconnected before performing the interaction.".to_string(), Vec::new());
+            return (
+                "The client disconnected before performing the interaction.".to_string(),
+                Vec::new(),
+            );
         }
         // Same 90s bound as `check_browser`, same reasoning -- see that
         // method's own doc comment.
         const BROWSER_INTERACT_TIMEOUT: Duration = Duration::from_secs(90);
         let result = match tokio::time::timeout(BROWSER_INTERACT_TIMEOUT, receive).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => {
-                BrowserInteractResult::Failed("The client disconnected before responding.".to_string())
-            }
+            Ok(Err(_)) => BrowserInteractResult::Failed(
+                "The client disconnected before responding.".to_string(),
+            ),
             Err(_) => BrowserInteractResult::Failed(
                 "Timed out waiting for the client to respond.".to_string(),
             ),
         };
 
         match result {
-            BrowserInteractResult::Screenshot { mime_type, data, ax_tree } => {
+            BrowserInteractResult::Screenshot {
+                mime_type,
+                data,
+                ax_tree,
+            } => {
                 let _ = updates
                     .send(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                         tool_call_id: ToolCallId(call.id.clone()),
                         title: None,
                         kind: None,
                         status: Some(ToolCallStatus::Completed),
-                        content: Some(ToolCallContent::Image { mime_type: mime_type.clone(), data: data.clone() }),
+                        content: Some(ToolCallContent::Image {
+                            mime_type: mime_type.clone(),
+                            data: data.clone(),
+                        }),
                     }))
                     .await;
                 let images = if self.config.tools.attach_browser_screenshots {
-                    vec![llm::ImageAttachment { mime_type, data_base64: data }]
+                    vec![llm::ImageAttachment {
+                        mime_type,
+                        data_base64: data,
+                    }]
                 } else {
                     Vec::new()
                 };
@@ -1258,10 +1347,15 @@ impl HeadlessSession {
                         title: None,
                         kind: None,
                         status: Some(ToolCallStatus::Failed),
-                        content: Some(ToolCallContent::Text { text: reason.clone() }),
+                        content: Some(ToolCallContent::Text {
+                            text: reason.clone(),
+                        }),
                     }))
                     .await;
-                (format!("Could not {} in {url}: {reason}", interaction.describe()), Vec::new())
+                (
+                    format!("Could not {} in {url}: {reason}", interaction.describe()),
+                    Vec::new(),
+                )
             }
         }
     }
@@ -1311,8 +1405,11 @@ impl HeadlessSession {
             }
         }
 
-        self.messages.push(ChatMessage::text("user", report.notice()));
-        crate::protocol::RollbackResponse { summary: report.summary() }
+        self.messages
+            .push(ChatMessage::text("user", report.notice()));
+        crate::protocol::RollbackResponse {
+            summary: report.summary(),
+        }
     }
 
     /// `session/list_changes` -- a read-only peek at what `/rollback` would
@@ -1455,13 +1552,29 @@ mod tests {
         let (browser_tx, _browser_rx) = mpsc::channel(16);
         let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
 
-        let stop = session.prompt("hi".to_string(), Vec::new(), None, &updates_tx, &permissions_tx, &browser_tx, &browser_interact_tx).await;
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
 
         assert_eq!(stop, StopReason::Refusal);
         let update = updates_rx.recv().await.expect("one chunk explaining why");
         match update {
-            SessionUpdate::AgentMessageChunk { content: ContentBlock::Text { text }, .. } => {
-                assert!(text.contains("No API key set"), "unexpected message: {text}");
+            SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } => {
+                assert!(
+                    text.contains("No API key set"),
+                    "unexpected message: {text}"
+                );
             }
             other => panic!("expected an AgentMessageChunk, got {other:?}"),
         }
@@ -1475,14 +1588,23 @@ mod tests {
         let (_dir, ws) = workspace();
         let endpoint = serve_rounds(vec![text_round("Hello!")]).await;
         let config = config_for(&endpoint);
-        let mut session =
-            HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
         let (updates_tx, mut updates_rx) = mpsc::channel(16);
         let (permissions_tx, _permissions_rx) = mpsc::channel(16);
         let (browser_tx, _browser_rx) = mpsc::channel(16);
         let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
 
-        let stop = session.prompt("hi".to_string(), Vec::new(), None, &updates_tx, &permissions_tx, &browser_tx, &browser_interact_tx).await;
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
 
         assert_eq!(stop, StopReason::EndTurn);
         let update = updates_rx.recv().await.expect("one chunk");
@@ -1505,14 +1627,23 @@ mod tests {
         );
         let endpoint = serve_rounds(vec![body]).await;
         let config = config_for(&endpoint);
-        let mut session =
-            HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
         let (updates_tx, mut updates_rx) = mpsc::channel(16);
         let (permissions_tx, _permissions_rx) = mpsc::channel(16);
         let (browser_tx, _browser_rx) = mpsc::channel(16);
         let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
 
-        let stop = session.prompt("hi".to_string(), Vec::new(), None, &updates_tx, &permissions_tx, &browser_tx, &browser_interact_tx).await;
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
 
         assert_eq!(stop, StopReason::EndTurn);
         // The token chunk arrives first, then the `usage_update` the meter
@@ -1536,18 +1667,33 @@ mod tests {
         let endpoint = serve_rounds(vec![body]).await;
         let mut config = config_for(&endpoint);
         config.llm.context_window = 131_072;
-        let mut session =
-            HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
         let (updates_tx, mut updates_rx) = mpsc::channel(16);
         let (permissions_tx, _permissions_rx) = mpsc::channel(16);
         let (browser_tx, _browser_rx) = mpsc::channel(16);
         let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
 
-        let stop = session.prompt("hi".to_string(), Vec::new(), None, &updates_tx, &permissions_tx, &browser_tx, &browser_interact_tx).await;
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
 
         assert_eq!(stop, StopReason::EndTurn);
         let usage = updates_rx.recv().await.expect("usage update");
-        assert_eq!(usage, SessionUpdate::UsageUpdate { used: 15, size: 131_072 });
+        assert_eq!(
+            usage,
+            SessionUpdate::UsageUpdate {
+                used: 15,
+                size: 131_072
+            }
+        );
     }
 
     #[test]
@@ -1580,7 +1726,9 @@ mod tests {
             let (mut socket, _) = listener.accept().await.expect("accept");
             let request = read_request(&mut socket).await;
             let _ = captured_tx.send(request);
-            let _ = socket.write_all(text_round("I see a red button.").as_bytes()).await;
+            let _ = socket
+                .write_all(text_round("I see a red button.").as_bytes())
+                .await;
             let _ = socket.shutdown().await;
         });
         let config = config_for(&format!("http://{addr}"));
@@ -1598,7 +1746,8 @@ mod tests {
             .prompt(
                 "what's wrong with this button?".to_string(),
                 images,
-                None, &updates_tx,
+                None,
+                &updates_tx,
                 &permissions_tx,
                 &browser_tx,
                 &browser_interact_tx,
@@ -1691,18 +1840,32 @@ mod tests {
         let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
 
         let stop = session
-            .prompt("what does hello.txt say?".to_string(), Vec::new(), None, &updates_tx, &permissions_tx, &browser_tx, &browser_interact_tx)
+            .prompt(
+                "what does hello.txt say?".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
             .await;
 
         assert_eq!(stop, StopReason::EndTurn);
-        assert!(permissions_rx.try_recv().is_err(), "a read must never ask permission");
+        assert!(
+            permissions_rx.try_recv().is_err(),
+            "a read must never ask permission"
+        );
         let mut saw_tool_call = false;
         while let Ok(update) = updates_rx.try_recv() {
             if matches!(update, SessionUpdate::ToolCall(_)) {
                 saw_tool_call = true;
             }
         }
-        assert!(saw_tool_call, "the auto-approved call should still be reported");
+        assert!(
+            saw_tool_call,
+            "the auto-approved call should still be reported"
+        );
     }
 
     /// A dangerous command (needs approval under every policy, per
@@ -1726,7 +1889,17 @@ mod tests {
         let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
 
         let prompt = tokio::spawn(async move {
-            session.prompt("clean the build dir".to_string(), Vec::new(), None, &updates_tx, &permissions_tx, &browser_tx, &browser_interact_tx).await
+            session
+                .prompt(
+                    "clean the build dir".to_string(),
+                    Vec::new(),
+                    None,
+                    &updates_tx,
+                    &permissions_tx,
+                    &browser_tx,
+                    &browser_interact_tx,
+                )
+                .await
         });
 
         let ask = permissions_rx.recv().await.expect("a permission ask");
@@ -1757,7 +1930,10 @@ mod tests {
     async fn a_pending_write_carries_its_diff_in_the_permission_request() {
         let (dir, ws) = workspace(); // hello.txt already contains "hi\n"
         let endpoint = serve_rounds(vec![
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"bye\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"bye\n"}"#,
+            ),
             text_round("Updated it."),
         ])
         .await;
@@ -1775,12 +1951,27 @@ mod tests {
         let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
 
         let prompt = tokio::spawn(async move {
-            session.prompt("say hi in a different way".to_string(), Vec::new(), None, &updates_tx, &permissions_tx, &browser_tx, &browser_interact_tx).await
+            session
+                .prompt(
+                    "say hi in a different way".to_string(),
+                    Vec::new(),
+                    None,
+                    &updates_tx,
+                    &permissions_tx,
+                    &browser_tx,
+                    &browser_interact_tx,
+                )
+                .await
         });
 
         let ask = permissions_rx.recv().await.expect("a permission ask");
         match ask.request.tool_call.content {
-            Some(ToolCallContent::Diff { path, old_text, new_text, hunks }) => {
+            Some(ToolCallContent::Diff {
+                path,
+                old_text,
+                new_text,
+                hunks,
+            }) => {
                 assert_eq!(path, "hello.txt");
                 assert_eq!(old_text.as_deref(), Some("hi\n"));
                 assert_eq!(new_text, "bye\n");
@@ -1795,7 +1986,10 @@ mod tests {
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
-        assert_eq!(std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(), "bye\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "bye\n"
+        );
     }
 
     /// The actual point of `check_in_browser`: it goes out over the
@@ -1807,7 +2001,10 @@ mod tests {
     async fn check_in_browser_asks_the_client_and_reports_what_it_sees() {
         let (_dir, ws) = workspace();
         let endpoint = serve_rounds(vec![
-            tool_call_round(tools::CHECK_IN_BROWSER, r#"{"url":"http://localhost:3000"}"#),
+            tool_call_round(
+                tools::CHECK_IN_BROWSER,
+                r#"{"url":"http://localhost:3000"}"#,
+            ),
             text_round("It renders correctly."),
         ])
         .await;
@@ -1820,7 +2017,15 @@ mod tests {
 
         let prompt = tokio::spawn(async move {
             session
-                .prompt("does the homepage render?".to_string(), Vec::new(), None, &updates_tx, &permissions_tx, &browser_tx, &browser_interact_tx)
+                .prompt(
+                    "does the homepage render?".to_string(),
+                    Vec::new(),
+                    None,
+                    &updates_tx,
+                    &permissions_tx,
+                    &browser_tx,
+                    &browser_interact_tx,
+                )
                 .await
         });
 
@@ -1852,7 +2057,10 @@ mod tests {
                 saw_image = true;
             }
         }
-        assert!(saw_image, "the screenshot must reach the client as an Image, for the human to see");
+        assert!(
+            saw_image,
+            "the screenshot must reach the client as an Image, for the human to see"
+        );
     }
 
     /// The token-efficient half of `check_in_browser`: when the client also
@@ -1873,7 +2081,13 @@ mod tests {
             let (mut socket, _) = listener.accept().await.expect("accept 1");
             let _ = read_request(&mut socket).await;
             let _ = socket
-                .write_all(tool_call_round(tools::CHECK_IN_BROWSER, r#"{"url":"http://localhost:3000"}"#).as_bytes())
+                .write_all(
+                    tool_call_round(
+                        tools::CHECK_IN_BROWSER,
+                        r#"{"url":"http://localhost:3000"}"#,
+                    )
+                    .as_bytes(),
+                )
                 .await;
             let _ = socket.shutdown().await;
 
@@ -1881,7 +2095,9 @@ mod tests {
             let (mut socket, _) = listener.accept().await.expect("accept 2");
             let request = read_request(&mut socket).await;
             let _ = captured_tx.send(request);
-            let _ = socket.write_all(text_round("It renders correctly.").as_bytes()).await;
+            let _ = socket
+                .write_all(text_round("It renders correctly.").as_bytes())
+                .await;
             let _ = socket.shutdown().await;
         });
         let config = config_for(&format!("http://{addr}"));
@@ -1953,7 +2169,8 @@ mod tests {
                 .prompt(
                     "click the login button".to_string(),
                     Vec::new(),
-                    None, &updates_tx,
+                    None,
+                    &updates_tx,
                     &permissions_tx,
                     &browser_tx,
                     &browser_interact_tx,
@@ -1961,29 +2178,45 @@ mod tests {
                 .await
         });
 
-        let permission_ask = permissions_rx.recv().await.expect("a permission ask, unlike check_in_browser");
-        assert_eq!(permission_ask.request.session_id, SessionId("s1".to_string()));
+        let permission_ask = permissions_rx
+            .recv()
+            .await
+            .expect("a permission ask, unlike check_in_browser");
+        assert_eq!(
+            permission_ask.request.session_id,
+            SessionId("s1".to_string())
+        );
         assert!(
             browser_interact_rx.try_recv().is_err(),
             "must not act before the user answers the permission ask"
         );
         let _ = permission_ask
             .respond
-            .send(RequestPermissionOutcome::Selected { option_id: PermissionOptionId("allow".to_string()) });
+            .send(RequestPermissionOutcome::Selected {
+                option_id: PermissionOptionId("allow".to_string()),
+            });
 
-        let interact_ask = browser_interact_rx.recv().await.expect("an interact ask, after approval");
+        let interact_ask = browser_interact_rx
+            .recv()
+            .await
+            .expect("an interact ask, after approval");
         assert_eq!(interact_ask.session_id, SessionId("s1".to_string()));
         assert_eq!(interact_ask.url, "http://localhost:3000");
-        assert_eq!(interact_ask.interaction, BrowserInteraction::Click { x: 10.0, y: 20.0 });
+        assert_eq!(
+            interact_ask.interaction,
+            BrowserInteraction::Click { x: 10.0, y: 20.0 }
+        );
         assert!(
             browser_rx.try_recv().is_err(),
             "an interaction must go out over browser_interact, not the plain check_in_browser relay"
         );
-        let _ = interact_ask.respond.send(BrowserInteractResult::Screenshot {
-            mime_type: "image/png".to_string(),
-            data: "aGVsbG8=".to_string(),
-            ax_tree: None,
-        });
+        let _ = interact_ask
+            .respond
+            .send(BrowserInteractResult::Screenshot {
+                mime_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+                ax_tree: None,
+            });
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -2000,7 +2233,10 @@ mod tests {
                 saw_image = true;
             }
         }
-        assert!(saw_image, "the post-interaction screenshot must reach the client as an Image");
+        assert!(
+            saw_image,
+            "the post-interaction screenshot must reach the client as an Image"
+        );
     }
 
     /// A refused `interact_in_browser` must never reach `browser_interact` at
@@ -2028,7 +2264,8 @@ mod tests {
                 .prompt(
                     "type the password into the login form".to_string(),
                     Vec::new(),
-                    None, &updates_tx,
+                    None,
+                    &updates_tx,
                     &permissions_tx,
                     &browser_tx,
                     &browser_interact_tx,
@@ -2039,7 +2276,9 @@ mod tests {
         let permission_ask = permissions_rx.recv().await.expect("a permission ask");
         let _ = permission_ask
             .respond
-            .send(RequestPermissionOutcome::Selected { option_id: PermissionOptionId("reject".to_string()) });
+            .send(RequestPermissionOutcome::Selected {
+                option_id: PermissionOptionId("reject".to_string()),
+            });
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -2057,7 +2296,10 @@ mod tests {
     async fn rollback_restores_a_file_the_session_wrote() {
         let (dir, ws) = workspace(); // hello.txt already contains "hi\n"
         let endpoint = serve_rounds(vec![
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"bye\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"bye\n"}"#,
+            ),
             text_round("Updated it."),
         ])
         .await;
@@ -2072,10 +2314,21 @@ mod tests {
         // `an_auto_approved_read_runs_without_asking_permission`'s own
         // sibling reasoning, just for a write instead of a read.
         let stop = session
-            .prompt("say hi in a different way".to_string(), Vec::new(), None, &updates_tx, &permissions_tx, &browser_tx, &browser_interact_tx)
+            .prompt(
+                "say hi in a different way".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
             .await;
         assert_eq!(stop, StopReason::EndTurn);
-        assert_eq!(std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(), "bye\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "bye\n"
+        );
 
         let response = session.rollback(&RollbackRequest {
             session_id: SessionId("s1".to_string()),
@@ -2083,7 +2336,11 @@ mod tests {
             turn: None,
             restore_before_turn: None,
         });
-        assert!(response.summary.contains("Rolled back 1 file"), "{}", response.summary);
+        assert!(
+            response.summary.contains("Rolled back 1 file"),
+            "{}",
+            response.summary
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
             "hi\n",
@@ -2102,7 +2359,10 @@ mod tests {
             turn: None,
             restore_before_turn: None,
         });
-        assert_eq!(second.summary, "Rolled back nothing — every file was already as the session found it.");
+        assert_eq!(
+            second.summary,
+            "Rolled back nothing — every file was already as the session found it."
+        );
     }
 
     /// The selective-rollback half of the feature end to end: two turns each
@@ -2131,7 +2391,8 @@ mod tests {
                 .prompt(
                     "write A".to_string(),
                     Vec::new(),
-                    None, &updates_tx,
+                    None,
+                    &updates_tx,
                     &permissions_tx,
                     &browser_tx,
                     &browser_interact_tx,
@@ -2144,7 +2405,8 @@ mod tests {
                 .prompt(
                     "write B".to_string(),
                     Vec::new(),
-                    None, &updates_tx,
+                    None,
+                    &updates_tx,
                     &permissions_tx,
                     &browser_tx,
                     &browser_interact_tx,
@@ -2153,13 +2415,25 @@ mod tests {
             StopReason::EndTurn
         );
 
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "A\n");
-        assert_eq!(std::fs::read_to_string(dir.path().join("b.txt")).unwrap(), "B\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "A\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "B\n"
+        );
 
         // Both files are undoable, each attributed to its own turn.
         let changes = session.list_changes();
         assert_eq!(changes.changes.len(), 2);
-        let by_name = |p: &str| changes.changes.iter().find(|c| c.path == p).expect("listed");
+        let by_name = |p: &str| {
+            changes
+                .changes
+                .iter()
+                .find(|c| c.path == p)
+                .expect("listed")
+        };
         assert_eq!(by_name("a.txt").turn, 1);
         assert_eq!(by_name("b.txt").turn, 2);
         assert_eq!(by_name("a.txt").action, "delete");
@@ -2172,9 +2446,19 @@ mod tests {
             turn: Some(2),
             restore_before_turn: None,
         });
-        assert!(response.summary.contains("Rolled back 1 file"), "{}", response.summary);
-        assert!(dir.path().join("a.txt").exists(), "turn 1's file must survive a turn-2 rollback");
-        assert!(!dir.path().join("b.txt").exists(), "turn 2's file must be undone");
+        assert!(
+            response.summary.contains("Rolled back 1 file"),
+            "{}",
+            response.summary
+        );
+        assert!(
+            dir.path().join("a.txt").exists(),
+            "turn 1's file must survive a turn-2 rollback"
+        );
+        assert!(
+            !dir.path().join("b.txt").exists(),
+            "turn 2's file must be undone"
+        );
 
         // A later full rollback still offers the surviving file.
         let rest = session.list_changes();
@@ -2187,8 +2471,15 @@ mod tests {
             turn: None,
             restore_before_turn: None,
         });
-        assert!(full.summary.contains("Rolled back 1 file"), "{}", full.summary);
-        assert!(!dir.path().join("a.txt").exists(), "the full rollback finishes the job");
+        assert!(
+            full.summary.contains("Rolled back 1 file"),
+            "{}",
+            full.summary
+        );
+        assert!(
+            !dir.path().join("a.txt").exists(),
+            "the full rollback finishes the job"
+        );
     }
 
     /// The restore-checkpoint button's exact scenario end to end: turn 1 adds a
@@ -2199,11 +2490,20 @@ mod tests {
     async fn restore_checkpoint_then_reedit_then_restore_again() {
         let (dir, ws) = workspace(); // hello.txt already contains "hi\n"
         let endpoint = serve_rounds(vec![
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"hi\nline1\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"hi\nline1\n"}"#,
+            ),
             text_round("Added line 1."),
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"hi\nline1\nline2\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"hi\nline1\nline2\n"}"#,
+            ),
             text_round("Added line 2."),
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"hi\nline1\nline2\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"hi\nline1\nline2\n"}"#,
+            ),
             text_round("Re-added line 2."),
         ])
         .await;
@@ -2219,7 +2519,8 @@ mod tests {
                 .prompt(
                     "add line 1".to_string(),
                     Vec::new(),
-                    None, &updates_tx,
+                    None,
+                    &updates_tx,
                     &permissions_tx,
                     &browser_tx,
                     &browser_interact_tx,
@@ -2232,7 +2533,8 @@ mod tests {
                 .prompt(
                     "add line 2".to_string(),
                     Vec::new(),
-                    None, &updates_tx,
+                    None,
+                    &updates_tx,
                     &permissions_tx,
                     &browser_tx,
                     &browser_interact_tx,
@@ -2264,7 +2566,8 @@ mod tests {
                 .prompt(
                     "add line 2 again".to_string(),
                     Vec::new(),
-                    None, &updates_tx,
+                    None,
+                    &updates_tx,
                     &permissions_tx,
                     &browser_tx,
                     &browser_interact_tx,
@@ -2299,9 +2602,15 @@ mod tests {
     async fn start_over_restores_before_turn_one() {
         let (dir, ws) = workspace(); // hello.txt already contains "hi\n"
         let endpoint = serve_rounds(vec![
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"hi\nline1\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"hi\nline1\n"}"#,
+            ),
             text_round("Added line 1."),
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"hi\nline1\nline2\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"hi\nline1\nline2\n"}"#,
+            ),
             text_round("Added line 2."),
         ])
         .await;
@@ -2318,7 +2627,8 @@ mod tests {
                     .prompt(
                         text.to_string(),
                         Vec::new(),
-                        None, &updates_tx,
+                        None,
+                        &updates_tx,
                         &permissions_tx,
                         &browser_tx,
                         &browser_interact_tx,
@@ -2338,7 +2648,11 @@ mod tests {
             turn: None,
             restore_before_turn: Some(1),
         });
-        assert!(response.summary.contains("Rolled back 1 file"), "{}", response.summary);
+        assert!(
+            response.summary.contains("Rolled back 1 file"),
+            "{}",
+            response.summary
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
             "hi\n",
@@ -2353,11 +2667,20 @@ mod tests {
     async fn restore_checkpoint_rewinds_conversation_and_turn() {
         let (dir, ws) = workspace(); // hello.txt already contains "hi\n"
         let endpoint = serve_rounds(vec![
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"hi\nline1\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"hi\nline1\n"}"#,
+            ),
             text_round("Added line 1."),
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"hi\nline1\nline2\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"hi\nline1\nline2\n"}"#,
+            ),
             text_round("Added line 2."),
-            tool_call_round(tools::WRITE_FILE, r#"{"path":"hello.txt","content":"hi\nline1\nline2\nline3\n"}"#),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"hi\nline1\nline2\nline3\n"}"#,
+            ),
             text_round("Added line 3."),
             text_round("Done."),
         ])
@@ -2375,7 +2698,8 @@ mod tests {
                     .prompt(
                         text.to_string(),
                         Vec::new(),
-                        None, &updates_tx,
+                        None,
+                        &updates_tx,
                         &permissions_tx,
                         &browser_tx,
                         &browser_interact_tx,
@@ -2401,12 +2725,20 @@ mod tests {
             turn: None,
             restore_before_turn: Some(2),
         });
-        assert!(response.summary.contains("Rolled back 1 file"), "{}", response.summary);
+        assert!(
+            response.summary.contains("Rolled back 1 file"),
+            "{}",
+            response.summary
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
             "hi\nline1\n"
         );
-        assert_eq!(session.current_turn(), 2, "turn counter must rewind to the restored turn");
+        assert_eq!(
+            session.current_turn(),
+            2,
+            "turn counter must rewind to the restored turn"
+        );
         assert!(
             !session
                 .messages
@@ -2422,7 +2754,8 @@ mod tests {
                 .prompt(
                     "add line 4".to_string(),
                     Vec::new(),
-                    None, &updates_tx,
+                    None,
+                    &updates_tx,
                     &permissions_tx,
                     &browser_tx,
                     &browser_interact_tx,
@@ -2472,12 +2805,23 @@ mod tests {
             (stop, session)
         });
 
-        let ask = permissions_rx.recv().await.expect("a permission ask carrying the plan");
+        let ask = permissions_rx
+            .recv()
+            .await
+            .expect("a permission ask carrying the plan");
         match ask.request.tool_call.content {
-            Some(ToolCallContent::Plan { title, summary, steps, not_doing }) => {
+            Some(ToolCallContent::Plan {
+                title,
+                summary,
+                steps,
+                not_doing,
+            }) => {
                 assert_eq!(title, "Add tests");
                 assert_eq!(summary, "Test the thing.");
-                assert_eq!(steps, vec!["write a test".to_string(), "run it".to_string()]);
+                assert_eq!(
+                    steps,
+                    vec!["write a test".to_string(), "run it".to_string()]
+                );
                 assert_eq!(not_doing, vec!["shipping".to_string()]);
             }
             other => panic!("expected a Plan, got {other:?}"),
@@ -2489,8 +2833,14 @@ mod tests {
         let (stop, session) = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
         assert_eq!(session.mode, Mode::Normal, "approving must leave plan mode");
-        assert!(session.active_plan.is_some(), "approving must record the active plan");
-        assert!(dir.path().join("plan.md").exists(), "approving must write plan.md");
+        assert!(
+            session.active_plan.is_some(),
+            "approving must record the active plan"
+        );
+        assert!(
+            dir.path().join("plan.md").exists(),
+            "approving must write plan.md"
+        );
     }
 
     /// The decline half: "reject" keeps the session in plan mode, records no
@@ -2529,9 +2879,15 @@ mod tests {
             (stop, session)
         });
 
-        let ask = permissions_rx.recv().await.expect("a permission ask carrying the plan");
+        let ask = permissions_rx
+            .recv()
+            .await
+            .expect("a permission ask carrying the plan");
         assert!(
-            matches!(ask.request.tool_call.content, Some(ToolCallContent::Plan { .. })),
+            matches!(
+                ask.request.tool_call.content,
+                Some(ToolCallContent::Plan { .. })
+            ),
             "the proposal must ride the plan wire shape, not a diff"
         );
         let _ = ask.respond.send(RequestPermissionOutcome::Selected {
@@ -2540,9 +2896,19 @@ mod tests {
 
         let (stop, session) = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
-        assert_eq!(session.mode, Mode::Plan, "rejecting must leave the session in plan mode");
-        assert!(session.active_plan.is_none(), "a rejected plan must not become active");
-        assert!(!dir.path().join("plan.md").exists(), "rejecting must write nothing");
+        assert_eq!(
+            session.mode,
+            Mode::Plan,
+            "rejecting must leave the session in plan mode"
+        );
+        assert!(
+            session.active_plan.is_none(),
+            "a rejected plan must not become active"
+        );
+        assert!(
+            !dir.path().join("plan.md").exists(),
+            "rejecting must write nothing"
+        );
     }
 
     /// The whole point of inline-edit mode in one test: a `write_file` call
@@ -2593,7 +2959,10 @@ mod tests {
                 saw_diff = true;
             }
         }
-        assert!(saw_diff, "the write_file proposal must ride a Diff tool update");
+        assert!(
+            saw_diff,
+            "the write_file proposal must ride a Diff tool update"
+        );
         assert!(
             !dir.path().join("new.txt").exists(),
             "inline edit must propose without writing disk"

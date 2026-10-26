@@ -47,8 +47,14 @@ pub fn record_turn(approx_tokens: usize, model: &str) {
         approx_tokens,
         model: model.to_string(),
     };
-    let Ok(line) = serde_json::to_string(&record) else { return };
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(file, "{line}");
     }
 }
@@ -69,8 +75,12 @@ pub struct Summary {
 /// bad line (a crash mid-write, a hand-edit) doesn't erase everything above
 /// and below it.
 pub fn summary() -> Summary {
-    let Some(path) = usage_path() else { return Summary::default() };
-    let Ok(content) = std::fs::read_to_string(&path) else { return Summary::default() };
+    let Some(path) = usage_path() else {
+        return Summary::default();
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Summary::default();
+    };
     summarize(&content)
 }
 
@@ -81,7 +91,9 @@ fn summarize(content: &str) -> Summary {
     let mut summary = Summary::default();
 
     for line in content.lines() {
-        let Ok(record) = serde_json::from_str::<Record>(line) else { continue };
+        let Ok(record) = serde_json::from_str::<Record>(line) else {
+            continue;
+        };
         summary.all_time_tokens += record.approx_tokens;
         if record.date == today {
             summary.today_tokens += record.approx_tokens;
@@ -125,7 +137,12 @@ mod tests {
     fn today_and_all_time_and_days_active_are_tracked_separately() {
         let today = dateutil::today_string();
         let long_ago = "2020-01-01";
-        let content = format!("{}\n{}\n{}\n", line(&today, 100), line(&today, 50), line(long_ago, 9000));
+        let content = format!(
+            "{}\n{}\n{}\n",
+            line(&today, 100),
+            line(&today, 50),
+            line(long_ago, 9000)
+        );
 
         let s = summarize(&content);
         assert_eq!(s.today_tokens, 150, "only today's two lines");
@@ -147,7 +164,10 @@ mod tests {
 
         let s = summarize(&content);
         assert_eq!(s.week_tokens, 30, "999 from 10 days ago must not count");
-        assert_eq!(s.all_time_tokens, 1029, "but it still counts toward all-time");
+        assert_eq!(
+            s.all_time_tokens, 1029,
+            "but it still counts toward all-time"
+        );
     }
 
     /// Everything above tests `summarize()` against an in-memory string --
@@ -158,7 +178,11 @@ mod tests {
     #[test]
     fn record_turn_and_summary_round_trip_through_the_real_file() {
         crate::config::test_support::with_isolated_home(|| {
-            assert_eq!(summary(), Summary::default(), "a fresh $HOME has no history yet");
+            assert_eq!(
+                summary(),
+                Summary::default(),
+                "a fresh $HOME has no history yet"
+            );
 
             record_turn(120, "deepseek-v4-flash");
             record_turn(80, "deepseek-v4-flash");

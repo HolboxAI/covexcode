@@ -40,9 +40,12 @@ impl Workspace {
     /// land somewhere far broader than the file's own directory ever was.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, String> {
         let given = root.as_ref();
-        let canonical = given
-            .canonicalize()
-            .map_err(|e| format!("{} is unusable as a working directory: {e}", given.display()))?;
+        let canonical = given.canonicalize().map_err(|e| {
+            format!(
+                "{} is unusable as a working directory: {e}",
+                given.display()
+            )
+        })?;
         let root = if canonical.is_dir() {
             canonical
         } else if canonical.is_file() {
@@ -51,7 +54,10 @@ impl Workspace {
                 .ok_or_else(|| format!("{} has no containing directory", canonical.display()))?;
             find_git_root(parent).unwrap_or_else(|| parent.to_path_buf())
         } else {
-            return Err(format!("{} is neither a file nor a directory", canonical.display()));
+            return Err(format!(
+                "{} is neither a file nor a directory",
+                canonical.display()
+            ));
         };
         Ok(Self { root })
     }
@@ -147,7 +153,11 @@ mod tests {
     #[test]
     fn a_git_boundary_left_as_a_file_still_counts() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".git"), "gitdir: /elsewhere/.git/worktrees/x").unwrap();
+        std::fs::write(
+            dir.path().join(".git"),
+            "gitdir: /elsewhere/.git/worktrees/x",
+        )
+        .unwrap();
         let file = dir.path().join("index.html");
         std::fs::write(&file, "<html></html>").unwrap();
 

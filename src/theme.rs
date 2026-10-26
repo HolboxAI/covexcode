@@ -359,7 +359,6 @@ fn mode_from_colorfgbg(value: Option<&str>) -> Option<Mode> {
     })
 }
 
-
 // ---- glyphs -------------------------------------------------------------------
 
 // Nothing in here is a pictograph, and nothing anywhere else should be either.
@@ -554,7 +553,6 @@ pub fn resolve_mode(configured: &str) -> Mode {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,7 +563,11 @@ mod tests {
     fn luminance((r, g, b): (u8, u8, u8)) -> f64 {
         let channel = |v: u8| {
             let v = v as f64 / 255.0;
-            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
         };
         0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
     }
@@ -608,10 +610,7 @@ mod tests {
         const WHITE: (u8, u8, u8) = (255, 255, 255);
         const BLACK: (u8, u8, u8) = (0, 0, 0);
 
-        for (name, palette, background) in [
-            ("DARK", &DARK, BLACK),
-            ("LIGHT", &LIGHT, WHITE),
-        ] {
+        for (name, palette, background) in [("DARK", &DARK, BLACK), ("LIGHT", &LIGHT, WHITE)] {
             for (label, color) in readable(palette) {
                 let Some(fg) = rgb(color) else { continue };
                 let ratio = contrast(fg, background);
@@ -711,11 +710,13 @@ mod tests {
     /// is the identity and what is tuned is what is drawn.
     #[test]
     fn the_unknown_palette_survives_the_256_colour_downgrade_unchanged() {
-        for (label, color) in readable(&NEUTRAL).into_iter().chain([
-            ("border", NEUTRAL.border),
-            ("accent", NEUTRAL.accent),
-        ]) {
-            let Some((r, g, b)) = rgb(color) else { continue };
+        for (label, color) in readable(&NEUTRAL)
+            .into_iter()
+            .chain([("border", NEUTRAL.border), ("accent", NEUTRAL.accent)])
+        {
+            let Some((r, g, b)) = rgb(color) else {
+                continue;
+            };
             let downgraded = crate::theme::adapt(Color::Indexed(nearest_256(r, g, b)));
             // `adapt` leaves an already-indexed colour alone; the real check is
             // that the cube entry this maps to *is* this colour.
@@ -768,7 +769,10 @@ mod tests {
                 panic!("{name}: the block and its text must both be explicit colours");
             };
             let ratio = contrast(fg, bg);
-            assert!(ratio >= 4.5, "{name}: on_surface is {ratio:.2}:1 on surface");
+            assert!(
+                ratio >= 4.5,
+                "{name}: on_surface is {ratio:.2}:1 on surface"
+            );
         }
     }
 
@@ -785,9 +789,6 @@ mod tests {
         assert_eq!(mode_from_colorfgbg(Some("")), None);
         assert_eq!(mode_from_colorfgbg(Some("nonsense")), None);
     }
-
-
-
 
     /// Regression: the app hung at startup, indefinitely, until a key was
     /// pressed. `resolve_mode` asked the terminal for its background colour
@@ -822,8 +823,16 @@ mod tests {
     /// module.
     #[test]
     fn apple_terminal_on_old_macos_without_a_colorterm_override_is_not_trusted_with_truecolor() {
-        assert!(!supports_truecolor_given(None, Some("Apple_Terminal"), Some(25)));
-        assert!(!supports_truecolor_given(None, Some("Apple_Terminal"), None));
+        assert!(!supports_truecolor_given(
+            None,
+            Some("Apple_Terminal"),
+            Some(25)
+        ));
+        assert!(!supports_truecolor_given(
+            None,
+            Some("Apple_Terminal"),
+            None
+        ));
     }
 
     /// The fixed case: macOS 26 "Tahoe" rewrote Terminal.app with genuine
@@ -832,8 +841,16 @@ mod tests {
     /// the flip side of the bug report above.
     #[test]
     fn apple_terminal_on_macos_tahoe_or_later_is_trusted_with_truecolor() {
-        assert!(supports_truecolor_given(None, Some("Apple_Terminal"), Some(26)));
-        assert!(supports_truecolor_given(None, Some("Apple_Terminal"), Some(27)));
+        assert!(supports_truecolor_given(
+            None,
+            Some("Apple_Terminal"),
+            Some(26)
+        ));
+        assert!(supports_truecolor_given(
+            None,
+            Some("Apple_Terminal"),
+            Some(27)
+        ));
     }
 
     /// COLORTERM is a terminal saying so itself -- that outranks both the
@@ -842,8 +859,16 @@ mod tests {
     /// of what program or OS it's running on.
     #[test]
     fn an_explicit_colorterm_truecolor_claim_is_trusted_even_for_apple_terminal_on_old_macos() {
-        assert!(supports_truecolor_given(Some("truecolor"), Some("Apple_Terminal"), Some(25)));
-        assert!(supports_truecolor_given(Some("24bit"), Some("Apple_Terminal"), None));
+        assert!(supports_truecolor_given(
+            Some("truecolor"),
+            Some("Apple_Terminal"),
+            Some(25)
+        ));
+        assert!(supports_truecolor_given(
+            Some("24bit"),
+            Some("Apple_Terminal"),
+            None
+        ));
     }
 
     /// Everything not on the deny list defaults to truecolor -- the whole
@@ -875,7 +900,10 @@ mod tests {
     #[test]
     fn a_grey_prefers_the_finer_greyscale_ramp_over_the_coarse_cube() {
         let code = nearest_256(128, 128, 128);
-        assert!((232..=255).contains(&code), "128,128,128 -> {code}, expected a ramp index");
+        assert!(
+            (232..=255).contains(&code),
+            "128,128,128 -> {code}, expected a ramp index"
+        );
     }
 
     /// The actual regression: MUTED (129,140,162) and FAINT (88,98,118) are
@@ -960,7 +988,11 @@ mod tests {
 
         assert_eq!(brightest(0), 0, "starts off the left edge");
         let mid = SHINE_PERIOD / 2;
-        assert_eq!(brightest(mid), text.chars().count() - 1, "reaches the right edge");
+        assert_eq!(
+            brightest(mid),
+            text.chars().count() - 1,
+            "reaches the right edge"
+        );
         assert_eq!(brightest(SHINE_PERIOD), 0, "returns to the left edge");
     }
 

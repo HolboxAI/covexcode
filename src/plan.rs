@@ -114,7 +114,10 @@ impl Plan {
 
     /// Steps finished, out of the total.
     pub fn progress(&self) -> (usize, usize) {
-        (self.steps.iter().filter(|s| s.done).count(), self.steps.len())
+        (
+            self.steps.iter().filter(|s| s.done).count(),
+            self.steps.len(),
+        )
     }
 
     pub fn is_finished(&self) -> bool {
@@ -136,7 +139,12 @@ impl Plan {
     /// just recorded, or an error naming the valid range -- which the model
     /// reads and corrects from, since an out-of-range step number is by far
     /// the most likely thing for it to get wrong here.
-    pub fn mark(&mut self, step: usize, done: bool, note: Option<String>) -> Result<String, String> {
+    pub fn mark(
+        &mut self,
+        step: usize,
+        done: bool,
+        note: Option<String>,
+    ) -> Result<String, String> {
         if step == 0 || step > self.steps.len() {
             return Err(format!(
                 "There is no step {step}. This plan has {} step{}, numbered 1 to {}.",
@@ -534,7 +542,10 @@ Some prose about the approach.
         assert_eq!(plan.summary, "Some prose about the approach.");
         assert_eq!(plan.steps.len(), 3);
         assert!(plan.steps[0].done, "an uppercase X is still ticked");
-        assert_eq!(plan.steps[1].description, "Misnumbered but still the second step");
+        assert_eq!(
+            plan.steps[1].description,
+            "Misnumbered but still the second step"
+        );
         assert_eq!(plan.steps[2].description, "Not numbered at all");
         assert_eq!(plan.not_doing, vec!["Anything clever"]);
         assert_eq!(plan.status(), Status::InProgress);
@@ -568,9 +579,14 @@ Some prose about the approach.
         plan.mark(1, true, None).unwrap();
         plan.save().expect("should save");
 
-        assert!(dir.path().join("plan.md").is_file(), "a plain, obvious name");
+        assert!(
+            dir.path().join("plan.md").is_file(),
+            "a plain, obvious name"
+        );
 
-        let back = open(dir.path()).expect("there is a file").expect("it parses");
+        let back = open(dir.path())
+            .expect("there is a file")
+            .expect("it parses");
         assert_eq!(back.title, plan.title);
         assert_eq!(back.progress(), (1, 2));
     }
@@ -583,7 +599,10 @@ Some prose about the approach.
         std::fs::write(path(dir.path()), "just some notes\n").unwrap();
 
         let result = open(dir.path()).expect("the file is there");
-        assert!(result.is_err(), "it is not a plan, and saying nothing would mislead");
+        assert!(
+            result.is_err(),
+            "it is not a plan, and saying nothing would mislead"
+        );
     }
 
     /// Warned about, never refused -- most of a plan is usually still right
@@ -622,4 +641,3 @@ Some prose about the approach.
         assert_eq!(plan.stale_against(root), None);
     }
 }
-

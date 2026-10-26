@@ -19,13 +19,16 @@ const MAX_INPUT_HEIGHT: u16 = 10;
 const MAX_APPROVAL_HEIGHT: u16 = 24;
 /// Tall enough for every command in `app::COMMANDS` plus its border. There is
 /// a test.
-const MAX_COMMAND_MENU_HEIGHT: u16 = 21;
+const MAX_COMMAND_MENU_HEIGHT: u16 = 25;
 /// The deployment panel is allowed to be taller than the approval prompt: it
 /// carries a checklist, a menu and a live log at the same time, and clipping
 /// the log is what makes a failed build undiagnosable.
 const MAX_DEPLOY_HEIGHT: u16 = 28;
 const MIN_POPUP_WIDTH: u16 = 40;
 const MIN_POPUP_HEIGHT: u16 = 6;
+/// Fixed height for pickers (recent/top projects, prompt history) so the popup box
+/// maintains a constant size even with 10+ items, using internal scrolling.
+const FIXED_PICKER_HEIGHT: u16 = 10;
 /// Width of the live to-do panel on the right edge. Wide enough for a
 /// checklist item plus its marker, narrow enough that a normal terminal still
 /// leaves the transcript most of the width.
@@ -91,8 +94,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // bottom corner. Only when there is both a list to show and enough width
     // to show it without starving the transcript -- on a narrow terminal the
     // list stays in the footer's one-line summary instead.
-    let show_todo = !app.todos.is_empty()
-        && size.width > TODO_PANEL_WIDTH + MIN_SIDE_PANEL_SPLIT_WIDTH;
+    let show_todo =
+        !app.todos.is_empty() && size.width > TODO_PANEL_WIDTH + MIN_SIDE_PANEL_SPLIT_WIDTH;
     let (main_area, todo_area) = if show_todo {
         let side = Layout::default()
             .direction(Direction::Horizontal)
@@ -160,7 +163,6 @@ fn adapt_colors_for_terminal(f: &mut Frame) {
     }
 }
 
-
 /// The transcript, drawn without a box around it.
 ///
 /// A border here would frame the conversation as a widget in an application;
@@ -221,10 +223,7 @@ pub fn message_lines(msg: &Message, width: usize) -> Vec<Line<'static>> {
     }
     // An assistant turn that was nothing but tool calls has no prose to
     // show; the calls speak for themselves on the lines that follow.
-    if msg.role == Role::Assistant
-        && !msg.tool_calls.is_empty()
-        && msg.content.trim().is_empty()
-    {
+    if msg.role == Role::Assistant && !msg.tool_calls.is_empty() && msg.content.trim().is_empty() {
         return Vec::new();
     }
 
@@ -248,10 +247,7 @@ pub fn message_lines(msg: &Message, width: usize) -> Vec<Line<'static>> {
                 let marker = if i == 0 { theme::USER_MARK } else { " " };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{marker} "), role_style(Role::User)),
-                    Span::styled(
-                        format!("{wrapped:<text_width$}"),
-                        theme::user_turn(),
-                    ),
+                    Span::styled(format!("{wrapped:<text_width$}"), theme::user_turn()),
                 ]));
             }
         }
@@ -444,14 +440,21 @@ fn render_edit_spans(
                 break;
             }
             for wrapped in wrap(line, inner) {
-                lines.push(Line::from(Span::styled(wrapped, Style::default().fg(colour))));
+                lines.push(Line::from(Span::styled(
+                    wrapped,
+                    Style::default().fg(colour),
+                )));
             }
         }
         lines.push(Line::from(""));
     };
     for (i, edit) in edits.iter().enumerate() {
         let replace_label = if batch {
-            let all = if edit.replace_all { ", all occurrences" } else { "" };
+            let all = if edit.replace_all {
+                ", all occurrences"
+            } else {
+                ""
+            };
             format!("edit {} of {} — replace:{all}", i + 1, edits.len())
         } else {
             "replace:".to_string()
@@ -551,12 +554,10 @@ fn render_live(f: &mut Frame, area: Rect, app: &mut App) {
     let shown: Vec<Line> = lines.into_iter().skip(skip).collect();
 
     f.render_widget(
-        Paragraph::new(shown)
-            .block(Block::default().padding(Padding::new(GUTTER, 1, 0, 0))),
+        Paragraph::new(shown).block(Block::default().padding(Padding::new(GUTTER, 1, 0, 0))),
         area,
     );
 }
-
 
 /// The spinner line: what the app is doing, how long it has been doing it, and
 /// how to stop it. `None` when nothing is running.
@@ -623,7 +624,11 @@ fn activity_line(app: &App) -> Option<Line<'static>> {
                 .iter()
                 .filter(|c| c.function.name == crate::tools::AGENT)
                 .count();
-            let noun = if agents == n && n > 0 { "subagent" } else { "command" };
+            let noun = if agents == n && n > 0 {
+                "subagent"
+            } else {
+                "command"
+            };
             (
                 format!("Running {n} {noun}{}", if n == 1 { "" } else { "s" }),
                 String::new(),
@@ -650,7 +655,10 @@ fn activity_line(app: &App) -> Option<Line<'static>> {
     // as alive instead of a static label. The clock is the same one the
     // spinner uses, so the two move together.
     let mut spans = vec![Span::styled(format!("{frame} "), theme::accent())];
-    spans.extend(theme::shine(&format!("{verb}…"), request.unwrap_or_default()));
+    spans.extend(theme::shine(
+        &format!("{verb}…"),
+        request.unwrap_or_default(),
+    ));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
         format!("({secs}s{detail}{turn_note}{interrupt_hint})"),
@@ -682,8 +690,12 @@ pub fn welcome_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         vec![
             Span::styled("Welcome back", theme::text()),
             Span::styled(
-                greeting_name().map(|n| format!(", {n}")).unwrap_or_default(),
-                Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                greeting_name()
+                    .map(|n| format!(", {n}"))
+                    .unwrap_or_default(),
+                Style::default()
+                    .fg(theme::p().text)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("!", theme::text()),
         ],
@@ -796,8 +808,8 @@ pub fn welcome_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     // in `/resume`'s description because resuming is the single most common
     // first action. Resumed with Ctrl+R -- a deliberate chord, not a stray
     // Enter -- or `/resume`.
-    let resumable = !app.workspace_root.is_empty()
-        && crate::session::latest_for(&app.workspace_root).is_some();
+    let resumable =
+        !app.workspace_root.is_empty() && crate::session::latest_for(&app.workspace_root).is_some();
     if resumable {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -876,7 +888,9 @@ pub fn welcome_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Before you start",
-            Style::default().fg(theme::p().warning).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::p().warning)
+                .add_modifier(Modifier::BOLD),
         )));
         for w in warnings {
             // Wrapped, not clipped: a warning that runs off the right edge
@@ -997,7 +1011,9 @@ fn input_height(app: &App, total_width: u16) -> u16 {
 /// with the same "❯" cursor style the approval prompt uses, so the two menus
 /// in this app read as the same kind of thing rather than two different ones.
 fn render_command_menu(f: &mut Frame, area: Rect, app: &App, matches: &[(&str, &str)]) {
-    let selected = app.command_menu_selected.min(matches.len().saturating_sub(1));
+    let selected = app
+        .command_menu_selected
+        .min(matches.len().saturating_sub(1));
 
     // `MAX_COMMAND_MENU_HEIGHT` guarantees the *cap* is never the thing that
     // hides a command, but the viewport is twelve rows in total, so the layout
@@ -1020,7 +1036,9 @@ fn render_command_menu(f: &mut Frame, area: Rect, app: &App, matches: &[(&str, &
             let on = i == selected;
             let marker = if on { "❯ " } else { "  " };
             let name_style = if on {
-                Style::default().fg(theme::p().accent).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme::p().accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme::p().text)
             };
@@ -1062,7 +1080,11 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     } else {
         (
             app.input_buffer.clone(),
-            Style::default().fg(if busy { theme::p().muted } else { theme::p().text }),
+            Style::default().fg(if busy {
+                theme::p().muted
+            } else {
+                theme::p().text
+            }),
         )
     };
 
@@ -1125,7 +1147,9 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         .min(total_rows.saturating_sub(visible));
 
     f.render_widget(
-        Paragraph::new(rendered).block(block).scroll((scroll as u16, 0)),
+        Paragraph::new(rendered)
+            .block(block)
+            .scroll((scroll as u16, 0)),
         area,
     );
 
@@ -1219,7 +1243,9 @@ fn render_todo_panel(f: &mut Frame, area: Rect, app: &App) {
     let available = inner.height as usize;
     let cwd_height = cwd_lines.len().min(available);
     let body_height = lines.len().min(available.saturating_sub(cwd_height));
-    let pad = available.saturating_sub(cwd_height).saturating_sub(body_height);
+    let pad = available
+        .saturating_sub(cwd_height)
+        .saturating_sub(body_height);
 
     let mut out: Vec<Line> = lines.into_iter().take(body_height).collect();
     out.extend(std::iter::repeat(Line::from("")).take(pad));
@@ -1329,7 +1355,11 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
                 .todos
                 .iter()
                 .find(|t| t.status == crate::tools::TodoStatus::InProgress)
-                .or_else(|| app.todos.iter().find(|t| t.status == crate::tools::TodoStatus::Pending));
+                .or_else(|| {
+                    app.todos
+                        .iter()
+                        .find(|t| t.status == crate::tools::TodoStatus::Pending)
+                });
             if let Some(item) = current {
                 spans.push(Span::styled(
                     format!(" {}", shorten(&item.content, 28)),
@@ -1378,8 +1408,10 @@ fn render_overlay(f: &mut Frame, area: Rect, app: &App) {
     match &app.overlay {
         None => {}
         Some(Overlay::ProviderPicker { selected }) => {
-            let mut items: Vec<String> =
-                providers::PROVIDERS.iter().map(|p| p.label.to_string()).collect();
+            let mut items: Vec<String> = providers::PROVIDERS
+                .iter()
+                .map(|p| p.label.to_string())
+                .collect();
             items.push("Custom endpoint...".to_string());
             render_picker(f, area, " Select a provider ", &items, *selected);
         }
@@ -1444,12 +1476,36 @@ fn render_overlay(f: &mut Frame, area: Rect, app: &App) {
             render_picker(f, area, " Pull a project (last 48h) ", &labels, *selected);
         }
         Some(Overlay::RollbackConfirm {
+            target_turn,
+            prompt_snippet,
             steps,
             warning,
             confirmed,
-        }) => render_rollback_confirm(f, area, steps, warning.as_deref(), *confirmed),
+        }) => render_rollback_confirm(
+            f,
+            area,
+            *target_turn,
+            prompt_snippet.as_deref(),
+            steps,
+            warning.as_deref(),
+            *confirmed,
+        ),
         Some(Overlay::CommandPalette { filter, selected }) => {
             render_command_palette(f, area, app, filter, *selected)
+        }
+        Some(Overlay::ProjectPicker {
+            items,
+            filter,
+            selected,
+            show_top,
+        }) => render_project_picker(f, area, items, filter, *selected, *show_top),
+        Some(Overlay::PromptPicker {
+            items,
+            filter,
+            selected,
+        }) => render_prompt_picker(f, area, items, filter, *selected),
+        Some(Overlay::QueryRollbackPicker { queries, selected }) => {
+            render_query_rollback_picker(f, area, queries, *selected)
         }
         // Drawn inline at the bottom of the frame by `render`, not as a
         // floating overlay -- see the comment there.
@@ -1471,6 +1527,8 @@ const ROLLBACK_LIST_LINES: usize = 12;
 fn render_rollback_confirm(
     f: &mut Frame,
     area: Rect,
+    target_turn: Option<u64>,
+    prompt_snippet: Option<&str>,
     steps: &[crate::rollback::Step],
     warning: Option<&str>,
     confirmed: bool,
@@ -1479,21 +1537,52 @@ fn render_rollback_confirm(
     let body_width = width.saturating_sub(4) as usize;
 
     let mut lines: Vec<Line> = Vec::new();
-    for step in steps.iter().take(ROLLBACK_LIST_LINES) {
-        let style = match step.action {
-            crate::rollback::Action::Blocked(_) => theme::faint(),
-            _ => theme::text(),
+    if let Some(snippet) = prompt_snippet {
+        let first_line = snippet.lines().next().unwrap_or("");
+        let label = if let Some(turn) = target_turn {
+            format!("Query {turn}: \"{first_line}\"")
+        } else {
+            format!("\"{first_line}\"")
         };
         lines.push(Line::from(Span::styled(
-            shorten(&step.label(), body_width),
-            style,
+            shorten(&label, body_width),
+            Style::default()
+                .fg(theme::p().text)
+                .add_modifier(Modifier::BOLD),
         )));
+        lines.push(Line::from(""));
     }
-    if let Some(rest) = steps.len().checked_sub(ROLLBACK_LIST_LINES).filter(|n| *n > 0) {
+
+    if steps.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("… and {rest} more file(s)"),
+            "No file changes recorded for this query.",
             theme::faint(),
         )));
+        lines.push(Line::from(Span::styled(
+            "Rolling back will rewind conversation messages from this query onward.",
+            theme::faint(),
+        )));
+    } else {
+        for step in steps.iter().take(ROLLBACK_LIST_LINES) {
+            let style = match step.action {
+                crate::rollback::Action::Blocked(_) => theme::faint(),
+                _ => theme::text(),
+            };
+            lines.push(Line::from(Span::styled(
+                shorten(&step.label(), body_width),
+                style,
+            )));
+        }
+        if let Some(rest) = steps
+            .len()
+            .checked_sub(ROLLBACK_LIST_LINES)
+            .filter(|n| *n > 0)
+        {
+            lines.push(Line::from(Span::styled(
+                format!("… and {rest} more file(s)"),
+                theme::faint(),
+            )));
+        }
     }
 
     let blocked = steps.iter().filter(|s| !s.is_actionable()).count();
@@ -1547,12 +1636,20 @@ fn render_rollback_confirm(
 
     let popup = centered_rect(width, lines.len() as u16 + 2, area);
     f.render_widget(Clear, popup);
+    let title = match target_turn {
+        Some(turn) => format!(
+            " Roll back to before Query {turn} ({} file{}) ",
+            steps.len(),
+            if steps.len() == 1 { "" } else { "s" }
+        ),
+        None => format!(" Roll back {} file(s) ", steps.len()),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::p().warning))
         .title(Span::styled(
-            format!(" Roll back {} file(s) ", steps.len()),
+            title,
             Style::default()
                 .fg(theme::p().warning)
                 .add_modifier(Modifier::BOLD),
@@ -1635,11 +1732,17 @@ fn tool_approval_parts(
     // model goes on without that one thing. Declining a plan skips nothing;
     // it sends the whole proposal back, so it says so.
     let (title, verb, deny) = match action {
-        Action::Mcp { server, tool, arguments } => {
+        Action::Mcp {
+            server,
+            tool,
+            arguments,
+        } => {
             for wrapped in wrap(&format!("{server} · {tool}"), inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             lines.push(Line::from(""));
@@ -1666,7 +1769,9 @@ fn tool_approval_parts(
             for wrapped in wrap(path, inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             lines.push(Line::from(""));
@@ -1684,7 +1789,9 @@ fn tool_approval_parts(
             for wrapped in wrap(path, inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             lines.push(Line::from(""));
@@ -1706,7 +1813,9 @@ fn tool_approval_parts(
             for wrapped in wrap(path, inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             lines.push(Line::from(""));
@@ -1726,7 +1835,9 @@ fn tool_approval_parts(
             for wrapped in wrap(sql, inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             (" Run this against the project's database? ", "run", "skip")
@@ -1735,7 +1846,9 @@ fn tool_approval_parts(
             for wrapped in wrap(path, inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             lines.push(Line::from(""));
@@ -1751,14 +1864,18 @@ fn tool_approval_parts(
             for wrapped in wrap(path, inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             lines.push(Line::from(""));
             for wrapped in wrap(&format!("Mark request #{id} resolved."), inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             (" Resolve this request? ", "resolve", "skip")
@@ -1799,7 +1916,7 @@ fn tool_approval_parts(
             lines.push(Line::from(""));
             // The diff, when there is one: what this write *changes* is the
             // decision, and for a file that already exists the whole content
-                // is mostly the part that stays the same. Falling back to the
+            // is mostly the part that stays the same. Falling back to the
             // content listing is not a lesser answer, it is the right one for
             // the case it covers -- a brand new file has no "before" worth
             // drawing a gutter against, and an unreadable path has no diff at
@@ -1853,7 +1970,10 @@ fn tool_approval_parts(
             (" Search for these files? ", "search", "skip")
         }
         Action::Grep { pattern, path } => {
-            let scope = path.as_deref().map(|p| format!(" in {p}")).unwrap_or_default();
+            let scope = path
+                .as_deref()
+                .map(|p| format!(" in {p}"))
+                .unwrap_or_default();
             lines.push(Line::from(Span::styled(
                 format!("{pattern}{scope}"),
                 Style::default()
@@ -1893,7 +2013,9 @@ fn tool_approval_parts(
             for wrapped in wrap(url, inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             lines.push(Line::from(""));
@@ -1911,13 +2033,16 @@ fn tool_approval_parts(
             for wrapped in wrap(url, inner) {
                 lines.push(Line::from(Span::styled(
                     wrapped,
-                    Style::default().fg(theme::p().text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::p().text)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
             lines.push(Line::from(""));
-            for wrapped in
-                wrap("Only an ACP client has a browser tab to act in -- not available here.", inner)
-            {
+            for wrapped in wrap(
+                "Only an ACP client has a browser tab to act in -- not available here.",
+                inner,
+            ) {
                 lines.push(Line::from(Span::styled(wrapped, theme::faint())));
             }
             let verb = match interaction {
@@ -1971,7 +2096,11 @@ fn tool_approval_parts(
                 (" Apply this edit? ", "edit", "skip")
             }
         }
-        Action::Deploy { provider, production, summary } => {
+        Action::Deploy {
+            provider,
+            production,
+            summary,
+        } => {
             lines.push(Line::from(Span::styled(
                 format!(
                     "{provider} · {}",
@@ -2016,7 +2145,11 @@ fn tool_approval_parts(
         Action::DesignStarter => (" Fetch the design starter? ", "fetch", "skip"),
         Action::CheckContrast { pairs } => {
             lines.push(Line::from(Span::styled(
-                format!("{} pair{}", pairs.len(), if pairs.len() == 1 { "" } else { "s" }),
+                format!(
+                    "{} pair{}",
+                    pairs.len(),
+                    if pairs.len() == 1 { "" } else { "s" }
+                ),
                 theme::faint(),
             )));
             (" Check contrast? ", "check", "skip")
@@ -2099,7 +2232,11 @@ fn tool_approval_parts(
                 {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            if n == 0 { label.clone() } else { indent.clone() },
+                            if n == 0 {
+                                label.clone()
+                            } else {
+                                indent.clone()
+                            },
                             theme::accent(),
                         ),
                         Span::styled(wrapped, theme::text()),
@@ -2136,7 +2273,11 @@ fn tool_approval_parts(
         // The renderer stays total anyway so this can never panic.
         Action::Todos(items) => {
             lines.push(Line::from(Span::styled(
-                format!("{} todo{}", items.len(), if items.len() == 1 { "" } else { "s" }),
+                format!(
+                    "{} todo{}",
+                    items.len(),
+                    if items.len() == 1 { "" } else { "s" }
+                ),
                 theme::text(),
             )));
             (" Update the checklist? ", "update", "skip")
@@ -2244,17 +2385,19 @@ fn render_tool_approval_inline(f: &mut Frame, area: Rect, app: &App, request: &A
     let body_height = content.height - footer_height;
 
     if body_height > 0 {
-        let body_area = Rect { height: body_height, ..content };
+        let body_area = Rect {
+            height: body_height,
+            ..content
+        };
         let scroll = approval_scroll(app, body.len(), body_height);
-        f.render_widget(
-            Paragraph::new(body.clone()).scroll((scroll, 0)),
-            body_area,
-        );
+        f.render_widget(Paragraph::new(body.clone()).scroll((scroll, 0)), body_area);
 
         // Say so when there is more, and which way -- an approval box that
         // silently hides half a command is how someone approves the half they
         // could see.
-        let hidden_below = body.len().saturating_sub(body_height as usize + scroll as usize);
+        let hidden_below = body
+            .len()
+            .saturating_sub(body_height as usize + scroll as usize);
         // Only mention the scroll keys when there is something to scroll --
         // an unconditional hint is noise on the short prompts, which are most
         // of them.
@@ -2327,10 +2470,7 @@ fn deployment_lines(app: &App, inner: usize) -> Vec<Line<'static>> {
 /// running. So the status line and the keys are pinned, and the checklist and
 /// log scroll behind them. Same shape, and the same reasoning, as
 /// `tool_approval_parts`.
-fn deployment_parts(
-    app: &App,
-    inner: usize,
-) -> (String, Vec<Line<'static>>, Vec<Line<'static>>) {
+fn deployment_parts(app: &App, inner: usize) -> (String, Vec<Line<'static>>, Vec<Line<'static>>) {
     let Some(session) = app.deploy.as_ref() else {
         return (String::new(), Vec::new(), Vec::new());
     };
@@ -2347,7 +2487,10 @@ fn deployment_parts(
             StepState::Skipped => theme::p().faint,
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", step.state.glyph()), Style::default().fg(colour)),
+            Span::styled(
+                format!("{} ", step.state.glyph()),
+                Style::default().fg(colour),
+            ),
             Span::styled(step.label.clone(), theme::text()),
         ]));
     }
@@ -2531,7 +2674,10 @@ fn deployment_parts(
                     }
                 }
                 (None, None) => {
-                    lines.push(Line::from(Span::styled("Nothing was deployed.", theme::muted())));
+                    lines.push(Line::from(Span::styled(
+                        "Nothing was deployed.",
+                        theme::muted(),
+                    )));
                 }
             }
             footer.push(Line::from(Span::styled("  enter close", theme::faint())));
@@ -2603,7 +2749,10 @@ fn render_deployment(f: &mut Frame, area: Rect, app: &App) {
         // ones being read, and a panel anchored at the top would show the
         // beginning of a build forever.
         let scroll = (body.len() as u16).saturating_sub(body_height);
-        let body_area = Rect { height: body_height, ..content };
+        let body_area = Rect {
+            height: body_height,
+            ..content
+        };
         f.render_widget(Paragraph::new(body).scroll((scroll, 0)), body_area);
     }
 
@@ -2778,8 +2927,7 @@ fn render_command_palette(f: &mut Frame, area: Rect, app: &App, filter: &str, se
     let thumb = if content_length == 0 || visible >= content_length {
         track
     } else {
-        (((visible as f64 / content_length as f64) * track as f64).round() as usize)
-            .clamp(1, track)
+        (((visible as f64 / content_length as f64) * track as f64).round() as usize).clamp(1, track)
     };
     let max_scroll = content_length.saturating_sub(visible);
     let thumb_top = if max_scroll == 0 {
@@ -2797,6 +2945,411 @@ fn render_command_palette(f: &mut Frame, area: Rect, app: &App, filter: &str, se
                 ("┃", thumb_style)
             } else {
                 ("│", track_style)
+            };
+            Line::from(Span::styled(symbol, style))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(bar), scrollbar_rect);
+}
+
+fn render_project_picker(
+    f: &mut Frame,
+    area: Rect,
+    items: &[crate::projects::ProjectEntry],
+    filter: &str,
+    selected: usize,
+    show_top: bool,
+) {
+    let filter_lower = filter.to_lowercase();
+    let matches: Vec<&crate::projects::ProjectEntry> = items
+        .iter()
+        .filter(|e| {
+            if filter_lower.is_empty() {
+                true
+            } else {
+                e.name.to_lowercase().contains(&filter_lower)
+                    || e.path.to_lowercase().contains(&filter_lower)
+            }
+        })
+        .collect();
+
+    let rows: Vec<String> = matches
+        .iter()
+        .map(|entry| format!("{:<18}  {}", shorten(&entry.name, 18), entry.path))
+        .collect();
+
+    let height = FIXED_PICKER_HEIGHT.clamp(MIN_POPUP_HEIGHT, area.height);
+    let popup = centered_rect(76, height, area);
+    f.render_widget(Clear, popup);
+
+    let tab_name = if show_top {
+        "Top Projects"
+    } else {
+        "Recent Projects"
+    };
+    let title = if filter.is_empty() {
+        format!(" {tab_name} ")
+    } else {
+        format!(" {tab_name} — {filter} ")
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::p().accent))
+        .title(Span::styled(title, theme::accent_bold()));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let hint = Line::from(vec![
+        Span::styled("type to filter  ", theme::faint()),
+        Span::styled("Tab", theme::key()),
+        Span::styled(
+            if show_top {
+                " show recent  "
+            } else {
+                " show top  "
+            },
+            theme::faint(),
+        ),
+        Span::styled("↑↓", theme::key()),
+        Span::styled(" move  ", theme::faint()),
+        Span::styled("↵", theme::key()),
+        Span::styled(" switch  ", theme::faint()),
+        Span::styled("esc", theme::key()),
+        Span::styled(" close", theme::faint()),
+    ]);
+    f.render_widget(Paragraph::new(hint), inner);
+
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+
+    let visible = list_area.height as usize;
+    let content_length = rows.len();
+    let start = if visible == 0 {
+        0
+    } else {
+        selected
+            .saturating_sub(visible - 1)
+            .min(content_length.saturating_sub(visible))
+    };
+
+    let list_items: Vec<ListItem> = if rows.is_empty() {
+        if filter.is_empty() {
+            vec![ListItem::new("No projects found.")]
+        } else {
+            vec![ListItem::new(format!(
+                "No matching projects for '{filter}'. Press Backspace to clear."
+            ))]
+        }
+    } else {
+        rows.iter().map(|r| ListItem::new(r.clone())).collect()
+    };
+    let list = List::new(list_items)
+        .style(theme::text())
+        .highlight_style(
+            Style::default()
+                .fg(theme::p().accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        )
+        .highlight_symbol("❯ ");
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    *state.offset_mut() = start;
+
+    let list_rect = Rect {
+        x: list_area.x,
+        y: list_area.y,
+        width: list_area.width.saturating_sub(1),
+        height: list_area.height,
+    };
+    f.render_stateful_widget(list, list_rect, &mut state);
+
+    let scrollbar_rect = Rect {
+        x: list_area.x + list_area.width.saturating_sub(1),
+        y: list_area.y,
+        width: 1,
+        height: list_area.height,
+    };
+    let track = list_area.height as usize;
+    let thumb = if content_length == 0 || visible >= content_length {
+        track
+    } else {
+        (((visible as f64 / content_length as f64) * track as f64).round() as usize).clamp(1, track)
+    };
+    let max_scroll = content_length.saturating_sub(visible);
+    let thumb_top = if max_scroll == 0 {
+        0
+    } else {
+        (((start as f64 / max_scroll as f64) * (track - thumb) as f64).round() as usize)
+            .min(track - thumb)
+    };
+    let bar: Vec<Line> = (0..track)
+        .map(|row| {
+            let in_thumb = row >= thumb_top && row < thumb_top + thumb;
+            let (symbol, style) = if in_thumb {
+                ("┃", Style::default().fg(theme::p().accent))
+            } else {
+                ("│", Style::default().fg(theme::p().border))
+            };
+            Line::from(Span::styled(symbol, style))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(bar), scrollbar_rect);
+}
+
+fn render_prompt_picker(
+    f: &mut Frame,
+    area: Rect,
+    items: &[String],
+    filter: &str,
+    selected: usize,
+) {
+    let filter_lower = filter.to_lowercase();
+    let matches: Vec<&String> = items
+        .iter()
+        .filter(|p| {
+            if filter_lower.is_empty() {
+                true
+            } else {
+                p.to_lowercase().contains(&filter_lower)
+            }
+        })
+        .collect();
+
+    let rows: Vec<String> = matches
+        .iter()
+        .map(|prompt| {
+            let first = prompt.lines().next().unwrap_or("").trim();
+            if prompt.contains('\n') {
+                format!("{first} …")
+            } else {
+                first.to_string()
+            }
+        })
+        .collect();
+
+    let height = FIXED_PICKER_HEIGHT.clamp(MIN_POPUP_HEIGHT, area.height);
+    let popup = centered_rect(76, height, area);
+    f.render_widget(Clear, popup);
+
+    let title = if filter.is_empty() {
+        " Prompt History ".to_string()
+    } else {
+        format!(" Prompt History — {filter} ")
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::p().accent))
+        .title(Span::styled(title, theme::accent_bold()));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let hint = Line::from(vec![
+        Span::styled("type to filter  ", theme::faint()),
+        Span::styled("↑↓", theme::key()),
+        Span::styled(" move  ", theme::faint()),
+        Span::styled("↵", theme::key()),
+        Span::styled(" restore to input  ", theme::faint()),
+        Span::styled("esc", theme::key()),
+        Span::styled(" close", theme::faint()),
+    ]);
+    f.render_widget(Paragraph::new(hint), inner);
+
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+
+    let visible = list_area.height as usize;
+    let content_length = rows.len();
+    let start = if visible == 0 {
+        0
+    } else {
+        selected
+            .saturating_sub(visible - 1)
+            .min(content_length.saturating_sub(visible))
+    };
+
+    let list_items: Vec<ListItem> = if rows.is_empty() {
+        vec![ListItem::new("No matching prompts found.")]
+    } else {
+        rows.iter().map(|r| ListItem::new(r.clone())).collect()
+    };
+    let list = List::new(list_items)
+        .style(theme::text())
+        .highlight_style(
+            Style::default()
+                .fg(theme::p().accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        )
+        .highlight_symbol("❯ ");
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    *state.offset_mut() = start;
+
+    let list_rect = Rect {
+        x: list_area.x,
+        y: list_area.y,
+        width: list_area.width.saturating_sub(1),
+        height: list_area.height,
+    };
+    f.render_stateful_widget(list, list_rect, &mut state);
+
+    let scrollbar_rect = Rect {
+        x: list_area.x + list_area.width.saturating_sub(1),
+        y: list_area.y,
+        width: 1,
+        height: list_area.height,
+    };
+    let track = list_area.height as usize;
+    let thumb = if content_length == 0 || visible >= content_length {
+        track
+    } else {
+        (((visible as f64 / content_length as f64) * track as f64).round() as usize).clamp(1, track)
+    };
+    let max_scroll = content_length.saturating_sub(visible);
+    let thumb_top = if max_scroll == 0 {
+        0
+    } else {
+        (((start as f64 / max_scroll as f64) * (track - thumb) as f64).round() as usize)
+            .min(track - thumb)
+    };
+    let bar: Vec<Line> = (0..track)
+        .map(|row| {
+            let in_thumb = row >= thumb_top && row < thumb_top + thumb;
+            let (symbol, style) = if in_thumb {
+                ("┃", Style::default().fg(theme::p().accent))
+            } else {
+                ("│", Style::default().fg(theme::p().border))
+            };
+            Line::from(Span::styled(symbol, style))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(bar), scrollbar_rect);
+}
+
+fn render_query_rollback_picker(
+    f: &mut Frame,
+    area: Rect,
+    queries: &[(u64, String)],
+    selected: usize,
+) {
+    let max_text_width = 58;
+    let rows: Vec<String> = queries
+        .iter()
+        .map(|(q, prompt)| {
+            let first = prompt.lines().next().unwrap_or("").trim();
+            let is_multiline = prompt.lines().count() > 1;
+            let clipped = shorten(first, max_text_width);
+            if is_multiline && !clipped.ends_with('…') {
+                format!("Query {q}: {clipped} …")
+            } else {
+                format!("Query {q}: {clipped}")
+            }
+        })
+        .collect();
+
+    let height = FIXED_PICKER_HEIGHT.clamp(MIN_POPUP_HEIGHT, area.height);
+    let popup = centered_rect(76, height, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::p().warning))
+        .title(Span::styled(
+            " Select Query to Roll Back ",
+            Style::default()
+                .fg(theme::p().warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let hint = Line::from(vec![
+        Span::styled("↑↓", theme::key()),
+        Span::styled(" move  ", theme::faint()),
+        Span::styled("↵", theme::key()),
+        Span::styled(" preview rollback  ", theme::faint()),
+        Span::styled("esc", theme::key()),
+        Span::styled(" cancel", theme::faint()),
+    ]);
+    f.render_widget(Paragraph::new(hint), inner);
+
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+
+    let visible = list_area.height as usize;
+    let content_length = rows.len();
+    let start = if visible == 0 {
+        0
+    } else {
+        selected
+            .saturating_sub(visible - 1)
+            .min(content_length.saturating_sub(visible))
+    };
+
+    let list_items: Vec<ListItem> = rows.iter().map(|r| ListItem::new(r.clone())).collect();
+    let list = List::new(list_items)
+        .style(theme::text())
+        .highlight_style(
+            Style::default()
+                .fg(theme::p().warning)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        )
+        .highlight_symbol("❯ ");
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    *state.offset_mut() = start;
+
+    let list_rect = Rect {
+        x: list_area.x,
+        y: list_area.y,
+        width: list_area.width.saturating_sub(1),
+        height: list_area.height,
+    };
+    f.render_stateful_widget(list, list_rect, &mut state);
+
+    let scrollbar_rect = Rect {
+        x: list_area.x + list_area.width.saturating_sub(1),
+        y: list_area.y,
+        width: 1,
+        height: list_area.height,
+    };
+    let track = list_area.height as usize;
+    let thumb = if content_length == 0 || visible >= content_length {
+        track
+    } else {
+        (((visible as f64 / content_length as f64) * track as f64).round() as usize).clamp(1, track)
+    };
+    let max_scroll = content_length.saturating_sub(visible);
+    let thumb_top = if max_scroll == 0 {
+        0
+    } else {
+        (((start as f64 / max_scroll as f64) * (track - thumb) as f64).round() as usize)
+            .min(track - thumb)
+    };
+    let bar: Vec<Line> = (0..track)
+        .map(|row| {
+            let in_thumb = row >= thumb_top && row < thumb_top + thumb;
+            let (symbol, style) = if in_thumb {
+                ("┃", Style::default().fg(theme::p().warning))
+            } else {
+                ("│", Style::default().fg(theme::p().border))
             };
             Line::from(Span::styled(symbol, style))
         })
@@ -2988,9 +3541,7 @@ fn inline_styled(line: &str, base: Style) -> Styled {
     let code_style = Style::default()
         .fg(palette.accent_soft)
         .add_modifier(Modifier::BOLD);
-    let link_style = base
-        .fg(palette.accent)
-        .add_modifier(Modifier::UNDERLINED);
+    let link_style = base.fg(palette.accent).add_modifier(Modifier::UNDERLINED);
     let url_style = theme::faint();
 
     let chars: Vec<char> = line.chars().collect();
@@ -3029,7 +3580,11 @@ fn inline_styled(line: &str, base: Style) -> Styled {
                 i = end + len;
                 continue;
             }
-            push(&mut out, &chars[i..i + len].iter().collect::<String>(), base);
+            push(
+                &mut out,
+                &chars[i..i + len].iter().collect::<String>(),
+                base,
+            );
             i += len;
             continue;
         }
@@ -3087,7 +3642,11 @@ fn inline_styled(line: &str, base: Style) -> Styled {
             // Emit the whole run and step past it. Re-examining it one
             // character at a time is what would pair the first `*` of `**/`
             // with a later lone `*` and delete what sits between them.
-            push(&mut out, &chars[i..i + len].iter().collect::<String>(), base);
+            push(
+                &mut out,
+                &chars[i..i + len].iter().collect::<String>(),
+                base,
+            );
             i += len;
             continue;
         }
@@ -3153,7 +3712,11 @@ fn split_styled_words(input: &Styled) -> Vec<(Option<Style>, Styled)> {
         if c == ' ' {
             words.push((Some(style), Vec::new()));
         } else {
-            words.last_mut().expect("seeded with one word").1.push((c, style));
+            words
+                .last_mut()
+                .expect("seeded with one word")
+                .1
+                .push((c, style));
         }
     }
     words
@@ -3274,7 +3837,11 @@ fn block_markdown(line: &str, base: Style) -> MdBlock {
     // A rule: three or more of one marker and nothing else.
     if trimmed.len() >= 3
         && trimmed.chars().all(|c| c == '-' || c == '*' || c == '_')
-        && trimmed.chars().collect::<std::collections::HashSet<_>>().len() == 1
+        && trimmed
+            .chars()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == 1
     {
         return MdBlock::plain(String::new(), base);
     }
@@ -3426,12 +3993,14 @@ fn markdown_lines(body: &str, width: usize) -> Vec<Line<'static>> {
 
         let block = block_markdown(logical, theme::text());
         let styled = inline_styled(&block.text, block.body_style);
-        let body_width = width
-            .saturating_sub(block.prefix.chars().count())
-            .max(1);
+        let body_width = width.saturating_sub(block.prefix.chars().count()).max(1);
 
         for (row, chunk) in wrap_styled(&styled, body_width).into_iter().enumerate() {
-            let marker = if row == 0 { &block.prefix } else { &block.hanging };
+            let marker = if row == 0 {
+                &block.prefix
+            } else {
+                &block.hanging
+            };
             let mut spans: Vec<Span<'static>> = Vec::new();
             if !marker.is_empty() {
                 spans.push(Span::styled(marker.clone(), block.prefix_style));
@@ -3582,9 +4151,7 @@ fn render_table(table: &Table, width: usize) -> Vec<Line<'static>> {
         .iter()
         .map(|row| {
             (0..columns)
-                .map(|c| {
-                    inline_styled(row.get(c).map(String::as_str).unwrap_or(""), theme::text())
-                })
+                .map(|c| inline_styled(row.get(c).map(String::as_str).unwrap_or(""), theme::text()))
                 .collect()
         })
         .collect();
@@ -3804,6 +4371,8 @@ mod tests {
             })
             .collect();
         app.overlay = Some(Overlay::RollbackConfirm {
+            target_turn: None,
+            prompt_snippet: None,
             steps,
             warning: warning.map(str::to_string),
             confirmed: false,
@@ -3956,7 +4525,9 @@ mod tests {
         app.workspace_root = "/tmp/project".into();
         app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
             call: Default::default(),
-            action: Action::Read { path: "src/config.rs".into() },
+            action: Action::Read {
+                path: "src/config.rs".into(),
+            },
             remaining: 0,
             preview: None,
         }));
@@ -3966,7 +4537,10 @@ mod tests {
             .find(|r| r.contains("src/config.rs"))
             .expect("the path is on screen");
         let body = header.trim_matches(|c| c == '│' || c == ' ');
-        assert_eq!(body, "src/config.rs", "expected a bare path, got {header:?}");
+        assert_eq!(
+            body, "src/config.rs",
+            "expected a bare path, got {header:?}"
+        );
     }
 
     // ---- file-change diffs -----------------------------------------------
@@ -4094,11 +4668,13 @@ mod tests {
             let rows = rows(&mut app, 72, 22);
             let joined = rows.join("\n");
             assert!(
-                rows.iter().any(|r| r.contains("- ") && r.contains("done(a, b);")),
+                rows.iter()
+                    .any(|r| r.contains("- ") && r.contains("done(a, b);")),
                 "expected the replaced line:\n{joined}"
             );
             assert!(
-                rows.iter().any(|r| r.contains("+ ") && r.contains("done(a, b, c);")),
+                rows.iter()
+                    .any(|r| r.contains("+ ") && r.contains("done(a, b, c);")),
                 "expected the new line:\n{joined}"
             );
             assert!(
@@ -4161,7 +4737,10 @@ mod tests {
                 images: Vec::new(),
             };
             let rendered = text_of(&message_lines(&msg, 60));
-            assert!(rendered[0].contains("1 addition and 1 removal"), "{rendered:?}");
+            assert!(
+                rendered[0].contains("1 addition and 1 removal"),
+                "{rendered:?}"
+            );
             assert!(rendered.iter().any(|l| l.contains("2 - b")), "{rendered:?}");
             assert!(rendered.iter().any(|l| l.contains("2 + B")), "{rendered:?}");
         }
@@ -4215,7 +4794,10 @@ mod tests {
             let added: Vec<&String> = rendered.iter().filter(|l| l.contains('+')).collect();
             assert_eq!(added.len(), 1, "one '+' for one added line: {rendered:?}");
             // Nothing of the line is dropped just because it did not fit.
-            let carried = rendered.iter().map(|r| r.matches('x').count()).sum::<usize>();
+            let carried = rendered
+                .iter()
+                .map(|r| r.matches('x').count())
+                .sum::<usize>();
             assert_eq!(carried, long.len(), "the whole line survives: {rendered:?}");
         }
 
@@ -4244,8 +4826,6 @@ mod tests {
             );
         }
 
-
-
         /// Nothing to draw is nothing to draw -- not a stray blank gutter.
         #[test]
         fn an_empty_diff_draws_nothing() {
@@ -4271,7 +4851,11 @@ mod tests {
     #[test]
     fn different_failures_render_differently() {
         let cases = [
-            ("Daily limit reached — requests 5 of 5.", "Daily limit reached", "◔"),
+            (
+                "Daily limit reached — requests 5 of 5.",
+                "Daily limit reached",
+                "◔",
+            ),
             (
                 "The reply hit the 16384-token output cap and was cut off.",
                 "Reply cut off",
@@ -4282,19 +4866,33 @@ mod tests {
                 "Conversation too long",
                 "▣",
             ),
-            ("Could not reach http://x:8000: connection refused", "Endpoint unreachable", "⊘"),
+            (
+                "Could not reach http://x:8000: connection refused",
+                "Endpoint unreachable",
+                "⊘",
+            ),
         ];
 
         for (body, headline, icon) in cases {
             let mut app = App::new(crate::config::Config::default());
             app.greeted = true;
-            app.messages.push(crate::app::Message::new(Role::Error, body));
+            app.messages
+                .push(crate::app::Message::new(Role::Error, body));
 
             let rendered = rendered_text(&mut app, 100, 30);
-            assert!(rendered.contains(headline), "missing headline {headline}: {rendered}");
-            assert!(rendered.contains(icon), "missing icon {icon} for {headline}");
+            assert!(
+                rendered.contains(headline),
+                "missing headline {headline}: {rendered}"
+            );
+            assert!(
+                rendered.contains(icon),
+                "missing icon {icon} for {headline}"
+            );
             // The undifferentiated label is gone.
-            assert!(!rendered.contains("Error: "), "still using the generic label: {rendered}");
+            assert!(
+                !rendered.contains("Error: "),
+                "still using the generic label: {rendered}"
+            );
         }
     }
 
@@ -4309,7 +4907,10 @@ mod tests {
             "Daily limit reached — requests 5 of 5.",
         ));
         let out = rendered_text(&mut spent, 100, 30);
-        assert!(out.contains("/quota"), "should point at the user's own limits: {out}");
+        assert!(
+            out.contains("/quota"),
+            "should point at the user's own limits: {out}"
+        );
 
         let mut full = App::new(crate::config::Config::default());
         full.greeted = true;
@@ -4318,15 +4919,20 @@ mod tests {
             "This conversation is too long for the model's context window.",
         ));
         let out = rendered_text(&mut full, 100, 30);
-        assert!(out.contains("/new"), "should point at the command that clears it: {out}");
+        assert!(
+            out.contains("/new"),
+            "should point at the command that clears it: {out}"
+        );
     }
 
     #[test]
     fn an_unrecognised_failure_still_renders_readably() {
         let mut app = App::new(crate::config::Config::default());
         app.greeted = true;
-        app.messages
-            .push(crate::app::Message::new(Role::Error, "something went sideways"));
+        app.messages.push(crate::app::Message::new(
+            Role::Error,
+            "something went sideways",
+        ));
         let out = rendered_text(&mut app, 100, 30);
         assert!(out.contains("Error"), "{out}");
         assert!(out.contains("something went sideways"), "{out}");
@@ -4337,8 +4943,10 @@ mod tests {
     fn system_messages_are_untouched_by_the_error_styling() {
         let mut app = App::new(crate::config::Config::default());
         app.greeted = true;
-        app.messages
-            .push(crate::app::Message::new(Role::System, "Switched to deepseek."));
+        app.messages.push(crate::app::Message::new(
+            Role::System,
+            "Switched to deepseek.",
+        ));
         let out = rendered_text(&mut app, 100, 30);
         assert!(out.contains("System"), "{out}");
     }
@@ -4449,13 +5057,17 @@ mod tests {
         // The promise about what this will do to the machine has to match the
         // setting. Stating the stricter one to whoever is not in it would be a
         // safety claim that is simply untrue.
-        assert!(shown.contains("Destructive commands wait for your approval"), "{shown}");
+        assert!(
+            shown.contains("Destructive commands wait for your approval"),
+            "{shown}"
+        );
         app.config.tools.approval = crate::config::ApprovalMode::Always;
         let strict = welcome_text(&app, 96);
-        assert!(strict.contains("Every command and every write waits"), "{strict}");
+        assert!(
+            strict.contains("Every command and every write waits"),
+            "{strict}"
+        );
     }
-
-
 
     /// It is a launch screen, not furniture: the first prompt must replace it
     /// with the transcript entirely.
@@ -4468,7 +5080,10 @@ mod tests {
         let rendered = rendered_text(&mut app, 100, 22);
 
         assert!(!rendered.contains("Welcome back"), "{rendered}");
-        assert!(!rendered.contains("a terminal coding assistant"), "{rendered}");
+        assert!(
+            !rendered.contains("a terminal coding assistant"),
+            "{rendered}"
+        );
         assert!(rendered.contains("hello there"), "{rendered}");
     }
 
@@ -4496,7 +5111,6 @@ mod tests {
         );
     }
 
-
     /// An unconfigured setup has to say so on the launch screen, not fail on
     /// the first prompt.
     #[test]
@@ -4507,7 +5121,6 @@ mod tests {
         assert!(shown.contains("Before you start"), "{shown}");
         assert!(shown.contains("COVEXCODE_API_KEY"), "{shown}");
     }
-
 
     /// Regression, reframed: the setup warning used to be clipped off the
     /// bottom of a short welcome panel with no way to reach it. The panel is
@@ -4527,7 +5140,6 @@ mod tests {
             );
         }
     }
-
 
     /// The user's own turns sit on a raised block so scrolling back finds
     /// "where did I ask that" by shape rather than by reading. It has to be a
@@ -4599,7 +5211,8 @@ mod tests {
         app.greeted = true;
         app.state = AppState::AwaitingApproval;
         app.workspace_root = "/tmp/project".to_string();
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Command {
                 command: "ls -la".to_string(),
                 purpose: None,
@@ -4621,7 +5234,10 @@ mod tests {
             })
             .count();
 
-        assert_eq!(rows_with_keys, 1, "the y/n/esc bar must be drawn once, not twice");
+        assert_eq!(
+            rows_with_keys, 1,
+            "the y/n/esc bar must be drawn once, not twice"
+        );
     }
 
     /// Regression: no live suggestions existed at all -- typing "/" showed
@@ -4693,8 +5309,12 @@ mod tests {
         app.greeted = true;
         app.state = AppState::AwaitingApproval;
         app.workspace_root = "/tmp/project".to_string();
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
-            action: Action::Command { command: "ls -la".to_string(), purpose: None },
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
+            action: Action::Command {
+                command: "ls -la".to_string(),
+                purpose: None,
+            },
             remaining: 0,
             preview: None,
         }));
@@ -4703,14 +5323,23 @@ mod tests {
         let on_yes = rendered_rows(&mut app, 80, 24);
         let yes_row = row_containing(&on_yes, "y run");
         let no_row = row_containing(&on_yes, "n skip");
-        assert!(yes_row.contains('❯'), "cursor should be on \"yes\": {yes_row}");
-        assert!(!no_row.contains('❯'), "cursor should not be on \"no\": {no_row}");
+        assert!(
+            yes_row.contains('❯'),
+            "cursor should be on \"yes\": {yes_row}"
+        );
+        assert!(
+            !no_row.contains('❯'),
+            "cursor should not be on \"no\": {no_row}"
+        );
 
         app.approval_selected = false;
         let on_no = rendered_rows(&mut app, 80, 24);
         let yes_row = row_containing(&on_no, "y run");
         let no_row = row_containing(&on_no, "n skip");
-        assert!(!yes_row.contains('❯'), "cursor should have moved off \"yes\": {yes_row}");
+        assert!(
+            !yes_row.contains('❯'),
+            "cursor should have moved off \"yes\": {yes_row}"
+        );
         assert!(no_row.contains('❯'), "cursor should be on \"no\": {no_row}");
 
         let joined = on_no.concat();
@@ -4750,7 +5379,9 @@ mod tests {
         app.greeted = true;
         app.state = AppState::Streaming;
         app.busy_started = Some(std::time::Instant::now());
-        app.append_reasoning("First I need to check what the scaffold generated.\nThe entry point is main.jsx");
+        app.append_reasoning(
+            "First I need to check what the scaffold generated.\nThe entry point is main.jsx",
+        );
 
         let rendered = rendered_text(&mut app, 80, 24);
         assert!(rendered.contains("Thinking…"), "{rendered}");
@@ -4774,14 +5405,15 @@ mod tests {
         let mut app = App::new(crate::config::Config::default());
         app.greeted = true;
         app.state = AppState::Streaming;
-        app.busy_started =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(152));
-        app.request_started =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
+        app.busy_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(152));
+        app.request_started = Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
 
         let rendered = rendered_text(&mut app, 100, 24);
         assert!(rendered.contains("(12s"), "the round in flight: {rendered}");
-        assert!(rendered.contains("152s this turn"), "the turn total: {rendered}");
+        assert!(
+            rendered.contains("152s this turn"),
+            "the turn total: {rendered}"
+        );
 
         // A first round, where they agree, says it once.
         app.busy_started = app.request_started;
@@ -4789,12 +5421,12 @@ mod tests {
         assert!(!single.contains("this turn"), "{single}");
     }
 
-
     /// The end of the same bug: rendering an overlay into a zero-cell frame.
     #[test]
     fn rendering_an_overlay_into_a_zero_size_frame_does_not_panic() {
         let mut app = App::new(crate::config::Config::default());
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Command {
                 command: "rm -rf /".to_string(),
                 purpose: Some("something alarming".to_string()),
@@ -4822,7 +5454,8 @@ mod tests {
         app.greeted = true;
         app.messages
             .push(Message::new(Role::User, "delete the build directory"));
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Command {
                 command: "rm -rf build".to_string(),
                 purpose: Some("clear stale output".to_string()),
@@ -4972,14 +5605,22 @@ mod tests {
                 "long file",
                 Action::Write {
                     path: "src/generated.rs".into(),
-                    content: (1..=200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+                    content: (1..=200)
+                        .map(|i| format!("line {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 },
             ),
         ] {
             let mut app = App::new(crate::config::Config::default());
             app.greeted = true;
             app.workspace_root = "/tmp/project".into();
-            app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(), action, remaining: 0, preview: None }));
+            app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+                call: Default::default(),
+                action,
+                remaining: 0,
+                preview: None,
+            }));
 
             for (w, h) in [(80, 24), (120, 40), (60, 12)] {
                 let rendered = rendered_text(&mut app, w, h);
@@ -5002,17 +5643,24 @@ mod tests {
         let mut app = App::new(crate::config::Config::default());
         app.greeted = true;
         app.workspace_root = "/tmp/project".into();
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Write {
                 path: "big.txt".into(),
-                content: (1..=200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+                content: (1..=200)
+                    .map(|i| format!("line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             },
             remaining: 0,
             preview: None,
         }));
 
         let rendered = rendered_text(&mut app, 80, 24);
-        assert!(rendered.contains("more"), "expected a 'N more' marker: {rendered}");
+        assert!(
+            rendered.contains("more"),
+            "expected a 'N more' marker: {rendered}"
+        );
     }
 
     /// Scrolling has to actually move the content, and stop at the end rather
@@ -5022,10 +5670,14 @@ mod tests {
         let mut app = App::new(crate::config::Config::default());
         app.greeted = true;
         app.workspace_root = "/tmp/project".into();
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Write {
                 path: "big.txt".into(),
-                content: (1..=40).map(|i| format!("marker{i}")).collect::<Vec<_>>().join("\n"),
+                content: (1..=40)
+                    .map(|i| format!("marker{i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             },
             remaining: 0,
             preview: None,
@@ -5056,7 +5708,8 @@ mod tests {
     fn the_approval_prompt_shows_the_command_and_the_keys() {
         let mut app = App::new(crate::config::Config::default());
         app.workspace_root = "/tmp/project".to_string();
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Command {
                 command: "rm -rf build".to_string(),
                 purpose: None,
@@ -5094,7 +5747,8 @@ mod tests {
     fn the_write_approval_prompt_shows_the_path_and_content() {
         let mut app = App::new(crate::config::Config::default());
         app.workspace_root = "/tmp/project".to_string();
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Write {
                 path: "hello.py".to_string(),
                 content: "print('hi')\n".to_string(),
@@ -5130,7 +5784,8 @@ mod tests {
     fn the_search_approval_prompt_shows_the_query_and_the_keys() {
         let mut app = App::new(crate::config::Config::default());
         app.workspace_root = "/tmp/project".to_string();
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Search {
                 query: "rust async runtime comparison".to_string(),
                 max_results: 5,
@@ -5220,7 +5875,10 @@ mod tests {
         let text = rendered_text(&mut app, 80, 24);
         assert!(text.contains("Building and uploading"), "{text}");
         assert!(text.contains("esc to stop"), "{text}");
-        assert!(text.contains("Building..."), "the streamed log must show: {text}");
+        assert!(
+            text.contains("Building..."),
+            "the streamed log must show: {text}"
+        );
     }
 
     /// The URL is the one thing anyone wants out of this screen, and a URL
@@ -5283,7 +5941,10 @@ mod tests {
             session.input_cursor = session.input.len();
         }
         let typing = rendered_text(&mut app, 80, 24);
-        assert!(!typing.contains("hunter2"), "a value echoed while typing: {typing}");
+        assert!(
+            !typing.contains("hunter2"),
+            "a value echoed while typing: {typing}"
+        );
         assert!(typing.contains('•'), "it should render as dots: {typing}");
 
         // ...and once it is set.
@@ -5296,7 +5957,10 @@ mod tests {
         }
         let listed = rendered_text(&mut app, 80, 24);
         assert!(listed.contains("API_KEY"), "the name should show: {listed}");
-        assert!(!listed.contains("hunter2"), "a value leaked into the list: {listed}");
+        assert!(
+            !listed.contains("hunter2"),
+            "a value leaked into the list: {listed}"
+        );
     }
 
     /// The same sweep the rest of the app gets: no deployment screen may panic
@@ -5330,10 +5994,21 @@ mod tests {
                 session.url = Some("https://a-rather-long-project-name.vercel.app".into());
                 session.show_full_log = true;
                 for i in 0..30 {
-                    session.log.push_back(format!("log line number {i} with some text"));
+                    session
+                        .log
+                        .push_back(format!("log line number {i} with some text"));
                 }
             }
-            for (w, h) in [(1, 1), (2, 3), (4, 5), (10, 6), (20, 8), (40, 12), (80, 24), (200, 60)] {
+            for (w, h) in [
+                (1, 1),
+                (2, 3),
+                (4, 5),
+                (10, 6),
+                (20, 8),
+                (40, 12),
+                (80, 24),
+                (200, 60),
+            ] {
                 let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
                 terminal
                     .draw(|f| render(f, &mut app))
@@ -5347,10 +6022,8 @@ mod tests {
     #[test]
     fn the_deployment_panel_leaves_the_transcript_visible_above_it() {
         let mut app = deploying(Stage::Menu(Menu::Confirm));
-        app.messages.push(Message::new(
-            Role::User,
-            "deploy this thing for me please",
-        ));
+        app.messages
+            .push(Message::new(Role::User, "deploy this thing for me please"));
         let text = rendered_text(&mut app, 80, 30);
         assert!(text.contains("deploy this thing"), "{text}");
         assert!(text.contains("Continue with deployment"), "{text}");
@@ -5416,9 +6089,15 @@ mod tests {
         );
         let joined = rows.concat();
 
-        assert!(joined.contains("https://deploy-demo.vercel.app"), "{joined}");
+        assert!(
+            joined.contains("https://deploy-demo.vercel.app"),
+            "{joined}"
+        );
         assert!(joined.contains("Production"), "{joined}");
-        assert!(!joined.contains("**"), "asterisks reached the screen: {joined}");
+        assert!(
+            !joined.contains("**"),
+            "asterisks reached the screen: {joined}"
+        );
     }
 
     #[test]
@@ -5426,7 +6105,10 @@ mod tests {
         let joined = assistant_rows("Check `index.html` and `vite.config.js` first.").concat();
         assert!(joined.contains("index.html"), "{joined}");
         assert!(joined.contains("vite.config.js"), "{joined}");
-        assert!(!joined.contains('`'), "backticks reached the screen: {joined}");
+        assert!(
+            !joined.contains('`'),
+            "backticks reached the screen: {joined}"
+        );
     }
 
     #[test]
@@ -5434,15 +6116,22 @@ mod tests {
         let joined = assistant_rows("## What I found\n\n- public/ and src/\n- index.html").concat();
         assert!(joined.contains("What I found"), "{joined}");
         assert!(!joined.contains('#'), "hashes reached the screen: {joined}");
-        assert!(joined.contains('•'), "a bullet should render as one: {joined}");
+        assert!(
+            joined.contains('•'),
+            "a bullet should render as one: {joined}"
+        );
         assert!(joined.contains("index.html"), "{joined}");
     }
 
     #[test]
     fn a_fenced_code_block_is_shown_without_its_fences() {
-        let joined = assistant_rows("Run this:\n\n```bash\nnpm run build\n```\n\nThen deploy.").concat();
+        let joined =
+            assistant_rows("Run this:\n\n```bash\nnpm run build\n```\n\nThen deploy.").concat();
         assert!(joined.contains("npm run build"), "{joined}");
-        assert!(!joined.contains("```"), "fences reached the screen: {joined}");
+        assert!(
+            !joined.contains("```"),
+            "fences reached the screen: {joined}"
+        );
         assert!(joined.contains("Then deploy."), "{joined}");
     }
 
@@ -5480,7 +6169,10 @@ mod tests {
             .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
             .collect();
-        assert!(!joined.contains('*'), "markers reached the screen: {joined}");
+        assert!(
+            !joined.contains('*'),
+            "markers reached the screen: {joined}"
+        );
     }
 
     /// Regression: a live session had the model claim "I'm about halfway
@@ -5561,13 +6253,11 @@ mod tests {
             .iter()
             .find(|s| s.style.add_modifier.contains(Modifier::CROSSED_OUT));
         assert_eq!(struck.map(|s| s.content.as_ref()), Some("gone"));
-        let loud = spans
-            .iter()
-            .find(|s| {
-                s.style
-                    .add_modifier
-                    .contains(Modifier::BOLD | Modifier::ITALIC)
-            });
+        let loud = spans.iter().find(|s| {
+            s.style
+                .add_modifier
+                .contains(Modifier::BOLD | Modifier::ITALIC)
+        });
         assert_eq!(loud.map(|s| s.content.as_ref()), Some("loud"));
     }
 
@@ -5586,7 +6276,10 @@ mod tests {
             .collect();
         assert!(rows.len() > 1, "expected a wrap: {rows:?}");
         assert!(rows[0].starts_with("1. "), "{rows:?}");
-        assert!(rows[1].starts_with("   "), "continuation not hung: {rows:?}");
+        assert!(
+            rows[1].starts_with("   "),
+            "continuation not hung: {rows:?}"
+        );
     }
 
     #[test]
@@ -5598,7 +6291,10 @@ mod tests {
         assert!(joined.contains('│'), "no quote marker: {joined}");
         assert!(joined.contains('─'), "no rule: {joined}");
         assert!(joined.contains('☐') && joined.contains('☑'), "{joined}");
-        assert!(!joined.contains("[ ]") && !joined.contains("[x]"), "{joined}");
+        assert!(
+            !joined.contains("[ ]") && !joined.contains("[x]"),
+            "{joined}"
+        );
     }
 
     // ---- tables ------------------------------------------------------------
@@ -5624,16 +6320,27 @@ mod tests {
         assert!(joined.contains('┌') && joined.contains('┐'), "{joined}");
         assert!(joined.contains('├') && joined.contains('┼'), "{joined}");
         assert!(joined.contains('└') && joined.contains('┘'), "{joined}");
-        assert!(joined.contains("Command") && joined.contains("1 request"), "{joined}");
+        assert!(
+            joined.contains("Command") && joined.contains("1 request"),
+            "{joined}"
+        );
         // The alignment row is punctuation for a renderer, not content.
-        assert!(!joined.contains("---"), "the alignment row was drawn: {joined}");
+        assert!(
+            !joined.contains("---"),
+            "the alignment row was drawn: {joined}"
+        );
         // Every drawn row is one rectangle: same width, top to bottom.
         let widths: Vec<usize> = rows
             .iter()
-            .filter(|r| r.starts_with('┌') || r.starts_with('│') || r.starts_with('├') || r.starts_with('└'))
+            .filter(|r| {
+                r.starts_with('┌') || r.starts_with('│') || r.starts_with('├') || r.starts_with('└')
+            })
             .map(|r| r.chars().count())
             .collect();
-        assert!(widths.windows(2).all(|w| w[0] == w[1]), "ragged table: {widths:?}");
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "ragged table: {widths:?}"
+        );
     }
 
     /// Column widths are measured on what is drawn. A header of `**Name**` is
@@ -5645,12 +6352,16 @@ mod tests {
             .flat_map(|line| line.spans)
             .collect();
         assert!(
-            spans.iter().any(|s| s.content.contains("keep")
-                && s.style.add_modifier.contains(Modifier::BOLD)),
+            spans.iter().any(
+                |s| s.content.contains("keep") && s.style.add_modifier.contains(Modifier::BOLD)
+            ),
             "bold inside a cell was lost"
         );
         let joined: String = spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(!joined.contains('*') && !joined.contains('`'), "markers drawn: {joined}");
+        assert!(
+            !joined.contains('*') && !joined.contains('`'),
+            "markers drawn: {joined}"
+        );
     }
 
     /// A table too wide for the pane narrows and wraps inside its columns.
@@ -5727,7 +6438,10 @@ mod tests {
             let joined = assistant_rows(body).concat();
             let stripped: String = body.chars().filter(|c| !c.is_whitespace()).collect();
             let seen: String = joined.chars().filter(|c| !c.is_whitespace()).collect();
-            assert!(seen.contains(&stripped), "{body:?} was mangled into {joined:?}");
+            assert!(
+                seen.contains(&stripped),
+                "{body:?} was mangled into {joined:?}"
+            );
         }
     }
 
@@ -5849,16 +6563,29 @@ mod tests {
 
         let buf = terminal.backend().buffer();
         let rows: Vec<String> = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf.get(x, y).symbol().to_string()).collect())
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf.get(x, y).symbol().to_string())
+                    .collect()
+            })
             .collect();
         let joined = rows.concat();
 
-        assert!(joined.contains("Building and uploading"), "the status line must survive: {rows:?}");
-        assert!(joined.contains("esc to stop"), "so must the way out: {rows:?}");
+        assert!(
+            joined.contains("Building and uploading"),
+            "the status line must survive: {rows:?}"
+        );
+        assert!(
+            joined.contains("esc to stop"),
+            "so must the way out: {rows:?}"
+        );
         // The tail of the log, not its beginning -- the newest lines are the
         // ones being read.
         assert!(joined.contains("building chunk 19"), "{rows:?}");
-        assert!(!joined.contains("building chunk 0 "), "it should have scrolled past: {rows:?}");
+        assert!(
+            !joined.contains("building chunk 0 "),
+            "it should have scrolled past: {rows:?}"
+        );
     }
 
     /// The confirmation has to be on screen, or the first Ctrl-C looks like
@@ -5867,7 +6594,9 @@ mod tests {
     fn a_pending_quit_says_so_in_the_key_bar() {
         let mut app = App::new(crate::config::Config::default());
         app.greeted = true;
-        assert!(!rendered_rows(&mut app, 80, 24).concat().contains("press again to quit"));
+        assert!(!rendered_rows(&mut app, 80, 24)
+            .concat()
+            .contains("press again to quit"));
 
         app.request_quit();
         let shown = rendered_rows(&mut app, 80, 24).concat();
@@ -5915,7 +6644,6 @@ mod tests {
         );
     }
 
-
     // ---- plan mode ---------------------------------------------------------
 
     /// The plan is the thing being approved, so it is shown whole. A file
@@ -5932,7 +6660,8 @@ mod tests {
         let steps: Vec<String> = (1..=30)
             .map(|i| format!("step {i}: change file_{i}.rs"))
             .collect();
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Plan(crate::tools::Proposal {
                 title: "Rate limiting for the items API".to_string(),
                 summary: "Fixed window, keyed by API key.".to_string(),
@@ -6004,7 +6733,11 @@ mod tests {
         app.greeted = true;
         app.state = AppState::AwaitingApproval;
         app.workspace_root = "/tmp/project".to_string();
-        app.active_plan = Some(a_plan("Rate limiting", &["one", "two", "three", "four"], &[1, 2]));
+        app.active_plan = Some(a_plan(
+            "Rate limiting",
+            &["one", "two", "three", "four"],
+            &[1, 2],
+        ));
 
         let proposal = crate::tools::Proposal {
             title: "Refactor auth".to_string(),
@@ -6012,7 +6745,8 @@ mod tests {
             steps: vec!["Move to refresh tokens".to_string()],
             not_doing: Vec::new(),
         };
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Plan(proposal.clone()),
             remaining: 0,
             preview: None,
@@ -6022,7 +6756,10 @@ mod tests {
         assert!(joined.contains("saves to plan.md"), "{joined}");
         assert!(joined.contains("replaces"), "{joined}");
         assert!(joined.contains("Rate limiting"), "{joined}");
-        assert!(joined.contains("2/4 done"), "the cost is the unfinished work: {joined}");
+        assert!(
+            joined.contains("2/4 done"),
+            "the cost is the unfinished work: {joined}"
+        );
     }
 
     /// Revising the plan already in hand is not a replacement, and warning
@@ -6035,7 +6772,8 @@ mod tests {
         app.workspace_root = "/tmp/project".to_string();
         app.active_plan = Some(a_plan("Rate limiting", &["one", "two"], &[]));
 
-        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest { call: Default::default(),
+        app.overlay = Some(Overlay::ToolApproval(crate::approval::ApprovalRequest {
+            call: Default::default(),
             action: Action::Plan(crate::tools::Proposal {
                 title: "Rate limiting".to_string(),
                 summary: "Reworked.".to_string(),
@@ -6069,18 +6807,20 @@ mod tests {
 
         // And nothing about a plan when the project has none.
         let bare = App::new(crate::config::Config::default());
-        assert!(!welcome_text(&bare, 80).contains("next"), "no plan, no rows");
+        assert!(
+            !welcome_text(&bare, 80).contains("next"),
+            "no plan, no rows"
+        );
     }
 
     #[test]
     fn a_plan_notice_is_shown_before_anything_is_typed() {
         let mut app = App::new(crate::config::Config::default());
-        app.startup_notices.push("plan.md was written against commit 3c21dfb".to_string());
+        app.startup_notices
+            .push("plan.md was written against commit 3c21dfb".to_string());
 
         let panel = welcome_text(&app, 80);
         assert!(panel.contains("Before you start"), "{panel}");
         assert!(panel.contains("3c21dfb"), "{panel}");
     }
 }
-
-

@@ -80,9 +80,7 @@ impl FileDiff {
 
     /// "3 additions and 1 removal", in the form a person would say it.
     pub fn tally(&self) -> String {
-        let plural = |n: usize, word: &str| {
-            format!("{n} {word}{}", if n == 1 { "" } else { "s" })
-        };
+        let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
         match (self.added, self.removed) {
             (0, 0) => "no changes".to_string(),
             (a, 0) => plural(a, "addition"),
@@ -148,11 +146,7 @@ fn build(a: &[&str], b: &[&str]) -> FileDiff {
     // Trimming the matching head and tail first is what makes this affordable
     // in practice: an edit to one function in a 3000-line file leaves a
     // handful of lines for the quadratic part to look at.
-    let head = a
-        .iter()
-        .zip(b.iter())
-        .take_while(|(x, y)| x == y)
-        .count();
+    let head = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
     let tail = a[head..]
         .iter()
         .rev()
@@ -167,10 +161,10 @@ fn build(a: &[&str], b: &[&str]) -> FileDiff {
     let mut old_no = 0usize;
     let mut new_no = 0usize;
     let push = |all: &mut Vec<DiffLine>,
-                    old_no: &mut usize,
-                    new_no: &mut usize,
-                    change: Change,
-                    text: &str| {
+                old_no: &mut usize,
+                new_no: &mut usize,
+                change: Change,
+                text: &str| {
         let (o, n) = match change {
             Change::Context => {
                 *old_no += 1;
@@ -380,8 +374,14 @@ mod tests {
         assert_eq!(
             rendered(&d),
             vec![
-                " line 17", " line 18", " line 19", "-line 20", "+line twenty", " line 21",
-                " line 22", " line 23",
+                " line 17",
+                " line 18",
+                " line 19",
+                "-line 20",
+                "+line twenty",
+                " line 21",
+                " line 22",
+                " line 23",
             ]
         );
     }
@@ -389,7 +389,9 @@ mod tests {
     #[test]
     fn two_distant_changes_become_two_hunks() {
         let old: String = (1..=40).map(|i| format!("line {i}\n")).collect();
-        let new = old.replace("line 5\n", "five\n").replace("line 35\n", "thirty-five\n");
+        let new = old
+            .replace("line 5\n", "five\n")
+            .replace("line 35\n", "thirty-five\n");
         let d = diff(&old, &new);
         assert_eq!(d.hunks.len(), 2);
         assert_eq!((d.added, d.removed), (2, 2));
@@ -399,7 +401,9 @@ mod tests {
     #[test]
     fn two_nearby_changes_become_one_hunk() {
         let old: String = (1..=40).map(|i| format!("line {i}\n")).collect();
-        let new = old.replace("line 20\n", "twenty\n").replace("line 23\n", "twenty-three\n");
+        let new = old
+            .replace("line 20\n", "twenty\n")
+            .replace("line 23\n", "twenty-three\n");
         let d = diff(&old, &new);
         assert_eq!(d.hunks.len(), 1);
     }

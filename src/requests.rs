@@ -70,7 +70,10 @@ pub async fn list_pending(path: &Path, endpoint: &str) -> Result<Vec<ChangeReque
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("the requests service refused this ({status}): {}", text.trim()));
+        return Err(format!(
+            "the requests service refused this ({status}): {}",
+            text.trim()
+        ));
     }
     serde_json::from_str(&text)
         .map_err(|e| format!("the requests service returned something unexpected ({e})"))
@@ -98,7 +101,10 @@ pub async fn resolve(path: &Path, endpoint: &str, id: &str) -> Result<(), String
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(format!("the requests service refused this ({status}): {}", text.trim()));
+        return Err(format!(
+            "the requests service refused this ({status}): {}",
+            text.trim()
+        ));
     }
     Ok(())
 }
@@ -122,8 +128,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_unpublished_path_is_refused_before_any_network_call() {
-        let dir =
-            std::env::temp_dir().join(format!("covexcode-requests-unpublished-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "covexcode-requests-unpublished-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let target = dir.join("index.html");
@@ -133,10 +141,14 @@ mod tests {
         // if the code got as far as trying to reach it -- the assertion on
         // the message is what proves it was refused *before* that, for the
         // right reason.
-        let error = list_pending(&target, "http://127.0.0.1:1").await.expect_err("should refuse");
+        let error = list_pending(&target, "http://127.0.0.1:1")
+            .await
+            .expect_err("should refuse");
         assert!(error.contains("publish_artifact"), "{error}");
 
-        let error = resolve(&target, "http://127.0.0.1:1", "abc123").await.expect_err("should refuse");
+        let error = resolve(&target, "http://127.0.0.1:1", "abc123")
+            .await
+            .expect_err("should refuse");
         assert!(error.contains("publish_artifact"), "{error}");
 
         let _ = std::fs::remove_dir_all(&dir);

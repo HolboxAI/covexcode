@@ -139,7 +139,9 @@ fn hex(bytes: &[u8]) -> String {
 pub async fn ping_active_if_new_day(version: &str) {
     let Some(url) = telemetry_url() else { return };
     let Some(id) = device_id() else { return };
-    let Some(path) = last_active_path() else { return };
+    let Some(path) = last_active_path() else {
+        return;
+    };
 
     let today = dateutil::today_string();
     let already_pinged = std::fs::read_to_string(&path)
@@ -157,7 +159,10 @@ pub async fn ping_active_if_new_day(version: &str) {
         "date": today,
     });
 
-    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(5)).build() else {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
         return;
     };
     if client.post(&url).json(&body).send().await.is_ok() {
@@ -180,12 +185,18 @@ mod tests {
 
     #[test]
     fn the_default_endpoint_is_a_well_formed_https_url() {
-        assert!(DEFAULT_TELEMETRY_URL.starts_with("https://"), "{DEFAULT_TELEMETRY_URL}");
+        assert!(
+            DEFAULT_TELEMETRY_URL.starts_with("https://"),
+            "{DEFAULT_TELEMETRY_URL}"
+        );
     }
 
     #[test]
     fn with_no_env_override_the_default_endpoint_is_used() {
-        assert_eq!(telemetry_url_given(None), Some(DEFAULT_TELEMETRY_URL.to_string()));
+        assert_eq!(
+            telemetry_url_given(None),
+            Some(DEFAULT_TELEMETRY_URL.to_string())
+        );
     }
 
     #[test]
