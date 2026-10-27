@@ -44,15 +44,49 @@ pub struct CompactConfig {
     /// The context size, in tokens, that triggers it. Exact when the endpoint
     /// reports prompt tokens, estimated at 4 chars/token otherwise.
     ///
-    /// The default suits models with a 128k window or more: late enough that
-    /// short sessions never see it, early enough to leave room for the turns
-    /// after the summary.
+    /// `0` (the default) means "derive it from the model": 80% of the space
+    /// left after the reply budget. That is the value that used to be hardcoded
+    /// as 80k, and it still lands at ~78.6k on a 128k model -- but it scales to
+    /// a 1M-window model instead of compacting every session after 80k tokens
+    /// while 900k of room sits unused.
+    ///
+    /// A configured number is honoured unless it is above that safety ceiling,
+    /// in which case it is clamped: a threshold the context guard fires before
+    /// can never run, which is how a session used to dead-end with "start a new
+    /// chat" despite auto-compaction being enabled.
     #[serde(default = "default_auto_at_tokens")]
     pub auto_at_tokens: u64,
 }
 
 fn default_auto_at_tokens() -> u64 {
-    80_000
+    0
+}
+
+impl CompactConfig {
+    /// The threshold to apply for a particular model.
+    ///
+    /// `context_window == 0` means the endpoint's limit is unknown; there the
+    /// configured value is used as-is (or 80k when it is `0`), matching the
+    /// old behaviour. When the window is known, the threshold never exceeds
+    /// 80% of the space left after the reply budget, because the context guard
+    /// reserves `max_tokens` for the reply and a turn that crosses both before
+    /// it ends would fail before auto-compaction could run.
+    pub fn effective_auto_at_tokens(&self, context_window: u64, max_tokens: u32) -> u64 {
+        if context_window == 0 {
+            return if self.auto_at_tokens == 0 {
+                80_000
+            } else {
+                self.auto_at_tokens.max(4_000)
+            };
+        }
+        let usable = context_window.saturating_sub(max_tokens as u64);
+        let ceiling = usable.saturating_sub(usable / 5).max(4_000);
+        if self.auto_at_tokens == 0 {
+            ceiling
+        } else {
+            self.auto_at_tokens.clamp(4_000, ceiling)
+        }
+    }
 }
 
 impl Default for CompactConfig {
@@ -505,12 +539,14 @@ fn dot() -> String {
 }
 
 fn default_max_tokens() -> u32 {
-    // The ceiling on one *reply*, not on the conversation. 16k was already
-    // generous for chat and still too small for the thing this tool is
-    // actually asked to do -- write a whole file, or a deck, in one go. A
-    // reply cut off mid-token costs the entire turn, so the cap is set above
-    // what any single answer plausibly needs rather than close to it.
-    32768
+    // The ceiling on one *reply*, not on the conversation. The models this
+    // ships against expose a 384K output ceiling (deepseek-v4-flash/pro), and
+    // 32k was cutting off exactly the work the tool exists to do: writing a
+    // whole file or a deck in one round. A reply cut off mid-token costs the
+    // entire turn, so the default is 128K -- four times the old cap, still
+    // well inside the model's limit, and leaving ~917K of the 1M window for
+    // the prompt once the reply budget is reserved.
+    131_072
 }
 
 fn default_command_timeout() -> u64 {
@@ -715,9 +751,10 @@ impl Config {
         if !matches!(self.ui.theme.as_str(), "auto" | "dark" | "light") {
             self.ui.theme = default_theme();
         }
-        // 0 would make every reply empty; the ceiling is a sanity bound, not a
-        // claim about what any particular endpoint accepts.
-        self.llm.max_tokens = self.llm.max_tokens.clamp(256, 200_000);
+        // 0 would make every reply empty; the ceiling is the model's own output
+        // limit (DeepSeek V4 Flash/Pro: 384K), not a claim about what every
+        // custom endpoint accepts -- a lower value remains the user's call.
+        self.llm.max_tokens = self.llm.max_tokens.clamp(256, 393_216);
 
         let d = LlmConfig::default();
         if self.llm.endpoint.is_empty() {
@@ -762,8 +799,12 @@ impl Config {
         self.deploy.history_limit = self.deploy.history_limit.clamp(1, 200);
 
         // A tiny threshold would compact after every turn -- each one a real,
-        // metered request -- and a threshold of 0 would try before the first.
-        self.compact.auto_at_tokens = self.compact.auto_at_tokens.max(4_000);
+        // metered request. `0` is not tiny here: it is the sentinel for
+        // "derive the threshold from the model's window" (see
+        // `effective_auto_at_tokens`), so it must survive normalization.
+        if self.compact.auto_at_tokens > 0 {
+            self.compact.auto_at_tokens = self.compact.auto_at_tokens.max(4_000);
+        }
     }
 
     /// Nonsense quota settings are clamped rather than obeyed. A warn threshold
@@ -1129,7 +1170,7 @@ mod tests {
             provider: String::new(),
             ..LlmConfig::default()
         };
-        assert_eq!(proxy.effective_context_window(), 131_072);
+        assert_eq!(proxy.effective_context_window(), 1_048_576);
 
         let explicit = LlmConfig {
             context_window: 200_000,
@@ -1407,10 +1448,43 @@ mod tests {
     /// deliberately well above what any single answer needs.
     #[test]
     fn the_default_reply_cap_is_generous_enough_for_a_whole_file() {
-        assert_eq!(LlmConfig::default().max_tokens, 32768);
+        assert_eq!(LlmConfig::default().max_tokens, 131_072);
         // And a config written before this key existed still gets it.
         let parsed: Config = toml::from_str("[llm]\nendpoint = \"http://x\"\n").expect("parses");
-        assert_eq!(parsed.llm.max_tokens, 32768);
+        assert_eq!(parsed.llm.max_tokens, 131_072);
+    }
+
+    /// A hand-written value above the model's own output ceiling is a typo, not
+    /// a request the endpoint can honour; the clamp keeps it sendable.
+    #[test]
+    fn a_reply_cap_above_the_model_ceiling_is_clamped() {
+        let mut config: Config =
+            toml::from_str("[llm]\nendpoint = \"http://x\"\nmax_tokens = 500000\n").expect("parses");
+        config.normalize();
+        assert_eq!(config.llm.max_tokens, 393_216);
+    }
+
+    /// The compact threshold is derived from the model, not a fixed 80k that
+    /// was written for a 128k window: on a 1M window it would compact after
+    /// 8% of the context, and on a window smaller than 80k it could never fire.
+    #[test]
+    fn the_auto_compact_threshold_scales_with_the_model_window() {
+        let config = CompactConfig::default();
+        // 0 = derive: 80% of the space left after the reply budget.
+        assert_eq!(config.effective_auto_at_tokens(1_048_576, 131_072), 734_004);
+        assert_eq!(config.effective_auto_at_tokens(131_072, 32_768), 78_644);
+        // Unknown window: fall back to the old fixed default.
+        assert_eq!(config.effective_auto_at_tokens(0, 32_768), 80_000);
+
+        // An explicit value is honoured, but not past the point where the
+        // context guard would fire first.
+        let explicit = CompactConfig {
+            auto: true,
+            auto_at_tokens: 200_000,
+        };
+        assert_eq!(explicit.effective_auto_at_tokens(1_048_576, 131_072), 200_000);
+        assert_eq!(explicit.effective_auto_at_tokens(131_072, 32_768), 78_644);
+        assert_eq!(explicit.effective_auto_at_tokens(0, 32_768), 200_000);
     }
 
     /// DeepSeek gets a deterministic temperature without anyone having to
