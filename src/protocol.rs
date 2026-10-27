@@ -391,7 +391,19 @@ pub enum SessionUpdate {
     #[serde(rename = "plan")]
     Plan(Plan),
     #[serde(rename = "usage_update")]
-    UsageUpdate { used: u64, size: u64 },
+    UsageUpdate {
+        /// Prompt + completion spend of this one response.
+        used: u64,
+        /// The model's context window, `0` when unknown.
+        size: u64,
+        /// The prompt side alone. `used` includes the completion, so a client
+        /// that compares `used` to `size` reports a request as "nearly full"
+        /// when the prompt itself still has plenty of room. Optional because
+        /// older readers (and a payload from an endpoint that reports no
+        /// usage) have no prompt figure to send.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_tokens: Option<u64>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -974,11 +986,14 @@ impl ApiUsage {
     /// completion (cache hits are deliberately *not* added -- a cached token is
     /// a discounted prompt token already inside `prompt_tokens`); `size` is the
     /// model's context window, `0` when covexcode doesn't know it (the client
-    /// then omits the "of M" half rather than inventing a limit).
+    /// then omits the "of M" half rather than inventing a limit). The prompt
+    /// side is sent separately so the client can compare the right number to
+    /// the window: `used` includes the reply and is not context occupancy.
     pub fn to_usage_update(&self, size: u64) -> SessionUpdate {
         SessionUpdate::UsageUpdate {
             used: self.total() as u64,
             size,
+            prompt_tokens: (self.prompt_tokens > 0).then_some(self.prompt_tokens as u64),
         }
     }
 }
@@ -1285,7 +1300,26 @@ mod tests {
         let value = serde_json::to_value(&update).unwrap();
         assert_eq!(
             value,
-            json!({ "sessionUpdate": "usage_update", "used": 15, "size": 131072 })
+            json!({
+                "sessionUpdate": "usage_update",
+                "used": 15,
+                "size": 131072,
+                "prompt_tokens": 10
+            })
+        );
+    }
+
+    /// An endpoint that reports no usage must not say `prompt_tokens: 0` and
+    /// make the client render "context 0 of N" -- the field is omitted, and the
+    /// client falls back to its old display.
+    #[test]
+    fn an_unreported_prompt_size_is_omitted_from_the_wire() {
+        let usage = ApiUsage::default();
+        let update: SessionUpdate = usage.to_usage_update(1_048_576);
+        let value = serde_json::to_value(&update).unwrap();
+        assert_eq!(
+            value,
+            json!({ "sessionUpdate": "usage_update", "used": 0, "size": 1048576 })
         );
     }
 
