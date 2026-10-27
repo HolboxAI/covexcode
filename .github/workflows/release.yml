@@ -114,6 +114,11 @@ jobs:
           done
           ls -la release-assets/
 
+      - name: Generate sidecar manifest
+        # The IDE bundles this runtime; the manifest is the contract between
+        # the CLI release and the IDE build (version, ACP protocol, hashes).
+        run: ./scripts/sidecar-manifest.sh
+
       - name: Refuse to publish a binary that is not one
         # v1.2.2 shipped a macOS asset that was 3.7 MB of NUL bytes. Every
         # existing check passed it: the build job went green, `sha256sum`
