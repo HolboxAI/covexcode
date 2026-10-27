@@ -7,7 +7,6 @@ edition = "2021"
 tokio = { version = "1.35", features = ["full"] }
 ratatui = "0.26"
 crossterm = "0.27"
-reqwest = { version = "0.11", features = ["stream", "json"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
@@ -36,5 +35,16 @@ strip = true
 # vendoring it everywhere would also demand a working Perl (Time::Piece,
 # missing here) and, on Windows, NASM -- trading one broken target for a
 # chance at breaking others that already work.
-[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))'.dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
+
+# The IDE sidecar ships musl builds so it runs on older Linux distributions
+# without a glibc/OpenSSL match. Use rustls there: it keeps the sidecar
+# statically linked and avoids an OpenSSL cross-build (which needs Perl and a
+# target musl toolchain in the `cross` image). Every other target keeps the
+# existing native-tls behavior unchanged.
+[target.'cfg(target_env = "musl")'.dependencies]
+reqwest = { version = "0.11", default-features = false, features = ["stream", "json", "rustls-tls"] }
+
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+reqwest = { version = "0.11", features = ["stream", "json"] }
