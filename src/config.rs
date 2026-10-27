@@ -867,6 +867,16 @@ impl Config {
     /// Calls `adopt_legacy_dir` on the way past, so the very first thing any
     /// caller does is inherit the old directory if there is one.
     pub fn config_dir() -> PathBuf {
+        // The IDE can point the bundled runtime at its own state directory.
+        // This keeps a malformed or experimental `~/.covexcode/config.toml`
+        // from breaking the editor without moving the terminal CLI's state.
+        if let Some(dir) = env_var("COVEXCODE_CONFIG_DIR") {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+
         let home = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
@@ -1069,8 +1079,28 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::with_isolated_home;
+    use super::test_support::{with_isolated_home, HOME_LOCK};
     use super::*;
+
+    /// The IDE can isolate the bundled runtime from the terminal CLI's
+    /// `~/.covexcode` state. The override must be used verbatim and must not
+    /// trigger the legacy-directory adoption path.
+    #[test]
+    fn config_dir_honours_covexcode_config_dir() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let expected = temp.path().join("ide-agent");
+        let previous = std::env::var_os("COVEXCODE_CONFIG_DIR");
+        std::env::set_var("COVEXCODE_CONFIG_DIR", &expected);
+
+        let actual = Config::config_dir();
+
+        match previous {
+            Some(value) => std::env::set_var("COVEXCODE_CONFIG_DIR", value),
+            None => std::env::remove_var("COVEXCODE_CONFIG_DIR"),
+        }
+        assert_eq!(actual, expected);
+    }
 
     /// The file holds an API key in clear text, so nobody else on the machine
     /// should be able to read it. `fs::write` alone would leave it at the
