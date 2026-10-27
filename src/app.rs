@@ -3678,7 +3678,13 @@ impl App {
         let context = self
             .last_prompt_tokens
             .unwrap_or_else(|| self.context_size().approx_tokens);
-        let threshold = self.config.compact.auto_at_tokens as usize;
+        // Derived from the model's real window rather than used verbatim: a
+        // fixed 80k default would compact almost immediately on a 1M model, and
+        // a user value above the context guard's ceiling could never fire.
+        let threshold = self.config.compact.effective_auto_at_tokens(
+            self.config.llm.effective_context_window(),
+            self.config.llm.max_tokens,
+        ) as usize;
         if context < threshold {
             return;
         }
