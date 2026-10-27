@@ -498,8 +498,11 @@ impl HeadlessSession {
             return;
         }
         let context = self.context_tokens();
-        let threshold = self.config.compact.auto_at_tokens as usize;
-        if threshold == 0 || context < threshold {
+        let threshold = self.config.compact.effective_auto_at_tokens(
+            self.config.llm.effective_context_window(),
+            self.config.llm.max_tokens,
+        ) as usize;
+        if context < threshold {
             return;
         }
 
@@ -1853,6 +1856,9 @@ mod tests {
         let endpoint = serve_rounds(vec![body]).await;
         let mut config = config_for(&endpoint);
         config.llm.context_window = 131_072;
+        // The reply budget is reserved inside the window; keep it well under
+        // this deliberately small window so the request passes the preflight.
+        config.llm.max_tokens = 1_024;
         let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
         let (updates_tx, mut updates_rx) = mpsc::channel(16);
         let (permissions_tx, _permissions_rx) = mpsc::channel(16);
