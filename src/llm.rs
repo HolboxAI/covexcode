@@ -360,6 +360,44 @@ pub fn usage_of(line: &str) -> Option<ApiUsage> {
         .filter(|u| u.total() > 0)
 }
 
+/// The message for a spent account. `Out of credit` is the marker
+/// `notice::classify` keys on, and the URL is plain text rather than markdown
+/// so the TUI and the IDE both show something the user can act on.
+fn credit_exhausted_message(body: &str) -> String {
+    let detail = summarise_error(body);
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{detail}")
+    };
+    // The proxy has two server-side caps with opposite remedies: the lifetime
+    // promo balance (add credit) and a per-key daily cap (wait for UTC
+    // midnight). Telling a daily-cap user to top up would be wrong.
+    if body
+        .to_lowercase()
+        .contains(crate::notice::markers::DAILY_SPEND_LIMIT)
+    {
+        format!(
+            "Daily spend limit reached.{detail}\n\nThe server-side daily cap resets at \
+             UTC midnight. Add credits at https://covexcode.com/account if it stays \
+             exhausted after the reset."
+        )
+    } else {
+        format!(
+            "Out of credit.{detail}\n\nAdd credits at https://covexcode.com/account, \
+             then send the message again."
+        )
+    }
+}
+
+/// A genuine transient rate limit: the same advice this has always given.
+fn rate_limited_message(body: &str) -> String {
+    format!(
+        "{}\n\nThis is a rate limit, not a fault -- wait a moment and try again.",
+        summarise_error(body)
+    )
+}
+
 /// Pull the human-readable part out of an OpenAI-shaped error body.
 ///
 /// The raw body is JSON with the sentence buried three levels down, so printing
@@ -567,6 +605,24 @@ async fn run(
             Err(error) => return Err(network_failure(&primary_url, &error)),
         };
         let status = response.status();
+        // A spent account is also a 429 from the promo proxy, but waiting will
+        // never clear it, and the generic "wait a moment" advice is actively
+        // wrong. The body is the only signal that distinguishes the two, so it
+        // is read here -- the one point where consuming it is safe -- and a
+        // quota error is returned without a retry.
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let wait = retry_after_duration(&response).unwrap_or_else(|| backoff_delay(attempt));
+            let body = response.text().await.unwrap_or_default();
+            if crate::notice::classify(&body) == crate::notice::Kind::OutOfCredit {
+                return Err(credit_exhausted_message(&body));
+            }
+            if attempt >= MAX_RETRY_ATTEMPTS {
+                return Err(rate_limited_message(&body));
+            }
+            attempt += 1;
+            tokio::time::sleep(wait).await;
+            continue;
+        }
         if attempt >= MAX_RETRY_ATTEMPTS || !is_retryable_status(status) {
             break response;
         }
@@ -593,13 +649,13 @@ async fn run(
         } else {
             format!("\n{}", truncate(detail, 800))
         };
-        // A raw `HTTP 429` status line says nothing a user can act on, and the
-        // remedy is the one thing worth saying: it is not a fault.
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(format!(
-                "{}\n\nThis is a rate limit, not a fault -- wait a moment and try again.",
-                summarise_error(&body)
-            ));
+        // Some endpoints answer a spent account with 402 instead of the promo
+        // proxy's 429. The account page is the only remedy; there is no
+        // transient condition to wait out.
+        if status == reqwest::StatusCode::PAYMENT_REQUIRED
+            || crate::notice::classify(&body) == crate::notice::Kind::OutOfCredit
+        {
+            return Err(credit_exhausted_message(&body));
         }
 
         // A conversation that no longer fits is the other common 400, and it
@@ -907,6 +963,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(16);
 /// automatically -- both are usually transient. A 4xx other than 429 (bad
 /// key, bad model, malformed request) will fail again identically, so
 /// retrying it would only delay the error the user needs to see.
+///
+/// The request loop reads a 429's body before consulting this: the promo proxy
+/// uses 429 for a spent account too (`insufficient_quota`), and that one is
+/// returned immediately instead of retried.
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
@@ -2070,6 +2130,86 @@ mod tests {
         let events = collect(&addr).await;
         assert_eq!(text_of(&events), "Hi");
         assert!(matches!(events.last(), Some(StreamEvent::Done)));
+    }
+
+    /// The promo proxy uses 429 for a spent account. It must not be retried
+    /// (waiting cannot clear it) and must not be reported as a rate limit --
+    /// the two remedies are opposites.
+    #[tokio::test]
+    async fn an_insufficient_quota_429_is_reported_as_out_of_credit_without_retrying() {
+        let body =
+            r#"{"error":{"message":"lifetime spend limit reached","type":"insufficient_quota"}}"#;
+        let quota = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n\
+             Retry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        // If the client retried, this successful answer would be returned
+        // instead of the credit error.
+        let ok_body = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n";
+        let ok = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{ok_body}"
+        )
+        .into_bytes();
+        let addr = serve_sequence(vec![quota, ok]).await;
+
+        let events = collect(&addr).await;
+        match events.last() {
+            Some(StreamEvent::Error(e)) => {
+                assert!(e.contains("Out of credit"), "{e}");
+                assert!(e.contains("https://covexcode.com/account"), "{e}");
+                assert!(!e.contains("rate limit"), "{e}");
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+    }
+
+    /// A per-key daily cap uses the same 429/insufficient_quota shape as the
+    /// lifetime balance, but the remedy is the UTC reset -- not adding credit.
+    #[tokio::test]
+    async fn a_daily_server_cap_is_reported_as_a_daily_limit() {
+        let body = r#"{"error":{"message":"daily spend limit reached","type":"insufficient_quota"}}"#;
+        let response = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n\
+             Retry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let addr = serve_sequence(vec![response]).await;
+
+        let events = collect(&addr).await;
+        match events.last() {
+            Some(StreamEvent::Error(e)) => {
+                assert!(e.contains("Daily spend limit reached"), "{e}");
+                assert!(e.contains("UTC midnight"), "{e}");
+                assert!(!e.contains("Out of credit"), "{e}");
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+    }
+
+    /// Some endpoints use 402 Payment Required instead of 429 for the same
+    /// condition; it takes the same message.
+    #[tokio::test]
+    async fn a_402_is_reported_as_out_of_credit() {
+        let body = r#"{"error":{"message":"payment required","type":"insufficient_quota"}}"#;
+        let response = format!(
+            "HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let addr = serve_sequence(vec![response]).await;
+
+        let events = collect(&addr).await;
+        match events.last() {
+            Some(StreamEvent::Error(e)) => {
+                assert!(e.contains("Out of credit"), "{e}");
+                assert!(e.contains("https://covexcode.com/account"), "{e}");
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
     }
 
     /// Retries are bounded: a rate limit that never clears still ends in the
