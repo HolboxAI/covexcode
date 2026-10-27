@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}${{ matrix.suffix }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -21,6 +21,7 @@ jobs:
             arch: aarch64
             runner: macos-15
             target: aarch64-apple-darwin
+            suffix: ""
           # x86_64 builds natively, so its glibc floor is the runner's. Pin
           # ubuntu-22.04 (glibc 2.35) rather than the floating `ubuntu-latest`
           # (glibc 2.39 today, heading to 2.43): glibc is backward- but not
@@ -28,18 +29,34 @@ jobs:
           # start on any distro with an older glibc ("GLIBC_x.yy not found").
           # aarch64 is built with `cross` below, so its glibc comes from the
           # cross Docker image rather than this runner.
+          #
+          # The -musl entries are what the IDE bundles: they are statically
+          # linked and do not depend on the user's glibc or OpenSSL version.
           - os: linux
             arch: x86_64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            suffix: ""
           - os: linux
             arch: aarch64
             runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            suffix: ""
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            suffix: -musl
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            suffix: -musl
           - os: windows
             arch: x86_64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
+            suffix: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +68,10 @@ jobs:
       - name: Install cross (for Linux ARM)
         if: matrix.os == 'linux' && matrix.arch == 'aarch64'
         run: cargo install cross
+
+      - name: Install musl tools (for Linux x86_64 musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build (native)
         if: matrix.os != 'linux' || matrix.arch != 'aarch64'
@@ -64,17 +85,18 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p artifacts
-          cp target/${{ matrix.target }}/release/covexcode artifacts/covexcode-${{ matrix.os }}-${{ matrix.arch }}
-          chmod +x artifacts/covexcode-${{ matrix.os }}-${{ matrix.arch }}
+          asset="covexcode-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/covexcode" "artifacts/${asset}"
+          chmod +x "artifacts/${asset}"
 
       - name: Rename binary (Windows)
         if: runner.os == 'Windows'
         run: |
           mkdir artifacts
-          copy target\${{ matrix.target }}\release\covexcode.exe artifacts\covexcode-${{ matrix.os }}-${{ matrix.arch }}.exe
+          copy target\${{ matrix.target }}\release\covexcode.exe artifacts\covexcode-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.suffix }}.exe
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: covexcode-${{ matrix.os }}-${{ matrix.arch }}
+          name: covexcode-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.suffix }}
           path: artifacts/
