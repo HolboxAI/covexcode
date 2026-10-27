@@ -35,6 +35,15 @@ COVEXCODE.md through the normal approval, the same as any other file change.
 Write it as notes to yourself, not as a reply to the user, and do not comment \
 on the act of summarising.";
 
+/// The reply budget a compaction request gets, whatever `[llm] max_tokens` is.
+///
+/// Compaction is the escape hatch for a conversation that no longer fits. If
+/// it reserved the full reply budget the normal chat uses, it would hit the
+/// same context guard as the request it is trying to rescue -- which is
+/// exactly the dead end this constant removes. A summary is prose about the
+/// conversation, not a whole file, so 8K is ample.
+pub const SUMMARY_MAX_TOKENS: u32 = 8_192;
+
 /// Prefixed to the summary on the wire so the model reads it as context it
 /// already has rather than as something it is being asked to act on. The user
 /// never sees this line -- the transcript shows `display`, which is the
