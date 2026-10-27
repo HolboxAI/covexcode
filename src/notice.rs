@@ -34,6 +34,7 @@ pub mod markers {
     pub const TRUNCATED: &str = "output cap and was cut off";
     pub const UNREACHABLE: &str = "Could not reach";
     pub const CONTEXT_FULL_LOCAL: &str = "conversation is too long";
+    pub const CONTEXT_TOO_LARGE_LOCAL: &str = "conversation is too large";
 }
 
 /// What kind of thing went wrong.
@@ -139,6 +140,7 @@ pub fn classify(text: &str) -> Kind {
         || lower.contains(m::CONTEXT_MAXIMUM)
         || lower.contains(m::CONTEXT_TOO_LONG)
         || lower.contains(m::CONTEXT_FULL_LOCAL)
+        || lower.contains(m::CONTEXT_TOO_LARGE_LOCAL)
     {
         return Kind::ContextFull;
     }
@@ -210,6 +212,9 @@ mod tests {
             "This model's maximum context length is 65536 tokens",
             "the request contains too many tokens",
             "This conversation is too long for the model's context window.",
+            "This conversation is too large for deepseek-v4-flash's 131072-token context \
+             window (estimated ~131494 tokens including the 32768-token reply budget). \
+             Start a new chat or run /compact.",
         ] {
             assert_eq!(classify(text), Kind::ContextFull, "{text}");
         }
