@@ -49,7 +49,17 @@ pub fn fire_request(
     let endpoint = app.config.llm.endpoint.clone();
     let model = app.config.llm.model.clone();
     let api_key = app.config.llm.api_key.clone();
-    let max_tokens = app.config.llm.max_tokens;
+    // A `/compact` request reserves the summary budget, not the full reply
+    // budget: reserving 128K of context for a short summary would make the
+    // escape hatch fail on exactly the conversations that need it.
+    let max_tokens = if app.compacting {
+        app.config
+            .llm
+            .max_tokens
+            .min(crate::compact::SUMMARY_MAX_TOKENS)
+    } else {
+        app.config.llm.max_tokens
+    };
     let context_window = app.config.llm.effective_context_window();
     let temperature = app.config.llm.effective_temperature();
 
