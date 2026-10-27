@@ -88,13 +88,14 @@ pub fn default_temperature(provider_id: &str) -> Option<f32> {
 /// `0` means "unknown" -- the client then shows a bare token count without the
 /// "of M" half rather than asserting a limit covexcode cannot verify.
 ///
-/// Only DeepSeek is on record: its current lineup exposes a 128k window, the
-/// same assumption `CompactConfig::auto_at_tokens`'s default already bakes in.
+/// Only DeepSeek is on record: its V4 Flash and V4 Pro models expose a
+/// 1,048,576-token (1M) window. The 128k figure this used to return was stale
+/// and made the client refuse requests the endpoint would have accepted.
 /// Every other provider -- including a custom endpoint -- gets `0` rather than
 /// a guessed number, which would make a "truthful" meter untruthful.
 pub fn default_context_window(provider_id: &str) -> u64 {
     match provider_id {
-        "deepseek" => 131_072,
+        "deepseek" => 1_048_576,
         _ => 0,
     }
 }
@@ -108,7 +109,7 @@ pub fn default_context_window(provider_id: &str) -> u64 {
 /// returns `0`, keeping the "unknown" sentinel rather than guessing a limit.
 pub fn default_context_window_for_model(model_id: &str) -> u64 {
     if model_id.trim().to_ascii_lowercase().starts_with("deepseek") {
-        131_072
+        1_048_576
     } else {
         0
     }
@@ -139,10 +140,17 @@ mod tests {
 
     #[test]
     fn a_deepseek_model_keeps_its_window_when_no_provider_is_set() {
-        assert_eq!(default_context_window_for_model("deepseek-v4-flash"), 131_072);
-        assert_eq!(default_context_window_for_model("DeepSeek-V4-Pro"), 131_072);
+        assert_eq!(default_context_window_for_model("deepseek-v4-flash"), 1_048_576);
+        assert_eq!(default_context_window_for_model("DeepSeek-V4-Pro"), 1_048_576);
         assert_eq!(default_context_window_for_model("gpt-5.6-sol"), 0);
         assert_eq!(default_context_window_for_model(""), 0);
+    }
+
+    #[test]
+    fn the_deepseek_provider_reports_the_real_window() {
+        assert_eq!(default_context_window("deepseek"), 1_048_576);
+        assert_eq!(default_context_window("openai"), 0);
+        assert_eq!(default_context_window(""), 0);
     }
 
     /// `covexcode --providers-json`'s whole reason to exist: an ACP client reads
