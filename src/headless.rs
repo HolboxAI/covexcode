@@ -329,6 +329,10 @@ impl HeadlessSession {
                 })
                 .await;
         }
+        // Kept so a mid-turn rescue can put the prompt back after compaction:
+        // the summary replaces the history, including this turn's user
+        // message, and a conversation with only system messages is refused.
+        let retry_message = user_message.clone();
         self.messages.push(user_message);
 
         // `App`'s own welcome screen already surfaces a missing key via
@@ -352,6 +356,9 @@ impl HeadlessSession {
             return StopReason::Refusal;
         }
 
+        // One rescue per turn. If the summary itself cannot fit, or the retry
+        // still hits the ceiling, the error is real and should surface.
+        let mut compacted_this_turn = false;
         loop {
             let budget_left =
                 self.config.tools.max_steps == 0 || self.tool_steps < self.config.tools.max_steps;
@@ -400,6 +407,21 @@ impl HeadlessSession {
                     return StopReason::EndTurn;
                 }
                 RoundOutcome::Error(message) => {
+                    // A request refused by the context guard is recoverable
+                    // while compaction is on: summarize, then retry the same
+                    // round once. Without this, the error ends the turn and
+                    // every later message fails the same preflight -- and
+                    // auto-compaction, which only runs after a *successful*
+                    // turn, can never run. That was the dead end where the
+                    // only escape the message offered was a new chat.
+                    if !compacted_this_turn
+                        && crate::notice::classify(&message) == crate::notice::Kind::ContextFull
+                        && self.maybe_auto_compact(updates).await
+                    {
+                        compacted_this_turn = true;
+                        self.messages.push(retry_message.clone());
+                        continue;
+                    }
                     let _ = updates
                         .send(SessionUpdate::AgentMessageChunk {
                             content: ContentBlock::Text {
@@ -493,9 +515,12 @@ impl HeadlessSession {
     /// TUI's `[compact] auto` behavior. ACP sessions used to grow forever even
     /// though `/compact` existed in the TUI -- this is that feature in the
     /// headless path, not a replacement for it.
-    async fn maybe_auto_compact(&mut self, updates: &mpsc::Sender<SessionUpdate>) {
+    ///
+    /// Returns true when the history was actually replaced by a summary, so a
+    /// failed round can use it to decide whether a retry is worth attempting.
+    async fn maybe_auto_compact(&mut self, updates: &mpsc::Sender<SessionUpdate>) -> bool {
         if !self.config.compact.auto || self.messages.len() < 2 {
-            return;
+            return false;
         }
         let context = self.context_tokens();
         let threshold = self.config.compact.effective_auto_at_tokens(
@@ -503,7 +528,7 @@ impl HeadlessSession {
             self.config.llm.max_tokens,
         ) as usize;
         if context < threshold {
-            return;
+            return false;
         }
 
         let _ = updates
@@ -539,6 +564,7 @@ impl HeadlessSession {
                         message_id: None,
                     })
                     .await;
+                true
             }
             Ok(_) => {
                 let _ = updates
@@ -551,6 +577,7 @@ impl HeadlessSession {
                         message_id: None,
                     })
                     .await;
+                false
             }
             Err(error) => {
                 let _ = updates
@@ -564,6 +591,7 @@ impl HeadlessSession {
                         message_id: None,
                     })
                     .await;
+                false
             }
         }
     }
@@ -587,7 +615,14 @@ impl HeadlessSession {
             endpoint: &self.config.llm.endpoint,
             model: &self.config.llm.model,
             api_key: &self.config.llm.api_key,
-            max_tokens: self.config.llm.max_tokens,
+            // The summary, not a chat reply: reserving the full reply budget
+            // here would make compaction fail at the same context ceiling it
+            // is meant to rescue.
+            max_tokens: self
+                .config
+                .llm
+                .max_tokens
+                .min(crate::compact::SUMMARY_MAX_TOKENS),
             context_window: self.config.llm.effective_context_window(),
             include_usage: self.config.quota.include_usage,
             temperature: self.config.llm.effective_temperature(),
@@ -2091,6 +2126,84 @@ mod tests {
             }
         }
         assert!(!visible.contains("auto-compact"), "{visible}");
+    }
+
+    /// A round refused by the context guard is recoverable while compaction is
+    /// on. Before this, the error ended the turn, so auto-compaction -- which
+    /// only runs after a successful turn -- could never run, and every retry
+    /// hit the same preflight. The only escape the message offered was a new
+    /// chat.
+    #[tokio::test]
+    async fn a_refused_round_compacts_and_retries_instead_of_ending_the_turn() {
+        let (_dir, ws) = workspace();
+        let summary = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Notes about the work.\"}}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let answer = sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        // The refused round never reaches the network, so the first response is
+        // the summary and the second belongs to the retried round.
+        let endpoint = serve_rounds(vec![summary, answer]).await;
+        let mut config = config_for(&endpoint);
+        config.llm.context_window = 100_000;
+        config.llm.max_tokens = 80_000;
+        config.compact.auto = true;
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        // The long history is what crosses the ceiling; the new prompt ("hi")
+        // is small enough to fit once the history has been replaced.
+        session
+            .messages
+            .push(ChatMessage::text("assistant", "x".repeat(100_000)));
+        let (updates_tx, mut updates_rx) = mpsc::channel(128);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let mut visible = String::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } = update
+            {
+                visible.push_str(&text);
+            }
+        }
+        assert!(
+            visible.contains("past the auto-compact threshold"),
+            "{visible}"
+        );
+        assert!(visible.contains("Conversation compacted"), "{visible}");
+        assert!(visible.contains("answer"), "{visible}");
+        assert_eq!(session.messages[0].role, "system");
+        assert!(
+            session.messages[0]
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .contains("Summary of the conversation so far"),
+            "{:?}",
+            session.messages[0].content
+        );
+        assert_eq!(session.messages[1].role, "user");
+        assert_eq!(session.messages[1].content.as_deref(), Some("hi"));
+        assert_eq!(session.messages[2].content.as_deref(), Some("answer"));
     }
 
     #[tokio::test]
