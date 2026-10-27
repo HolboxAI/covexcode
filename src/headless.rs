@@ -1837,7 +1837,14 @@ mod tests {
         let chunk = updates_rx.recv().await.expect("token chunk");
         assert!(matches!(chunk, SessionUpdate::AgentMessageChunk { .. }));
         let usage = updates_rx.recv().await.expect("usage update");
-        assert_eq!(usage, SessionUpdate::UsageUpdate { used: 15, size: 0 });
+        assert_eq!(
+            usage,
+            SessionUpdate::UsageUpdate {
+                used: 15,
+                size: 0,
+                prompt_tokens: Some(10),
+            }
+        );
     }
 
     /// The other half of the size fix: once covexcode knows the model's context
@@ -1877,7 +1884,8 @@ mod tests {
             usage,
             SessionUpdate::UsageUpdate {
                 used: 15,
-                size: 131_072
+                size: 131_072,
+                prompt_tokens: Some(10),
             }
         );
     }
