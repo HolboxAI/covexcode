@@ -18,7 +18,9 @@
 //! produces through `classify`, so a reworded message that stops matching fails
 //! the build instead of silently going grey.
 
+#[cfg(feature = "cli")]
 use crate::theme;
+#[cfg(feature = "cli")]
 use ratatui::style::{Modifier, Style};
 
 /// Substrings that classification keys on. Constants rather than literals at
@@ -72,6 +74,7 @@ pub enum Kind {
 
 impl Kind {
     /// Amber for "expected, you can act on it"; red for "something is wrong".
+    #[cfg(feature = "cli")]
     pub fn color(self) -> ratatui::style::Color {
         match self {
             Kind::DailyLimit
@@ -83,6 +86,7 @@ impl Kind {
         }
     }
 
+    #[cfg(feature = "cli")]
     pub fn style(self) -> Style {
         Style::default()
             .fg(self.color())
@@ -286,6 +290,7 @@ mod tests {
     /// Amber means "you can act on this"; red means "something is wrong".
     /// Getting these the wrong way round is what makes a wall of red
     /// unreadable.
+    #[cfg(feature = "cli")]
     #[test]
     fn actionable_kinds_are_amber_and_faults_are_red() {
         for k in [

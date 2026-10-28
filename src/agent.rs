@@ -26,6 +26,7 @@
 use crate::app::{App, AppState};
 use crate::config::Config;
 use crate::llm::{self, ChatMessage, StreamEvent, ToolCall};
+use crate::read_policy::is_pure_read_call;
 use crate::tools::{self, ToolOutcome};
 use crate::workspace::Workspace;
 use tokio::sync::mpsc;
@@ -240,32 +241,6 @@ pub fn execute_approved(
 /// spawns dozens of `run_command` processes in one instant. Same cap
 /// `artifacts.rs` uses for its own bounded upload fan-out.
 const MAX_CONCURRENT_READS: usize = 16;
-
-/// Whether `call` is a pure read: touches no file, no rollback journal, no
-/// process state that a concurrent sibling could race with. The whitelist is
-/// deliberately narrow -- `read_file`, `list_dir`, `glob`, `grep_search`, and
-/// a `run_command` that `tools::is_read_only` already vouches for elsewhere
-/// (the same allowlist `ApprovalMode::Always` trusts to skip a prompt).
-///
-/// `agent` is deliberately absent even though a subagent is read-only by
-/// construction: running one drives its own child request/response loop
-/// against the LLM endpoint via [`run_subagent`], which is a different shape
-/// of work than a single tool call and not something to fan out alongside a
-/// batch of file reads. It keeps running sequentially, exactly as before.
-/// `write_file` and `edit_file` are excluded because they are not reads at
-/// all: both do unlocked read-then-write on a path, so two calls to the same
-/// file racing would corrupt it, and both leave a first-record-wins entry in
-/// `rollback.rs`'s journal that depends on the order calls actually ran in.
-pub(crate) fn is_pure_read_call(call: &ToolCall) -> bool {
-    match call.function.name.as_str() {
-        tools::READ_FILE | tools::LIST_DIR | tools::GLOB | tools::GREP_SEARCH => true,
-        tools::RUN_COMMAND => matches!(
-            tools::describe_action(call),
-            Some(tools::Action::Command { command, .. }) if tools::is_read_only(&command)
-        ),
-        _ => false,
-    }
-}
 
 /// Run one turn's approved calls and hand back their outcomes in the same
 /// order `calls` came in, regardless of which read finished first.
