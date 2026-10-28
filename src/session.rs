@@ -18,7 +18,7 @@
 //! resumed-from file is never appended to either: resuming copies the loaded
 //! messages into a new file and continues there.
 
-use crate::app::Message;
+use crate::message::Message;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -187,7 +187,7 @@ pub fn load(path: &Path) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Role;
+    use crate::message::Role;
 
     fn msg(role: Role, content: &str) -> Message {
         Message::new(role, content)

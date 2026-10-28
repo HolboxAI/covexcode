@@ -859,7 +859,7 @@ impl HeadlessSession {
             // uses for `App`, so the two paths agree on what is safe to
             // overlap. Everything else stays one-at-a-time below.
             if matches!(&verdict, Verdict::AutoApprove)
-                && crate::agent::is_pure_read_call(&calls[i])
+                && crate::read_policy::is_pure_read_call(&calls[i])
             {
                 let start = i;
                 i += 1;
@@ -873,7 +873,7 @@ impl HeadlessSession {
                         ),
                         Verdict::AutoApprove
                     )
-                    && crate::agent::is_pure_read_call(&calls[i])
+                    && crate::read_policy::is_pure_read_call(&calls[i])
                 {
                     i += 1;
                 }
