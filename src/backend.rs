@@ -149,6 +149,42 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+pub(crate) fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if clean.len() % 4 != 0 {
+        return None;
+    }
+    let decode_byte = |b: u8| -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            b'=' => Some(0),
+            _ => None,
+        }
+    };
+
+    let mut out = Vec::with_capacity((clean.len() / 4) * 3);
+    for chunk in clean.chunks_exact(4) {
+        let b0 = decode_byte(chunk[0])? as u32;
+        let b1 = decode_byte(chunk[1])? as u32;
+        let b2 = decode_byte(chunk[2])? as u32;
+        let b3 = decode_byte(chunk[3])? as u32;
+
+        let n = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
+        out.push((n >> 16 & 0xFF) as u8);
+        if chunk[2] != b'=' {
+            out.push((n >> 8 & 0xFF) as u8);
+        }
+        if chunk[3] != b'=' {
+            out.push((n & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}
+
 // ---------------------------------------------------------------------------
 // The deploy token
 // ---------------------------------------------------------------------------
@@ -680,6 +716,19 @@ mod tests {
             let encoded = base64_encode(&vec![b'x'; len]);
             assert_eq!(encoded.len() % 4, 0, "len {len} produced {}", encoded.len());
         }
+    }
+
+    #[test]
+    fn base64_decode_round_trips_all_data() {
+        for s in ["", "f", "fo", "foo", "foob", "fooba", "foobar"] {
+            let enc = base64_encode(s.as_bytes());
+            let dec = base64_decode(&enc).expect("valid base64 must decode");
+            assert_eq!(dec, s.as_bytes());
+        }
+        let all: Vec<u8> = (0u8..=255).collect();
+        let enc = base64_encode(&all);
+        let dec = base64_decode(&enc).expect("binary base64 must decode");
+        assert_eq!(dec, all);
     }
 
     fn tree(files: &[(&str, &str)]) -> tempfile::TempDir {
