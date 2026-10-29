@@ -27,8 +27,9 @@ pub const PROVIDERS: &[Provider] = &[
         endpoint: "https://api.deepseek.com",
         // deepseek-chat / deepseek-reasoner were retired 2026-07-24; current
         // lineup is v4-pro (flagship) / v4-flash (faster, cheaper).
+        // v4-flash supports vision; model-level gating is handled in supports_images.
         models: &["deepseek-v4-pro", "deepseek-v4-flash"],
-        vision: false,
+        vision: true,
     },
     Provider {
         id: "openai",
@@ -45,11 +46,13 @@ pub fn find_provider(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.id == id)
 }
 
-/// Whether the active provider can read images. Unknown/custom endpoints are
-/// assumed capable: the user opted into "any OpenAI-compatible endpoint", which
-/// may well be a multimodal server, and guessing wrong on the pessimistic side
-/// would silently strip an image a real model could read.
-pub fn supports_images(provider_id: &str) -> bool {
+/// Whether the active provider and model can read images.
+/// DeepSeek's v4-flash supports vision inputs, whereas v4-pro is text-only.
+/// Unknown/custom endpoints and OpenAI models are assumed capable.
+pub fn supports_images(provider_id: &str, model: &str) -> bool {
+    if provider_id == "deepseek" {
+        return model.contains("flash");
+    }
     find_provider(provider_id).map_or(true, |p| p.vision)
 }
 
@@ -151,12 +154,13 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_is_text_only_and_openai_reads_images() {
-        assert!(!supports_images("deepseek"));
-        assert!(supports_images("openai"));
+    fn deepseek_flash_reads_images_and_pro_is_text_only() {
+        assert!(!supports_images("deepseek", "deepseek-v4-pro"));
+        assert!(supports_images("deepseek", "deepseek-v4-flash"));
+        assert!(supports_images("openai", "gpt-5.6-sol"));
         // Unknown/custom endpoints are assumed capable rather than silently
         // stripped of a possibly-valid image.
-        assert!(supports_images(""));
-        assert!(supports_images("some-custom-endpoint"));
+        assert!(supports_images("", "any-model"));
+        assert!(supports_images("some-custom-endpoint", "my-vision-model"));
     }
 }
