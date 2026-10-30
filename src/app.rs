@@ -1626,11 +1626,23 @@ impl App {
         if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model)
             && !self.pending_images.is_empty()
         {
-            let att_dir = Path::new(".covexcode").join("attachments");
+            // Keep fallback attachments in the CLI's state directory, not in
+            // the user's workspace: a text-only model still needs a readable
+            // path, but pasting an image must not leave untracked files in the
+            // repository the user is working in.
+            let att_dir = Config::config_dir().join("attachments");
             let _ = std::fs::create_dir_all(&att_dir);
             let mut notes = Vec::new();
             for (i, img) in self.pending_images.iter().enumerate() {
-                let filename = format!("pasted_turn{}_{}.png", self.turn + 1, i + 1);
+                let ext = match img.mime_type.as_str() {
+                    "image/jpeg" => "jpg",
+                    "image/webp" => "webp",
+                    "image/gif" => "gif",
+                    "image/bmp" => "bmp",
+                    "image/tiff" => "tiff",
+                    _ => "png",
+                };
+                let filename = format!("pasted_turn{}_{}.{ext}", self.turn + 1, i + 1);
                 let path = att_dir.join(&filename);
                 if let Some(bytes) = crate::backend::base64_decode(&img.data_base64) {
                     if std::fs::write(&path, &bytes).is_ok() {
@@ -8358,24 +8370,26 @@ mod tests {
 
     #[test]
     fn history_drops_images_for_a_text_only_model() {
-        let mut a = app();
-        a.config.llm.provider = "deepseek".to_string();
-        a.config.llm.model = "deepseek-v4-pro".to_string();
-        // Stage directly, bypassing the attach-time gate, to prove the wire
-        // guard stands on its own.
-        a.pending_images.push(ImageAttachment {
-            mime_type: "image/png".to_string(),
-            data_base64: "AAAA".to_string(),
-        });
-        type_str(&mut a, "look");
-        a.handle_key(key(KeyCode::Enter));
+        with_isolated_home(|| {
+            let mut a = app();
+            a.config.llm.provider = "deepseek".to_string();
+            a.config.llm.model = "deepseek-v4-pro".to_string();
+            // Stage directly, bypassing the attach-time gate, to prove the wire
+            // guard stands on its own.
+            a.pending_images.push(ImageAttachment {
+                mime_type: "image/png".to_string(),
+                data_base64: "AAAA".to_string(),
+            });
+            type_str(&mut a, "look");
+            a.handle_key(key(KeyCode::Enter));
 
-        let history = a.history(None);
-        assert_eq!(history.len(), 1);
-        assert!(
-            history[0].images.is_empty(),
-            "a base64 image must never reach DeepSeek"
-        );
+            let history = a.history(None);
+            assert_eq!(history.len(), 1);
+            assert!(
+                history[0].images.is_empty(),
+                "a base64 image must never reach DeepSeek"
+            );
+        });
     }
 
     #[test]
