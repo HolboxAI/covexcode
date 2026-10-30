@@ -26,7 +26,9 @@ pub const PROVIDERS: &[Provider] = &[
         label: "DeepSeek",
         endpoint: "https://api.deepseek.com",
         // deepseek-chat / deepseek-reasoner were retired 2026-07-24; current
-        // lineup is v4-pro (flagship) / v4-flash (faster, cheaper).
+        // lineup is v4-pro (flagship) / v4-flash (faster, cheaper). These
+        // registry entries are the text-only checkpoints; an explicitly
+        // multimodal model id is recognized by `supports_images`.
         models: &["deepseek-v4-pro", "deepseek-v4-flash"],
         vision: false,
     },
@@ -47,16 +49,23 @@ pub fn find_provider(id: &str) -> Option<&'static Provider> {
 
 /// Whether the configured model accepts image prompt blocks.
 ///
-/// A registry provider answers from its `vision` flag. Unknown providers --
-/// the managed proxy logs in with `provider = ""`, and custom endpoints also
-/// leave it empty -- have no registry entry, so the model id decides: DeepSeek
-/// models are text-only. Anything else stays permissive, preserving the old
-/// "assume a custom endpoint can read images" default.
+/// Model ids that explicitly say `vision` win first. For DeepSeek the model
+/// family is the deciding signal: v4-flash accepts image blocks, v4-pro does
+/// not (verified against the managed proxy). That distinction matters for the
+/// managed proxy, which signs in with `provider = ""`, and for custom
+/// endpoints -- keying only on the provider would treat v4-pro as
+/// vision-capable there. A registry provider answers from its `vision` flag;
+/// anything else stays permissive, preserving the old "assume a custom
+/// endpoint can read images" default.
 pub fn supports_images(provider_id: &str, model_id: &str) -> bool {
-    match find_provider(provider_id) {
-        Some(provider) => provider.vision,
-        None => !model_id.trim().to_ascii_lowercase().starts_with("deepseek"),
+    let model = model_id.trim().to_ascii_lowercase();
+    if model.contains("vision") {
+        return true;
     }
+    if provider_id == "deepseek" || model.starts_with("deepseek") {
+        return model.contains("flash");
+    }
+    find_provider(provider_id).map_or(true, |p| p.vision)
 }
 
 /// The conventional env var a user is likely to already have exported for this
@@ -188,17 +197,17 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_is_text_only_and_openai_reads_images() {
-        assert!(!supports_images("deepseek", "deepseek-v4-flash"));
+    fn deepseek_flash_reads_images_and_pro_is_text_only() {
+        assert!(!supports_images("deepseek", "deepseek-v4-pro"));
+        assert!(supports_images("deepseek", "deepseek-v4-flash"));
+        assert!(supports_images("deepseek", "deepseek-v4-flash-vision-exp"));
         assert!(supports_images("openai", "gpt-5.6-sol"));
-        assert!(
-            supports_images("openai", "deepseek-v4-flash"),
-            "a known provider's own vision flag wins over the model name"
-        );
-        // The managed proxy signs in with no provider id; the model still
-        // identifies DeepSeek as text-only.
-        assert!(!supports_images("", "deepseek-v4-flash"));
+        // The managed proxy signs in with no provider id; the model decides.
+        assert!(!supports_images("", "deepseek-v4-pro"));
+        assert!(supports_images("", "deepseek-v4-flash"));
         assert!(!supports_images("some-custom-endpoint", "DeepSeek-V4-Pro"));
+        assert!(supports_images("some-custom-endpoint", "deepseek-v4-flash"));
+        assert!(supports_images("", "deepseek-v4-flash-vision-exp"));
         // Other unknown/custom models are assumed capable rather than silently
         // stripped of a possibly-valid image.
         assert!(supports_images("", "my-vision-model"));
