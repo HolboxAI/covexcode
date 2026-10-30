@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -359,6 +360,44 @@ pub fn usage_of(line: &str) -> Option<ApiUsage> {
         .filter(|u| u.total() > 0)
 }
 
+/// The message for a spent account. `Out of credit` is the marker
+/// `notice::classify` keys on, and the URL is plain text rather than markdown
+/// so the TUI and the IDE both show something the user can act on.
+fn credit_exhausted_message(body: &str) -> String {
+    let detail = summarise_error(body);
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{detail}")
+    };
+    // The proxy has two server-side caps with opposite remedies: the lifetime
+    // promo balance (add credit) and a per-key daily cap (wait for UTC
+    // midnight). Telling a daily-cap user to top up would be wrong.
+    if body
+        .to_lowercase()
+        .contains(crate::notice::markers::DAILY_SPEND_LIMIT)
+    {
+        format!(
+            "Daily spend limit reached.{detail}\n\nThe server-side daily cap resets at \
+             UTC midnight. Add credits at https://covexcode.com/account if it stays \
+             exhausted after the reset."
+        )
+    } else {
+        format!(
+            "Out of credit.{detail}\n\nAdd credits at https://covexcode.com/account, \
+             then send the message again."
+        )
+    }
+}
+
+/// A genuine transient rate limit: the same advice this has always given.
+fn rate_limited_message(body: &str) -> String {
+    format!(
+        "{}\n\nThis is a rate limit, not a fault -- wait a moment and try again.",
+        summarise_error(body)
+    )
+}
+
 /// Pull the human-readable part out of an OpenAI-shaped error body.
 ///
 /// The raw body is JSON with the sentence buried three levels down, so printing
@@ -395,6 +434,31 @@ pub fn chat_completions_url(endpoint: &str) -> String {
     }
 }
 
+/// Hostname of the backup for the managed Covexcode proxy. It serves the same
+/// API and accepts the same promo keys, but has existed longer, so it survives
+/// the stale or split-horizon resolver that can return NXDOMAIN for the newer
+/// primary hostname.
+const LEGACY_PROXY_HOST: &str = "llm.boxcode.sh";
+
+/// Once a request has actually reached the backup host, keep using it for the
+/// rest of this process instead of paying the primary hostname's DNS timeout
+/// on every turn. A new process starts on the primary host again, so a resolver
+/// that has recovered is picked back up.
+static PREFER_LEGACY_PROXY: AtomicBool = AtomicBool::new(false);
+
+/// The backup URL for the managed Covexcode proxy, or `None` for every other
+/// endpoint. Only the host changes: scheme, port, path, and query stay exactly
+/// as configured, so a custom `/openai` prefix or non-standard port still
+/// works.
+fn legacy_proxy_url(url: &str) -> Option<String> {
+    let mut parsed = reqwest::Url::parse(url).ok()?;
+    if parsed.host_str()? != "llm.covexcode.com" {
+        return None;
+    }
+    parsed.set_host(Some(LEGACY_PROXY_HOST)).ok()?;
+    Some(parsed.to_string())
+}
+
 /// Where a request goes and how it is bounded. Grouped so the two entry points
 /// below take a handful of arguments rather than a dozen positional strings
 /// that are trivial to transpose.
@@ -403,6 +467,10 @@ pub struct Target<'a> {
     pub model: &'a str,
     pub api_key: &'a str,
     pub max_tokens: u32,
+    /// The model's context window, in tokens. `0` means unknown and skips the
+    /// preflight check. Callers resolve this from
+    /// `config::LlmConfig::effective_context_window`.
+    pub context_window: u64,
     /// Ask the endpoint for exact token counts. Off leaves the request byte for
     /// byte as it was before this existed.
     pub include_usage: bool,
@@ -440,12 +508,28 @@ async fn run(
         model,
         api_key,
         max_tokens,
+        context_window,
         include_usage,
         temperature,
     } = target;
     // A lone system prompt is not a conversation.
     if messages.iter().all(|m| m.role == "system") {
         return Err("Nothing to send.".to_string());
+    }
+
+    // Refuse an oversized request before it hits the network. The endpoint's
+    // own 400 is handled below, but a request this large can also be accepted
+    // and then time out mid-stream, which looks like a proxy outage and bills
+    // for the attempt. The estimate is deliberately conservative: JSON chars
+    // include tool schemas and any base64 images.
+    let estimated_tokens = estimate_request_tokens(&messages, &tools)
+        .saturating_add(max_tokens as u64);
+    if context_window > 0 && estimated_tokens > context_window {
+        return Err(format!(
+            "This conversation is too large for {model}'s {context_window}-token context \
+             window (estimated ~{estimated_tokens} tokens including the {max_tokens}-token \
+             reply budget). Start a new chat or run /compact."
+        ));
     }
 
     let sent_tools = !tools.is_empty();
@@ -466,12 +550,23 @@ async fn run(
         .build()
         .map_err(|e| format!("Could not create HTTP client: {e}"))?;
 
-    let url = chat_completions_url(endpoint);
+    let primary_url = chat_completions_url(endpoint);
+    let legacy_url = legacy_proxy_url(&primary_url);
+    let mut url = if PREFER_LEGACY_PROXY.load(Ordering::Relaxed) {
+        legacy_url.clone().unwrap_or_else(|| primary_url.clone())
+    } else {
+        primary_url.clone()
+    };
+    let mut using_legacy = url != primary_url;
 
-    let mut req = client.post(&url).json(&request);
-    if !api_key.is_empty() {
-        req = req.bearer_auth(api_key);
-    }
+    let build_request = |url: &str| {
+        let mut req = client.post(url).json(&request);
+        if !api_key.is_empty() {
+            req = req.bearer_auth(api_key);
+        }
+        req
+    };
+    let mut req = build_request(&url);
 
     // Retry the connection/status-check phase only -- never once a token has
     // reached the caller, since replaying a request that already streamed part
@@ -482,11 +577,52 @@ async fn run(
         let this_req = req
             .try_clone()
             .expect("request body is buffered JSON, so it is always cloneable");
-        let response = this_req
-            .send()
-            .await
-            .map_err(|e| network_failure(&url, &e))?;
+        let response = match this_req.send().await {
+            Ok(response) => response,
+            Err(error) if attempt < MAX_RETRY_ATTEMPTS && is_retryable_network_error(&error) => {
+                let wait = backoff_delay(attempt);
+                attempt += 1;
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            // A resolver that cannot see the newer hostname, or a connect that
+            // timed out before the proxy answered, is not a reason to end a
+            // long task. The backup is the same proxy, so try it before
+            // surfacing anything to the user.
+            Err(error)
+                if !using_legacy
+                    && legacy_url.is_some()
+                    && (is_dns_failure(&error) || error.is_timeout()) =>
+            {
+                using_legacy = true;
+                attempt = 0;
+                if let Some(legacy) = legacy_url.clone() {
+                    url = legacy;
+                }
+                req = build_request(&url);
+                continue;
+            }
+            Err(error) => return Err(network_failure(&primary_url, &error)),
+        };
         let status = response.status();
+        // A spent account is also a 429 from the promo proxy, but waiting will
+        // never clear it, and the generic "wait a moment" advice is actively
+        // wrong. The body is the only signal that distinguishes the two, so it
+        // is read here -- the one point where consuming it is safe -- and a
+        // quota error is returned without a retry.
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let wait = retry_after_duration(&response).unwrap_or_else(|| backoff_delay(attempt));
+            let body = response.text().await.unwrap_or_default();
+            if crate::notice::classify(&body) == crate::notice::Kind::OutOfCredit {
+                return Err(credit_exhausted_message(&body));
+            }
+            if attempt >= MAX_RETRY_ATTEMPTS {
+                return Err(rate_limited_message(&body));
+            }
+            attempt += 1;
+            tokio::time::sleep(wait).await;
+            continue;
+        }
         if attempt >= MAX_RETRY_ATTEMPTS || !is_retryable_status(status) {
             break response;
         }
@@ -502,6 +638,9 @@ async fn run(
     // Surface HTTP failures (401 bad key, 404 wrong path, 400 bad model) as text
     // in the transcript instead of silently ending the stream.
     let status = response.status();
+    if using_legacy && status.is_success() {
+        PREFER_LEGACY_PROXY.store(true, Ordering::Relaxed);
+    }
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         let detail = body.trim();
@@ -510,13 +649,13 @@ async fn run(
         } else {
             format!("\n{}", truncate(detail, 800))
         };
-        // A raw `HTTP 429` status line says nothing a user can act on, and the
-        // remedy is the one thing worth saying: it is not a fault.
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(format!(
-                "{}\n\nThis is a rate limit, not a fault -- wait a moment and try again.",
-                summarise_error(&body)
-            ));
+        // Some endpoints answer a spent account with 402 instead of the promo
+        // proxy's 429. The account page is the only remedy; there is no
+        // transient condition to wait out.
+        if status == reqwest::StatusCode::PAYMENT_REQUIRED
+            || crate::notice::classify(&body) == crate::notice::Kind::OutOfCredit
+        {
+            return Err(credit_exhausted_message(&body));
         }
 
         // A conversation that no longer fits is the other common 400, and it
@@ -824,8 +963,65 @@ const MAX_BACKOFF: Duration = Duration::from_secs(16);
 /// automatically -- both are usually transient. A 4xx other than 429 (bad
 /// key, bad model, malformed request) will fail again identically, so
 /// retrying it would only delay the error the user needs to see.
+///
+/// The request loop reads a 429's body before consulting this: the promo proxy
+/// uses 429 for a spent account too (`insufficient_quota`), and that one is
+/// returned immediately instead of retried.
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// The words a failed DNS lookup uses on each platform. Kept separate from the
+/// reqwest error chain so the Windows wording is testable without a network.
+fn is_dns_failure_message(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "dns error",
+        "failed to lookup",
+        "no such host",
+        "nodename nor servname",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// Whether any layer of the error is a resolver failure. `is_connect()` covers
+/// most platforms, but spelling the chain out keeps DNS retries working if
+/// reqwest changes that classification -- and lets the proxy fallback key on
+/// exactly this failure instead of a generic connection error.
+fn is_dns_failure(error: &reqwest::Error) -> bool {
+    use std::error::Error;
+    let mut source: Option<&(dyn Error + 'static)> = Some(error);
+    while let Some(err) = source {
+        if is_dns_failure_message(&err.to_string()) {
+            return true;
+        }
+        source = err.source();
+    }
+    false
+}
+
+/// A dropped/refused connection before any response is safe to retry: the
+/// request body is buffered JSON and no token has reached the caller yet.
+/// Certificate/TLS failures are permanent, so they are surfaced immediately
+/// rather than retried three times.
+fn is_retryable_network_error(error: &reqwest::Error) -> bool {
+    let transient = error.is_timeout()
+        || error.is_connect()
+        || is_dns_failure(error)
+        || chain_mentions(error, "connection reset")
+        || chain_mentions(error, "connection closed")
+        || chain_mentions(error, "broken pipe");
+    transient && !chain_mentions(error, "certificate") && !chain_mentions(error, "tls")
+}
+
+/// Rough preflight estimate: JSON characters / 4, including tool schemas and
+/// any base64 images. Deliberately conservative; it exists to stop a request
+/// that is clearly over the window, not to replace the endpoint's exact count.
+pub(crate) fn estimate_request_tokens(messages: &[ChatMessage], tools: &[Value]) -> u64 {
+    let chars = serde_json::to_string(messages).map(|s| s.len()).unwrap_or(0)
+        + serde_json::to_string(tools).map(|s| s.len()).unwrap_or(0);
+    (chars / 4) as u64
 }
 
 /// Exponential backoff for the `attempt`-th retry (0-indexed): 1s, 2s, 4s, ...,
@@ -905,7 +1101,7 @@ fn network_failure(url: &str, e: &reqwest::Error) -> String {
     let host = host_of(url);
     // Ordered by specificity: a DNS failure is also a connect failure, and
     // "no such host" is the more useful of the two things to be told.
-    if chain_mentions(e, "dns error") || chain_mentions(e, "failed to lookup") {
+    if is_dns_failure(e) {
         format!("Could not reach {host}: no such host.")
     } else if e.is_timeout() {
         format!("Could not reach {host}: timed out.")
@@ -1017,6 +1213,7 @@ mod tests {
                 model: "m",
                 api_key: "",
                 max_tokens: 100,
+                context_window: 0,
                 include_usage: false,
                 temperature: None,
             },
@@ -1060,6 +1257,66 @@ mod tests {
         }
         // And the URL is named once, not at every layer.
         assert_eq!(error.matches("127.0.0.1").count(), 1, "{error:?}");
+    }
+
+    /// The preflight guard must stop an oversized turn before the network:
+    /// that is what prevents the proxy timeout / runaway retry loop.
+    #[tokio::test]
+    async fn a_request_over_the_context_window_is_refused_before_the_network() {
+        let (tx, mut rx) = mpsc::channel(8);
+        stream_chat(
+            Target {
+                endpoint: "http://127.0.0.1:1",
+                model: "m",
+                api_key: "",
+                max_tokens: 100,
+                context_window: 100,
+                include_usage: false,
+                temperature: None,
+            },
+            vec![ChatMessage::text("user", "x".repeat(1000))],
+            Vec::new(),
+            1,
+            tx,
+        )
+        .await;
+
+        let mut error = None;
+        while let Ok((_, ev)) = rx.try_recv() {
+            if let StreamEvent::Error(e) = ev {
+                error = Some(e);
+            }
+        }
+        let error = error.expect("an oversized request must report something");
+        assert!(error.contains("context window"), "{error}");
+    }
+
+    /// A transient connection drop before any response is retried; the
+    /// second connection succeeds. This is the proxy/network hiccup path.
+    #[tokio::test]
+    async fn a_dropped_connection_is_retried_then_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n";
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                drop(socket);
+            }
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}"
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let events = collect(&format!("http://{addr}")).await;
+        assert_eq!(text_of(&events), "hello");
     }
 
     /// Every one of these has to keep reaching `notice`'s "Endpoint
@@ -1139,6 +1396,44 @@ mod tests {
             chat_completions_url("https://llm.internal/v1/chat/completions"),
             "https://llm.internal/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn the_managed_proxy_has_a_legacy_backup_url() {
+        assert_eq!(
+            legacy_proxy_url("https://llm.covexcode.com/v1/chat/completions").as_deref(),
+            Some("https://llm.boxcode.sh/v1/chat/completions")
+        );
+        assert_eq!(
+            legacy_proxy_url("https://llm.covexcode.com:8443/openai/chat/completions").as_deref(),
+            Some("https://llm.boxcode.sh:8443/openai/chat/completions")
+        );
+        // Only the managed host is rewritten; a lookalike or a BYOK endpoint
+        // must keep going exactly where it was configured.
+        assert_eq!(legacy_proxy_url("https://llm.covexcode.com.evil/v1"), None);
+        assert_eq!(
+            legacy_proxy_url("https://api.deepseek.com/v1/chat/completions"),
+            None
+        );
+        assert_eq!(legacy_proxy_url("not a url"), None);
+    }
+
+    #[test]
+    fn dns_failure_wording_is_recognised_on_every_platform() {
+        for message in [
+            "dns error: failed to lookup address information: nodename nor servname provided",
+            "dns error: No such host is known. (os error 11001)",
+            "failed to lookup address information: Name or service not known",
+        ] {
+            assert!(is_dns_failure_message(message), "{message}");
+        }
+        for message in [
+            "connection refused",
+            "certificate verify failed",
+            "tls handshake failed",
+        ] {
+            assert!(!is_dns_failure_message(message), "{message}");
+        }
     }
 
     #[test]
@@ -1348,6 +1643,7 @@ mod tests {
                 model: "test-model",
                 api_key: "sk-test",
                 max_tokens: 4096,
+                context_window: 0,
                 include_usage: true,
                 temperature: None,
             },
@@ -1628,6 +1924,7 @@ mod tests {
                 model: "m",
                 api_key: "k",
                 max_tokens: 4096,
+                context_window: 0,
                 include_usage: true,
                 temperature: None,
             },
@@ -1833,6 +2130,86 @@ mod tests {
         let events = collect(&addr).await;
         assert_eq!(text_of(&events), "Hi");
         assert!(matches!(events.last(), Some(StreamEvent::Done)));
+    }
+
+    /// The promo proxy uses 429 for a spent account. It must not be retried
+    /// (waiting cannot clear it) and must not be reported as a rate limit --
+    /// the two remedies are opposites.
+    #[tokio::test]
+    async fn an_insufficient_quota_429_is_reported_as_out_of_credit_without_retrying() {
+        let body =
+            r#"{"error":{"message":"lifetime spend limit reached","type":"insufficient_quota"}}"#;
+        let quota = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n\
+             Retry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        // If the client retried, this successful answer would be returned
+        // instead of the credit error.
+        let ok_body = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n";
+        let ok = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{ok_body}"
+        )
+        .into_bytes();
+        let addr = serve_sequence(vec![quota, ok]).await;
+
+        let events = collect(&addr).await;
+        match events.last() {
+            Some(StreamEvent::Error(e)) => {
+                assert!(e.contains("Out of credit"), "{e}");
+                assert!(e.contains("https://covexcode.com/account"), "{e}");
+                assert!(!e.contains("rate limit"), "{e}");
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+    }
+
+    /// A per-key daily cap uses the same 429/insufficient_quota shape as the
+    /// lifetime balance, but the remedy is the UTC reset -- not adding credit.
+    #[tokio::test]
+    async fn a_daily_server_cap_is_reported_as_a_daily_limit() {
+        let body = r#"{"error":{"message":"daily spend limit reached","type":"insufficient_quota"}}"#;
+        let response = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n\
+             Retry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let addr = serve_sequence(vec![response]).await;
+
+        let events = collect(&addr).await;
+        match events.last() {
+            Some(StreamEvent::Error(e)) => {
+                assert!(e.contains("Daily spend limit reached"), "{e}");
+                assert!(e.contains("UTC midnight"), "{e}");
+                assert!(!e.contains("Out of credit"), "{e}");
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+    }
+
+    /// Some endpoints use 402 Payment Required instead of 429 for the same
+    /// condition; it takes the same message.
+    #[tokio::test]
+    async fn a_402_is_reported_as_out_of_credit() {
+        let body = r#"{"error":{"message":"payment required","type":"insufficient_quota"}}"#;
+        let response = format!(
+            "HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let addr = serve_sequence(vec![response]).await;
+
+        let events = collect(&addr).await;
+        match events.last() {
+            Some(StreamEvent::Error(e)) => {
+                assert!(e.contains("Out of credit"), "{e}");
+                assert!(e.contains("https://covexcode.com/account"), "{e}");
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
     }
 
     /// Retries are bounded: a rate limit that never clears still ends in the

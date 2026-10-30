@@ -1,4 +1,5 @@
 use crate::config::{ApprovalMode, Config};
+use crate::compact::{COMPACT_INSTRUCTION, SUMMARY_PREAMBLE};
 use crate::danger;
 use crate::deploy::{self, DeployAction, DeployEvent, DeploySession, Stage};
 use crate::llm::{ChatMessage, ImageAttachment, ToolCall};
@@ -438,46 +439,6 @@ fn resolve_image_path(input: &str) -> Option<(PathBuf, &'static str)> {
 
     None
 }
-
-/// What `/compact` asks the model for.
-///
-/// Written as instructions to itself rather than as a request for a report:
-/// the reply *becomes* the conversation, so anything it leaves out is gone for
-/// good. Hence the emphasis on specifics -- a summary that says "fixed the
-/// bug" instead of naming the file has thrown away the only copy.
-const COMPACT_INSTRUCTION: &str = "\
-Summarise the conversation above so that it can replace it entirely as your context.
-
-Keep: what the user is trying to achieve, decisions taken and the reasoning \
-behind them, every file path touched and what changed in it, commands run and \
-what they produced, and anything still unfinished or agreed as a next step.
-
-Be specific. Names, paths, numbers and exact error text survive only if you \
-write them down -- the messages above will not be sent again, so anything you \
-leave out is lost. Drop pleasantries, restatements, and anything since \
-superseded.
-
-Before the summary, in a section of its own headed `Proposed COVEXCODE.md \
-updates:`, list any durable, non-obvious project facts from this conversation \
-that are worth keeping past this summary -- a build or test quirk, a wrong \
-assumption you were corrected on, a convention you were told -- and are not \
-already written down in the project notes. One line each, or none at all if \
-nothing in this conversation rises to that bar; do not strain to fill it. \
-No tools are available to you in this request, so only list them here -- do \
-not attempt to call one. They stay in view in the summary that replaces this \
-conversation, so once tools are available again, propose the actual edit to \
-COVEXCODE.md through the normal approval, the same as any other file change.
-
-Write it as notes to yourself, not as a reply to the user, and do not comment \
-on the act of summarising.";
-
-/// Prefixed to the summary on the wire so the model reads it as context it
-/// already has rather than as something it is being asked to act on. The user
-/// never sees this line -- the transcript shows `display`, which is the
-/// summary alone.
-const SUMMARY_PREAMBLE: &str =
-    "Summary of the conversation so far. The messages it covers have been \
-removed to save context, so this is all that remains of them:";
 
 /// What `/compact` prints once the summary is in place: what the context cost,
 /// what it costs now, and what the day has cost so far.
@@ -1216,12 +1177,20 @@ impl App {
                 self.insert_str(&c.to_string());
                 self.command_menu_selected = 0;
             }
+            // Shift+Tab cycles the session's permission posture (auto ↔ manual).
+            // Most terminals report this as `BackTab`; the kitty keyboard
+            // enhancement this app enables reports it as `Tab` + SHIFT instead,
+            // so both spellings have to land on the same action.
+            KeyCode::BackTab => self.cycle_permission_mode(),
+
             // Completes to the highlighted command's full name without
             // running it, so there's still a chance to review before Enter --
             // only while the menu actually has something to complete to;
             // otherwise Tab keeps its ordinary meaning of inserting a stop.
             KeyCode::Tab => {
-                if let Some(cmd) = self.selected_command() {
+                if shift {
+                    self.cycle_permission_mode();
+                } else if let Some(cmd) = self.selected_command() {
                     self.set_input(cmd.to_string());
                 } else {
                     self.insert_str("    ");
@@ -1385,7 +1354,7 @@ impl App {
         self.messages.push(Message::new(
             Role::System,
             format!(
-                "The current model ({}) can't read images. Switch to an OpenAI model or deepseek-v4-flash with /model, then try again.",
+                "The current model ({}) can't read images. Switch to an OpenAI model or an explicitly vision-capable model with /model, then try again.",
                 self.config.llm.model
             ),
         ));
@@ -1502,7 +1471,7 @@ impl App {
             ));
             return true;
         }
-        if image::load_from_memory(&bytes).is_err() && !bytes.starts_with(b"\x89PNG") {
+        if image::load_from_memory(&bytes).is_err() {
             self.messages.push(Message::new(
                 Role::System,
                 format!("{name} is corrupted or not a valid image, so it was not attached."),
@@ -2019,6 +1988,34 @@ impl App {
                  before it happens."
             }
             Mode::Edit => "Inline edit is headless-only and not available in the terminal.",
+        };
+        self.messages.push(Message::new(Role::System, note));
+        self.greeted = true;
+        self.follow_tail = true;
+    }
+
+    /// Shift+Tab — cycle the session's permission posture between auto and manual.
+    ///
+    /// A session-scoped override, not a config write: it flips the in-memory
+    /// `approval` field only, so it lasts until `/provider` or `/model` saves a
+    /// config (which rewrites the field from disk) or the app exits. Plan mode
+    /// is deliberately left alone — that stays `/plan`'s axis — because the two
+    /// are independent: plan mode refuses writes outright whatever the approval
+    /// posture says.
+    fn cycle_permission_mode(&mut self) {
+        self.config.tools.approval = match self.config.tools.approval {
+            ApprovalMode::Destructive => ApprovalMode::Always,
+            ApprovalMode::Always => ApprovalMode::Destructive,
+        };
+        let note = match self.config.tools.approval {
+            ApprovalMode::Destructive => {
+                "Auto mode: ordinary reads, writes and commands run without asking — only \
+                 destructive actions stop for approval. Shift+Tab for manual mode."
+            }
+            ApprovalMode::Always => {
+                "Manual mode: every write and every command stops for approval. Shift+Tab for \
+                 auto mode."
+            }
         };
         self.messages.push(Message::new(Role::System, note));
         self.greeted = true;
@@ -3899,7 +3896,13 @@ impl App {
         let context = self
             .last_prompt_tokens
             .unwrap_or_else(|| self.context_size().approx_tokens);
-        let threshold = self.config.compact.auto_at_tokens as usize;
+        // Derived from the model's real window rather than used verbatim: a
+        // fixed 80k default would compact almost immediately on a 1M model, and
+        // a user value above the context guard's ceiling could never fire.
+        let threshold = self.config.compact.effective_auto_at_tokens(
+            self.config.llm.effective_context_window(),
+            self.config.llm.max_tokens,
+        ) as usize;
         if context < threshold {
             return;
         }
@@ -7721,6 +7724,67 @@ mod tests {
         assert_eq!(a.input_buffer, "hello    ");
     }
 
+    /// Shift+Tab (as `BackTab`) flips the default posture to manual, the
+    /// in-memory setting rather than a config write.
+    #[test]
+    fn shift_tab_cycles_from_auto_to_manual() {
+        let mut a = app();
+        assert_eq!(a.config.tools.approval, ApprovalMode::Destructive);
+
+        a.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+
+        assert_eq!(a.config.tools.approval, ApprovalMode::Always);
+    }
+
+    /// A second Shift+Tab returns to auto -- the cycle is a toggle, not a
+    /// one-way switch into the stricter posture.
+    #[test]
+    fn shift_tab_cycles_back_from_manual_to_auto() {
+        let mut a = app();
+        a.config.tools.approval = ApprovalMode::Always;
+
+        a.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+
+        assert_eq!(a.config.tools.approval, ApprovalMode::Destructive);
+    }
+
+    /// Terminals on the kitty keyboard protocol report Shift+Tab as `Tab` with
+    /// the SHIFT modifier instead of `BackTab`; both spellings must cycle.
+    #[test]
+    fn shift_tab_reported_as_tab_with_shift_also_cycles() {
+        let mut a = app();
+
+        a.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+
+        assert_eq!(a.config.tools.approval, ApprovalMode::Always);
+    }
+
+    /// The switch is announced in the transcript, so the change is never a
+    /// silent posture shift.
+    #[test]
+    fn cycling_permission_mode_announces_itself() {
+        let mut a = app();
+        let before = a.messages.len();
+
+        a.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+
+        assert!(a.messages.len() > before, "a system note must be pushed");
+        assert!(matches!(a.messages.last(), Some(Message { role: Role::System, .. })));
+    }
+
+    /// Plan mode is untouched by Shift+Tab: it cycles the approval posture
+    /// (irrelevant while planning) but never exits or enters plan mode.
+    #[test]
+    fn shift_tab_does_not_touch_plan_mode() {
+        let mut a = app();
+        a.mode = Mode::Plan;
+
+        a.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+
+        assert!(a.mode.is_plan(), "plan mode must be left alone");
+        assert_eq!(a.config.tools.approval, ApprovalMode::Always);
+    }
+
     /// Prompt history recall must still work exactly as before once the
     /// buffer isn't a bare "/word" -- the new Up/Down branch must only ever
     /// intercept the keys while the menu itself has matches.
@@ -8046,6 +8110,21 @@ mod tests {
 
     // ---- image attachments ---------------------------------------------------
 
+    /// A real, decodable 1x1 PNG. Several tests used to use only the 8-byte
+    /// PNG signature, which the pre-validation code accepted; now that the
+    /// attachment path decodes the image, fixtures must actually be images.
+    fn one_pixel_png() -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+        let mut out = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Png,
+            )
+            .expect("encode 1x1 png");
+        out
+    }
+
     #[test]
     fn mime_is_detected_from_the_extension() {
         assert_eq!(mime_for_path("shot.png"), Some("image/png"));
@@ -8061,8 +8140,8 @@ mod tests {
         let mut a = app();
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("screenshot.png");
-        let bytes = b"\x89PNG not really a png";
-        std::fs::write(&img, bytes).unwrap();
+        let bytes = one_pixel_png();
+        std::fs::write(&img, &bytes).unwrap();
 
         a.handle_paste(img.to_string_lossy().into_owned());
 
@@ -8072,9 +8151,11 @@ mod tests {
         );
         assert_eq!(a.pending_images.len(), 1);
         assert_eq!(a.pending_images[0].mime_type, "image/png");
-        assert_eq!(
-            a.pending_images[0].data_base64,
-            crate::backend::base64_encode(bytes)
+        let decoded = crate::backend::base64_decode(&a.pending_images[0].data_base64)
+            .expect("staged image must be valid base64");
+        assert!(
+            image::load_from_memory(&decoded).is_ok(),
+            "the staged bytes must still be a decodable image"
         );
     }
 
@@ -8298,20 +8379,20 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_flash_stages_and_sends_images_natively() {
+    fn deepseek_vision_model_stages_and_sends_images_natively() {
         let mut a = app();
         a.config.llm.provider = "deepseek".to_string();
-        a.config.llm.model = "deepseek-v4-flash".to_string();
+        a.config.llm.model = "deepseek-v4-flash-vision-exp".to_string();
 
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("shot.png");
-        std::fs::write(&img, b"\x89PNG").unwrap();
+        std::fs::write(&img, one_pixel_png()).unwrap();
         a.handle_paste(img.to_string_lossy().into_owned());
 
         assert_eq!(
             a.pending_images.len(),
             1,
-            "deepseek-v4-flash must stage the image"
+            "a model id that names vision must stage the image"
         );
         type_str(&mut a, "analyze this");
         a.handle_key(key(KeyCode::Enter));
@@ -8321,7 +8402,7 @@ mod tests {
         assert_eq!(
             history[0].images.len(),
             1,
-            "deepseek-v4-flash must receive vision image blocks"
+            "a model id that names vision must receive image blocks"
         );
     }
 
