@@ -3,10 +3,23 @@ name = "covexcode"
 version = "1.11.93"
 edition = "2021"
 
+[features]
+default = ["cli"]
+cli = ["dep:ratatui", "dep:crossterm"]
+
+[[bin]]
+name = "covexcode"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "covexcode-agent"
+path = "src/bin/covexcode-agent.rs"
+
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
-ratatui = "0.26"
-crossterm = "0.27"
+ratatui = { version = "0.26", optional = true }
+crossterm = { version = "0.27", optional = true }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"

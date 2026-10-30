@@ -57,6 +57,20 @@ git clone https://github.com/HolboxAI/covexcode && cd covexcode
 cargo build --release && ./target/release/covexcode
 ```
 
+### IDE agent runtime
+
+Covexcode IDE bundles a headless build of the same agent. It speaks ACP over
+stdio, defaults to that mode, and has no TUI, login, or self-update commands:
+
+```bash
+cargo build --release --no-default-features --bin covexcode-agent
+./target/release/covexcode-agent --acp
+```
+
+It also supports `--version` and `--providers-json` for the IDE's doctor and
+provider picker. Set `COVEXCODE_CONFIG_DIR` to isolate its config, sessions,
+and artifacts from the terminal client.
+
 **Configure** — launch `covexcode` and run `/provider`: pick a provider, then a
 model. An existing `{PROVIDER}_API_KEY` env var (e.g. `DEEPSEEK_API_KEY`) is
 picked up automatically; otherwise you're prompted for it. Not on the list?
