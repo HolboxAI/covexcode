@@ -40,23 +40,37 @@ fn rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Canonical MIME for a preferred type, so a caller never declares PNG while
+/// handing the provider WebP/GIF bytes (or vice versa).
+fn canonical_image_mime(preferred_mime: &str) -> &'static str {
+    let mime = preferred_mime.to_ascii_lowercase();
+    if mime.contains("jpeg") || mime.contains("jpg") {
+        "image/jpeg"
+    } else if mime.contains("gif") {
+        "image/gif"
+    } else if mime.contains("webp") {
+        "image/webp"
+    } else if mime.contains("bmp") {
+        "image/bmp"
+    } else if mime.contains("tiff") {
+        "image/tiff"
+    } else {
+        "image/png"
+    }
+}
+
 /// Optimize an image before staging/sending:
 /// 1. If width or height exceeds 1600px, resize to fit 1600x1600 preserving aspect ratio.
 /// 2. If the image is opaque, compress as high-quality JPEG (quality 85) to reduce payload size by 10-15x.
 pub fn optimize_image(bytes: &[u8], preferred_mime: &str) -> (Vec<u8>, &'static str) {
+    let original_mime = canonical_image_mime(preferred_mime);
     let Ok(mut img) = image::load_from_memory(bytes) else {
-        return (
-            bytes.to_vec(),
-            if preferred_mime.contains("jpeg") || preferred_mime.contains("jpg") {
-                "image/jpeg"
-            } else {
-                "image/png"
-            },
-        );
+        return (bytes.to_vec(), original_mime);
     };
 
     let (w, h) = (img.width(), img.height());
-    if w > 1600 || h > 1600 {
+    let resized = w > 1600 || h > 1600;
+    if resized {
         img = img.resize(1600, 1600, image::imageops::FilterType::Triangle);
     }
 
@@ -80,24 +94,31 @@ pub fn optimize_image(bytes: &[u8], preferred_mime: &str) -> (Vec<u8>, &'static 
             .is_ok()
         {
             let res = buf.into_inner();
-            if !res.is_empty()
-                && (res.len() < bytes.len()
-                    || preferred_mime.contains("jpeg")
-                    || preferred_mime.contains("jpg"))
-            {
+            if !res.is_empty() && res.len() < bytes.len() {
                 return (res, "image/jpeg");
             }
         }
     }
 
-    (
-        bytes.to_vec(),
-        if preferred_mime.contains("jpeg") || preferred_mime.contains("jpg") {
-            "image/jpeg"
-        } else {
-            "image/png"
-        },
-    )
+    // If the pixels changed (resize) or the source was not already PNG/JPEG,
+    // normalize to PNG so the declared MIME always matches the bytes. Keeping
+    // the original bytes while claiming image/png made WebP/GIF attachments
+    // fail at providers that trust the declared type.
+    if resized || !matches!(original_mime, "image/png" | "image/jpeg") {
+        let mut out = Vec::new();
+        if img
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Png,
+            )
+            .is_ok()
+            && !out.is_empty()
+        {
+            return (out, "image/png");
+        }
+    }
+
+    (bytes.to_vec(), original_mime)
 }
 
 /// The image currently in the clipboard, base64-encoded as PNG or JPEG, or `None` if
@@ -310,5 +331,15 @@ mod tests {
     #[test]
     fn rgba_to_png_fails_on_empty_or_zero_dimensions() {
         assert!(rgba_to_png(0, 0, &[]).is_none());
+    }
+
+    #[test]
+    fn canonical_mime_never_mislabels_a_webp_or_gif_as_png() {
+        assert_eq!(canonical_image_mime("image/webp"), "image/webp");
+        assert_eq!(canonical_image_mime("image/gif"), "image/gif");
+        assert_eq!(canonical_image_mime("image/jpeg"), "image/jpeg");
+        assert_eq!(canonical_image_mime("image/jpg"), "image/jpeg");
+        assert_eq!(canonical_image_mime("image/tiff"), "image/tiff");
+        assert_eq!(canonical_image_mime("image/png"), "image/png");
     }
 }
