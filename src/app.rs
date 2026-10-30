@@ -8396,7 +8396,7 @@ mod tests {
     fn deepseek_vision_model_stages_and_sends_images_natively() {
         let mut a = app();
         a.config.llm.provider = "deepseek".to_string();
-        a.config.llm.model = "deepseek-v4-flash-vision-exp".to_string();
+        a.config.llm.model = "deepseek-v4-flash".to_string();
 
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("shot.png");
@@ -8406,7 +8406,7 @@ mod tests {
         assert_eq!(
             a.pending_images.len(),
             1,
-            "a model id that names vision must stage the image"
+            "deepseek-v4-flash must stage the image"
         );
         type_str(&mut a, "analyze this");
         a.handle_key(key(KeyCode::Enter));
