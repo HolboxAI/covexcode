@@ -18,7 +18,7 @@ import sys
 
 version, assets_dir = sys.argv[1], sys.argv[2]
 
-mapping = {
+cli_mapping = {
     "covexcode-macos-aarch64": ("darwin-arm64", True),
     "covexcode-windows-x86_64.exe": ("win32-x64", True),
     "covexcode-linux-x86_64": ("linux-x64", False),
@@ -27,21 +27,38 @@ mapping = {
     "covexcode-linux-aarch64-musl": ("linux-arm64-musl", True),
 }
 
-artifacts = {}
-missing = []
-for asset, (target, required) in mapping.items():
-    path = os.path.join(assets_dir, asset)
-    if not os.path.exists(path):
-        if required:
-            missing.append(asset)
-        continue
-    with open(path, "rb") as fh:
-        digest = hashlib.sha256(fh.read()).hexdigest()
-    artifacts[target] = {
-        "asset": asset,
-        "sha256": digest,
-        "size": os.path.getsize(path),
-    }
+agent_mapping = {
+    "covexcode-agent-macos-aarch64": ("darwin-arm64", True),
+    "covexcode-agent-windows-x86_64.exe": ("win32-x64", True),
+    "covexcode-agent-linux-x86_64": ("linux-x64", True),
+    "covexcode-agent-linux-aarch64": ("linux-arm64", True),
+    "covexcode-agent-linux-x86_64-musl": ("linux-x64-musl", True),
+    "covexcode-agent-linux-aarch64-musl": ("linux-arm64-musl", True),
+}
+
+
+def collect(mapping):
+    artifacts = {}
+    missing = []
+    for asset, (target, required) in mapping.items():
+        path = os.path.join(assets_dir, asset)
+        if not os.path.exists(path):
+            if required:
+                missing.append(asset)
+            continue
+        with open(path, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        artifacts[target] = {
+            "asset": asset,
+            "sha256": digest,
+            "size": os.path.getsize(path),
+        }
+    return artifacts, missing
+
+
+artifacts, missing = collect(cli_mapping)
+agent_artifacts, agent_missing = collect(agent_mapping)
+missing += agent_missing
 
 if missing:
     raise SystemExit(
@@ -54,11 +71,15 @@ manifest = {
     "agentVersion": version,
     "protocolVersion": 1,
     "artifacts": artifacts,
+    "agentArtifacts": agent_artifacts,
 }
 
 out = os.path.join(assets_dir, "sidecar-manifest.json")
 with open(out, "w", encoding="utf-8") as fh:
     json.dump(manifest, fh, indent=2, sort_keys=True)
     fh.write("\n")
-print(f"wrote {out} with {len(artifacts)} artifacts for {version}")
+print(
+    f"wrote {out} with {len(artifacts)} CLI and "
+    f"{len(agent_artifacts)} agent artifacts for {version}"
+)
 PY

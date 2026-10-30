@@ -75,11 +75,15 @@ jobs:
 
       - name: Build (native)
         if: matrix.os != 'linux' || matrix.arch != 'aarch64'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin covexcode
+          cargo build --release --target ${{ matrix.target }} --no-default-features --bin covexcode-agent
 
       - name: Build (cross)
         if: matrix.os == 'linux' && matrix.arch == 'aarch64'
-        run: cross build --release --target ${{ matrix.target }}
+        run: |
+          cross build --release --target ${{ matrix.target }} --bin covexcode
+          cross build --release --target ${{ matrix.target }} --no-default-features --bin covexcode-agent
 
       - name: Rename binary (Unix)
         if: runner.os != 'Windows'
@@ -88,12 +92,16 @@ jobs:
           asset="covexcode-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/covexcode" "artifacts/${asset}"
           chmod +x "artifacts/${asset}"
+          agent_asset="covexcode-agent-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/covexcode-agent" "artifacts/${agent_asset}"
+          chmod +x "artifacts/${agent_asset}"
 
       - name: Rename binary (Windows)
         if: runner.os == 'Windows'
         run: |
           mkdir artifacts
           copy target\${{ matrix.target }}\release\covexcode.exe artifacts\covexcode-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.suffix }}.exe
+          copy target\${{ matrix.target }}\release\covexcode-agent.exe artifacts\covexcode-agent-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.suffix }}.exe
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
