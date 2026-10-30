@@ -811,7 +811,7 @@ mod tests {
 
         let mut proxy = Config::default();
         proxy.llm.provider = String::new();
-        proxy.llm.model = "deepseek-v4-flash".to_string();
+        proxy.llm.model = "deepseek-v4-pro".to_string();
         let mut proxy_router = Router::new(proxy, outgoing_tx.clone());
         let response = proxy_router
             .dispatch_request("initialize", json!({ "protocolVersion": 1 }))
@@ -820,7 +820,21 @@ mod tests {
         assert_eq!(
             response["agentCapabilities"]["promptCapabilities"]["image"],
             json!(false),
-            "a proxy login has no provider id; the DeepSeek model is still text-only"
+            "a proxy login has no provider id; v4-pro is still text-only"
+        );
+
+        let mut proxy_flash = Config::default();
+        proxy_flash.llm.provider = String::new();
+        proxy_flash.llm.model = "deepseek-v4-flash".to_string();
+        let mut proxy_flash_router = Router::new(proxy_flash, outgoing_tx.clone());
+        let response = proxy_flash_router
+            .dispatch_request("initialize", json!({ "protocolVersion": 1 }))
+            .await
+            .expect("initialize always succeeds");
+        assert_eq!(
+            response["agentCapabilities"]["promptCapabilities"]["image"],
+            json!(true),
+            "the model family grants vision through the proxy"
         );
 
         let mut vision = Config::default();

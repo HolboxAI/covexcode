@@ -2302,15 +2302,25 @@ mod tests {
     }
 
     #[test]
-    fn images_are_dropped_for_a_text_only_provider() {
+    fn images_are_dropped_only_for_text_only_models() {
         let image = llm::ImageAttachment {
             mime_type: "image/png".to_string(),
             data_base64: "aGVsbG8=".to_string(),
         };
-        assert!(images_for_model("deepseek", "deepseek-v4-flash", vec![image.clone()]).is_empty());
+        assert!(images_for_model("deepseek", "deepseek-v4-pro", vec![image.clone()]).is_empty());
         assert!(
-            images_for_model("", "deepseek-v4-flash", vec![image.clone()]).is_empty(),
-            "a proxy login has no provider id but is still text-only"
+            images_for_model("", "deepseek-v4-pro", vec![image.clone()]).is_empty(),
+            "a proxy login has no provider id; v4-pro is still text-only"
+        );
+        assert_eq!(
+            images_for_model("deepseek", "deepseek-v4-flash", vec![image.clone()]).len(),
+            1,
+            "v4-flash reads images"
+        );
+        assert_eq!(
+            images_for_model("", "deepseek-v4-flash", vec![image.clone()]).len(),
+            1,
+            "the model family grants vision through the proxy too"
         );
         assert_eq!(images_for_model("openai", "gpt-5.6-sol", vec![image]).len(), 1);
     }
