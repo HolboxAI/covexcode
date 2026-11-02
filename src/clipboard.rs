@@ -2,34 +2,27 @@
 //!
 //! Terminal paste events (`Event::Paste`) deliver *text* only — the terminal
 //! emulator never ships the bytes of an image on paste. To get an image the
-//! user has copied (or a screenshot they took) we have to leave the process
-//! and ask the OS's clipboard directly:
+//! user has copied (or a screenshot they took) we query the OS clipboard:
 //!
-//! * **macOS** — `osascript`, writing `the clipboard as «class PNGf»` to a
-//!   temp file. This is the same call `pngpaste` wraps, without the extra
-//!   install; the AppleScript throws (non-zero exit) when the clipboard holds
-//!   no image, which is exactly how we detect "nothing to paste".
-//! * **Windows** — PowerShell with `System.Windows.Forms.Clipboard::GetImage()`,
-//!   saved as PNG. `powershell.exe` ships with every supported Windows.
-//! * **Linux** — try `wl-paste --type image/png` (Wayland) then
-//!   `xclip -selection clipboard -t image/png -o` (X11). Both write the raw
-//!   bytes to stdout and fail (or emit nothing) when the clipboard has no
-//!   image.
+//! * **Windows** — Native Win32 API via `arboard` (DIB/DIBV5 bitmap formats) and
+//!   `file_list()` (`CF_HDROP` for files copied in Windows File Explorer).
+//!   Retries on `ClipboardOccupied` and runs asynchronously in a worker thread.
+//! * **macOS** — Native `arboard` with `osascript` fallback writing PNG to temp file.
+//! * **Linux** — Native `arboard` with `wl-paste` (Wayland) and `xclip` (X11) fallbacks.
 //!
-//! Each backend is a synchronous subprocess run on the event-loop thread. That
-//! is a deliberate trade-off: a clipboard read is tens of milliseconds, and
-//! the app has no async plumbing in `handle_key` to await one without a much
-//! larger refactor. The one theoretical hazard is a Wayland compositor that
-//! makes `wl-paste` block indefinitely waiting for a `--type` the clipboard
-//! cannot supply; in practice `wl-paste --type image/png` returns immediately
-//! with an error when no image is present.
+//! Clipboard reads are executed on a dedicated background thread communicating
+//! via an `mpsc` channel, keeping the terminal UI and event loop fully responsive.
 
 use crate::llm::ImageAttachment;
 use arboard::Clipboard;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Command;
 
 /// Encode RGBA bytes into PNG bytes in memory.
-fn rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+pub fn rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || rgba.is_empty() || width > 8192 || height > 8192 || rgba.len() > 64 * 1024 * 1024 {
+        return None;
+    }
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, width, height);
     encoder.set_color(png::ColorType::Rgba);
@@ -121,15 +114,79 @@ pub fn optimize_image(bytes: &[u8], preferred_mime: &str) -> (Vec<u8>, &'static 
     (bytes.to_vec(), original_mime)
 }
 
-/// The image currently in the clipboard, base64-encoded as PNG or JPEG, or `None` if
-/// the clipboard holds no image or the platform's clipboard tool is missing.
-pub fn read_image() -> Option<ImageAttachment> {
-    // 1. Try native in-memory clipboard first (instant, lag-free via arboard)
-    if let Ok(mut cb) = Clipboard::new() {
-        if let Ok(img) = cb.get_image() {
-            if let Some(png_bytes) = rgba_to_png(img.width as u32, img.height as u32, &img.bytes) {
-                if !png_bytes.is_empty() {
-                    let (opt_bytes, mime) = optimize_image(&png_bytes, "image/png");
+/// Helper to retry clipboard operations on busy/locked error.
+pub fn retry_clipboard_op<T, F>(mut op: F) -> Result<T, arboard::Error>
+where
+    F: FnMut() -> Result<T, arboard::Error>,
+{
+    const MAX_RETRIES: usize = 5;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(15);
+
+    let mut last_err = arboard::Error::ContentNotAvailable;
+    for attempt in 0..MAX_RETRIES {
+        match op() {
+            Ok(val) => return Ok(val),
+            Err(arboard::Error::ClipboardOccupied) => {
+                last_err = arboard::Error::ClipboardOccupied;
+                if attempt + 1 < MAX_RETRIES {
+                    std::thread::sleep(RETRY_DELAY);
+                }
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Err(last_err)
+}
+
+/// Reads image from the clipboard with up to 5 retries on clipboard-busy/locked errors.
+pub fn read_clipboard_image_with_retry() -> Result<arboard::ImageData<'static>, arboard::Error> {
+    retry_clipboard_op(|| {
+        let mut cb = Clipboard::new()?;
+        let img = cb.get_image()?;
+        if img.width == 0
+            || img.height == 0
+            || img.width > 8192
+            || img.height > 8192
+            || img.bytes.len() > 64 * 1024 * 1024
+        {
+            return Err(arboard::Error::ConversionFailure);
+        }
+        Ok(arboard::ImageData {
+            width: img.width,
+            height: img.height,
+            bytes: std::borrow::Cow::Owned(img.bytes.into_owned()),
+        })
+    })
+}
+
+/// Reads copied image files from the clipboard (e.g. copied from Windows File Explorer).
+pub fn read_clipboard_file_list() -> Option<ImageAttachment> {
+    let mut cb = Clipboard::new().ok()?;
+    let files = cb.get().file_list().ok()?;
+    for path in files {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if meta.len() == 0 || meta.len() > 8 * 1024 * 1024 {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&path) {
+                if !bytes.is_empty() {
+                    let preferred_mime = match ext.as_str() {
+                        "jpg" | "jpeg" => "image/jpeg",
+                        "png" => "image/png",
+                        "gif" => "image/gif",
+                        "webp" => "image/webp",
+                        _ => "image/png",
+                    };
+                    let (opt_bytes, mime) = optimize_image(&bytes, preferred_mime);
                     return Some(ImageAttachment {
                         mime_type: mime.to_string(),
                         data_base64: crate::backend::base64_encode(&opt_bytes),
@@ -138,21 +195,39 @@ pub fn read_image() -> Option<ImageAttachment> {
             }
         }
     }
+    None
+}
 
-    // 2. Platform subprocess fallback (e.g. headless/sandboxed sessions)
+/// The image currently in the clipboard, base64-encoded as PNG or JPEG, or `None` if
+/// the clipboard holds no image or the platform's clipboard tool is missing.
+pub fn read_image() -> Option<ImageAttachment> {
+    // 1. Try native in-memory clipboard with retry (instant, lag-free via arboard)
+    if let Ok(img) = read_clipboard_image_with_retry() {
+        if let Some(png_bytes) = rgba_to_png(img.width as u32, img.height as u32, &img.bytes) {
+            if !png_bytes.is_empty() {
+                let (opt_bytes, mime) = optimize_image(&png_bytes, "image/png");
+                return Some(ImageAttachment {
+                    mime_type: mime.to_string(),
+                    data_base64: crate::backend::base64_encode(&opt_bytes),
+                });
+            }
+        }
+    }
+
+    // 2. Check for copied image files (e.g. from File Explorer)
+    if let Some(attachment) = read_clipboard_file_list() {
+        return Some(attachment);
+    }
+
+    // 3. Platform subprocess fallback (macOS/Linux)
     #[cfg(target_os = "macos")]
     {
         return read_macos();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return read_windows();
     }
     #[cfg(target_os = "linux")]
     {
         return read_linux();
     }
-    // Other targets have no supported clipboard tool.
     #[allow(unreachable_code)]
     None
 }
@@ -174,10 +249,6 @@ pub fn read_text() -> Option<String> {
     {
         return read_text_macos();
     }
-    #[cfg(target_os = "windows")]
-    {
-        return read_text_windows();
-    }
     #[cfg(target_os = "linux")]
     {
         return read_text_linux();
@@ -189,7 +260,7 @@ pub fn read_text() -> Option<String> {
 /// A fresh temp path for the current process, so two running instances (or a
 /// stale file from a crashed earlier run) never collide. We delete it after
 /// reading; leaving a stray is harmless since it lives in the OS temp dir.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn scratch_path(ext: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("covexcode_clip_{}.{}", std::process::id(), ext))
 }
@@ -208,26 +279,6 @@ fn read_macos() -> Option<ImageAttachment> {
     let ok = Command::new("osascript")
         .arg("-e")
         .arg(script)
-        .status()
-        .ok()?
-        .success();
-    if !ok {
-        return None;
-    }
-    read_scratch_and_drop(&path, "image/png")
-}
-
-#[cfg(target_os = "windows")]
-fn read_windows() -> Option<ImageAttachment> {
-    let path = scratch_path("png");
-    let script = format!(
-        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
-         $img = [System.Windows.Forms.Clipboard]::GetImage(); \
-         if ($img) {{ $img.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png); exit 0 }} else {{ exit 1 }}",
-        path.display()
-    );
-    let ok = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .status()
         .ok()?
         .success();
@@ -258,7 +309,7 @@ fn read_linux() -> Option<ImageAttachment> {
     None
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn read_scratch_and_drop(path: &std::path::Path, mime: &str) -> Option<ImageAttachment> {
     let bytes = std::fs::read(path).ok()?;
     let _ = std::fs::remove_file(path);
@@ -276,22 +327,6 @@ fn read_text_macos() -> Option<String> {
     let out = Command::new("pbpaste").output().ok()?;
     if out.status.success() && !out.stdout.is_empty() {
         String::from_utf8(out.stdout).ok().filter(|s| !s.is_empty())
-    } else {
-        None
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn read_text_windows() -> Option<String> {
-    let script = "Get-Clipboard";
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .ok()?;
-    if out.status.success() && !out.stdout.is_empty() {
-        String::from_utf8(out.stdout)
-            .ok()
-            .filter(|s| !s.trim().is_empty())
     } else {
         None
     }
@@ -341,5 +376,42 @@ mod tests {
         assert_eq!(canonical_image_mime("image/jpg"), "image/jpeg");
         assert_eq!(canonical_image_mime("image/tiff"), "image/tiff");
         assert_eq!(canonical_image_mime("image/png"), "image/png");
+    }
+
+    #[test]
+    fn retry_clipboard_op_succeeds_after_transient_busy() {
+        let mut attempts = 0;
+        let res = retry_clipboard_op(|| {
+            attempts += 1;
+            if attempts <= 2 {
+                Err(arboard::Error::ClipboardOccupied)
+            } else {
+                Ok("success")
+            }
+        });
+        assert_eq!(res.unwrap(), "success");
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn retry_clipboard_op_fails_after_5_busy_attempts_without_hanging() {
+        let mut attempts = 0;
+        let res: Result<(), _> = retry_clipboard_op(|| {
+            attempts += 1;
+            Err(arboard::Error::ClipboardOccupied)
+        });
+        assert!(matches!(res, Err(arboard::Error::ClipboardOccupied)));
+        assert_eq!(attempts, 5);
+    }
+
+    #[test]
+    fn retry_clipboard_op_returns_immediately_on_content_not_available() {
+        let mut attempts = 0;
+        let res: Result<(), _> = retry_clipboard_op(|| {
+            attempts += 1;
+            Err(arboard::Error::ContentNotAvailable)
+        });
+        assert!(matches!(res, Err(arboard::Error::ContentNotAvailable)));
+        assert_eq!(attempts, 1);
     }
 }

@@ -1074,7 +1074,14 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         } else if app.mode.is_plan() {
             "Describe the change — you'll get a plan to approve first…".to_string()
         } else {
-            "Ask anything, or describe a change…".to_string()
+            #[cfg(target_os = "windows")]
+            {
+                "Alt+V or /paste to attach image".to_string()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                "Ask anything, or describe a change…".to_string()
+            }
         };
         (hint, theme::faint())
     } else {

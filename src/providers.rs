@@ -65,7 +65,16 @@ pub fn supports_images(provider_id: &str, model_id: &str) -> bool {
     if provider_id == "deepseek" || model.starts_with("deepseek") {
         return model.contains("flash");
     }
-    find_provider(provider_id).map_or(true, |p| p.vision)
+    find_provider(provider_id).is_none_or(|p| p.vision)
+}
+
+/// The recommended vision model for a provider when an image attachment is staged.
+pub fn recommended_vision_model(provider_id: &str) -> (&'static str, &'static str) {
+    match provider_id {
+        "deepseek" => ("deepseek", "deepseek-v4-flash"),
+        "openai" => ("openai", "gpt-5.6-sol"),
+        _ => ("deepseek", "deepseek-v4-flash"),
+    }
 }
 
 /// The conventional env var a user is likely to already have exported for this
@@ -212,5 +221,17 @@ mod tests {
         // stripped of a possibly-valid image.
         assert!(supports_images("", "my-vision-model"));
         assert!(supports_images("some-custom-endpoint", "gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn recommended_vision_model_returns_vision_capable_model() {
+        let (provider, model) = recommended_vision_model("deepseek");
+        assert_eq!(provider, "deepseek");
+        assert_eq!(model, "deepseek-v4-flash");
+        assert!(supports_images(provider, model));
+
+        let (provider_oa, model_oa) = recommended_vision_model("openai");
+        assert_eq!(provider_oa, "openai");
+        assert!(supports_images(provider_oa, model_oa));
     }
 }

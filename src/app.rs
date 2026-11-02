@@ -270,6 +270,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/diff", "show everything changed on disk this session"),
     ("/paste", "paste image or text from clipboard"),
+    ("/image", "attach an image from clipboard or path (alias /img)"),
+    ("/img", "alias for /image"),
     ("/clear-images", "remove all staged image attachments"),
     ("/exit", "leave covexcode"),
     ("/doctor", "check this install's health"),
@@ -386,6 +388,12 @@ fn unescape_shell_path(s: &str) -> String {
 }
 
 fn resolve_image_path(input: &str) -> Option<(PathBuf, &'static str)> {
+    if let Some(path) = parse_image_path(input) {
+        if let Some(mime) = mime_for_path(&path.to_string_lossy()) {
+            return Some((path, mime));
+        }
+    }
+
     let mut candidate = input.trim().to_string();
     if let Some(rest) = candidate.strip_prefix("file://") {
         candidate = rest.to_string();
@@ -440,6 +448,122 @@ fn resolve_image_path(input: &str) -> Option<(PathBuf, &'static str)> {
     None
 }
 
+/// Parse and normalize an image path candidate from user input (drag-and-drop or typed).
+/// - Trim whitespace. Strip surrounding single or double quotes.
+/// - Strip a `file:///` prefix, handle drive letters, percent-decode, and unescape.
+/// - Verifies that the path has an image extension in {png, jpg, jpeg, gif, webp}.
+///
+/// Does NOT check file existence on disk (allowing pure string and cross-platform validation).
+pub fn parse_image_path_candidate(input: &str) -> Option<PathBuf> {
+    let mut candidate = input.trim();
+    if candidate.len() >= 2
+        && ((candidate.starts_with('"') && candidate.ends_with('"'))
+            || (candidate.starts_with('\'') && candidate.ends_with('\'')))
+    {
+        candidate = &candidate[1..candidate.len() - 1];
+    }
+    let mut candidate = candidate.trim().to_string();
+
+    if let Some(rest) = candidate.strip_prefix("file://") {
+        let decoded = percent_decode_str(rest);
+        #[cfg(target_os = "windows")]
+        let decoded = decoded.strip_prefix('/').unwrap_or(&decoded).to_string();
+        let decoded = if decoded.len() >= 3
+            && decoded.starts_with('/')
+            && decoded.as_bytes()[1].is_ascii_alphabetic()
+            && decoded.as_bytes()[2] == b':'
+        {
+            decoded[1..].to_string()
+        } else {
+            decoded
+        };
+        candidate = decoded;
+    } else if candidate.contains('%') {
+        candidate = percent_decode_str(&candidate);
+    }
+
+    if candidate.contains('\n') {
+        return None;
+    }
+
+    let unescaped = unescape_shell_path(&candidate);
+    let chosen = if Path::new(&candidate).is_file() {
+        candidate
+    } else if Path::new(&unescaped).is_file() || (!candidate.contains('\\') && unescaped != candidate) {
+        unescaped
+    } else {
+        candidate
+    };
+
+    let path = PathBuf::from(chosen);
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())?;
+
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+        return None;
+    }
+
+    Some(path)
+}
+
+/// Parse an image path from user input (drag-and-drop or typed).
+/// Normalizes the path candidate and verifies that the file exists on disk,
+/// is a regular file, and is under MAX_IMAGE_BYTES.
+pub fn parse_image_path(input: &str) -> Option<PathBuf> {
+    let path = parse_image_path_candidate(input)?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_IMAGE_BYTES as u64 {
+        return None;
+    }
+
+    Some(path)
+}
+
+/// Extract an image path from a prompt containing text plus an image path
+/// (e.g. `explain C:\a.png` or `explain "my photo.png"`).
+pub fn extract_image_path_from_text(text: &str) -> Option<(PathBuf, String)> {
+    // 1. Try quoted strings first: "..." or '...'
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' || chars[i] == '\'' {
+            let quote = chars[i];
+            let start = i;
+            i += 1;
+            while i < chars.len() && chars[i] != quote {
+                i += 1;
+            }
+            if i < chars.len() {
+                let candidate: String = chars[start..=i].iter().collect();
+                if let Some(path) = parse_image_path(&candidate) {
+                    let mut remaining = String::new();
+                    remaining.extend(&chars[..start]);
+                    remaining.push(' ');
+                    remaining.extend(&chars[i + 1..]);
+                    let remaining = remaining.split_whitespace().collect::<Vec<_>>().join(" ");
+                    return Some((path, remaining));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // 2. Try whitespace-separated tokens
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for (idx, word) in words.iter().enumerate() {
+        if let Some(path) = parse_image_path(word) {
+            let mut remaining_words = words.clone();
+            remaining_words.remove(idx);
+            let remaining = remaining_words.join(" ");
+            return Some((path, remaining));
+        }
+    }
+
+    None
+}
 /// What `/compact` prints once the summary is in place: what the context cost,
 /// what it costs now, and what the day has cost so far.
 ///
@@ -821,6 +945,19 @@ pub struct App {
     /// `DeployAction::RunInteractive`, because two things cannot own one
     /// terminal.
     pub login_request: bool,
+    /// Pending async clipboard read. Polled in the main loop without blocking.
+    pub clipboard_rx: Option<std::sync::mpsc::Receiver<ClipboardOutcome>>,
+    #[cfg(test)]
+    pub mock_clipboard_outcome: Option<ClipboardOutcome>,
+    /// Set when an image is attached under a non-vision model, waiting for [y/n] switch confirmation.
+    pub pending_vision_prompt: bool,
+}
+
+#[derive(Debug)]
+pub enum ClipboardOutcome {
+    Image(ImageAttachment),
+    Text(String),
+    Empty,
 }
 
 impl App {
@@ -894,6 +1031,10 @@ impl App {
             turn_starts: Vec::new(),
             turn_prompts: Vec::new(),
             login_request: false,
+            clipboard_rx: None,
+            #[cfg(test)]
+            mock_clipboard_outcome: None,
+            pending_vision_prompt: false,
         }
     }
 
@@ -994,6 +1135,15 @@ impl App {
             cmd if cmd.starts_with("/rollback") => self.start_rollback_command(cmd),
             "/diff" => self.show_diff(),
             "/paste" => self.handle_paste_key(),
+            "/image" | "/img" => self.handle_image_command(""),
+            cmd if cmd.starts_with("/image ") => {
+                let path = cmd.strip_prefix("/image ").unwrap_or("").trim();
+                self.handle_image_command(path);
+            }
+            cmd if cmd.starts_with("/img ") => {
+                let path = cmd.strip_prefix("/img ").unwrap_or("").trim();
+                self.handle_image_command(path);
+            }
             "/clear-images" => self.clear_pending_images(),
             "/exit" => self.exit_now(),
             "/doctor" => self.show_doctor(),
@@ -1126,6 +1276,36 @@ impl App {
             return;
         }
 
+        if self.pending_vision_prompt {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let alt = key.modifiers.contains(KeyModifiers::ALT);
+            let is_at_chip = self.input_buffer.trim().is_empty()
+                || self.input_buffer.trim().starts_with("[Image #");
+
+            if !ctrl && !alt && is_at_chip {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        self.pending_vision_prompt = false;
+                        self.switch_to_vision_model();
+                        return;
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        self.pending_vision_prompt = false;
+                        self.messages.push(Message::new(
+                            Role::System,
+                            "Image attachment kept. Switch model manually with /model before sending.",
+                        ));
+                        return;
+                    }
+                    _ => {
+                        self.pending_vision_prompt = false;
+                    }
+                }
+            } else {
+                self.pending_vision_prompt = false;
+            }
+        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1167,8 +1347,14 @@ impl App {
             KeyCode::Char('p') if ctrl => self.open_command_palette(),
             // Ctrl+R picks up this directory's last session. A deliberate chord
             KeyCode::Char('r') if ctrl => self.resume_latest(),
-            // Ctrl+V / Alt+V reads an image or text from the OS clipboard.
-            KeyCode::Char('v') if ctrl || alt => self.handle_paste_key(),
+            // Alt+V is the primary image-paste key (avoids Windows Terminal swallowing Ctrl+V)
+            KeyCode::Char('v') | KeyCode::Char('V')
+                if key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.handle_paste_key()
+            }
+            // Ctrl+V still works for text and when the terminal forwards it
+            KeyCode::Char('v') if ctrl => self.handle_paste_key(),
 
             // Any other Ctrl-chord is a command, not text: never let it reach the buffer.
             KeyCode::Char(_) if ctrl => {}
@@ -1176,6 +1362,33 @@ impl App {
             KeyCode::Char(c) => {
                 self.insert_str(&c.to_string());
                 self.command_menu_selected = 0;
+
+                if self.overlay.is_none() {
+                    let is_terminator = c == '"' || c == '\'' || c == ' ';
+                    if is_terminator {
+                        let trimmed = self.input_buffer.trim().trim_matches(|ch| ch == '"' || ch == '\'');
+                        let has_img_ext = trimmed.rsplit('.').next().map(|ext| {
+                            matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")
+                        }).unwrap_or(false);
+
+                        if has_img_ext {
+                            if let Some(path) = parse_image_path(&self.input_buffer) {
+                                let mime = mime_for_path(&path.to_string_lossy()).unwrap_or("image/png");
+                                self.input_buffer.clear();
+                                self.cursor = 0;
+                                self.attach_image_file(&path, mime);
+                            } else if let Some((path, remaining)) = extract_image_path_from_text(&self.input_buffer) {
+                                let mime = mime_for_path(&path.to_string_lossy()).unwrap_or("image/png");
+                                self.input_buffer = remaining;
+                                if !self.input_buffer.is_empty() && !self.input_buffer.ends_with(' ') {
+                                    self.input_buffer.push(' ');
+                                }
+                                self.cursor = self.input_buffer.len();
+                                self.attach_image_file(&path, mime);
+                            }
+                        }
+                    }
+                }
             }
             // Shift+Tab cycles the session's permission posture (auto ↔ manual).
             // Most terminals report this as `BackTab`; the kitty keyboard
@@ -1255,7 +1468,14 @@ impl App {
             // arms the interrupt and says so, the second carries it out. A
             // single slip should not throw away a turn that was mid-answer.
             KeyCode::Esc => {
-                if self.interrupt_armed {
+                if self.clipboard_rx.is_some() {
+                    self.clipboard_rx = None;
+                    if let Some(last) = self.messages.last() {
+                        if last.role == Role::System && last.content == "Reading clipboard…" {
+                            self.messages.pop();
+                        }
+                    }
+                } else if self.interrupt_armed {
                     self.interrupt_armed = false;
                     self.cancel();
                 } else if self.is_busy() {
@@ -1289,13 +1509,12 @@ impl App {
                     ));
                     return;
                 }
-                if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
-                    self.explain_no_vision();
-                    return;
-                }
                 self.pending_images.push(image);
                 let n = self.pending_images.len();
                 self.insert_str(&format!("[Image #{n}] "));
+                if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
+                    self.explain_no_vision();
+                }
                 return;
             }
         }
@@ -1349,55 +1568,132 @@ impl App {
         }
     }
 
-    /// The current model cannot read images; say so once, pointing at the fix.
-    fn explain_no_vision(&mut self) {
+    /// The current model cannot read images; say so once, prompting for switch.
+    pub fn explain_no_vision(&mut self) {
+        self.pending_vision_prompt = true;
         self.messages.push(Message::new(
             Role::System,
-            format!(
-                "The current model ({}) can't read images. Switch to an OpenAI model or an explicitly vision-capable model with /model, then try again.",
-                self.config.llm.model
-            ),
+            "This model can't read images. Switch to deepseek-v4-flash or a vision model? [y/n]",
         ));
     }
 
-    /// Bound to Ctrl+V, Alt+V, or `/paste`: reads an image or text from the OS clipboard.
-    /// If an image is present, attaches it, stages an `[Image #N]` chip in the prompt box,
-    /// and displays confirmation. If text is present, inserts it at the cursor.
+    /// Switches the active model to `deepseek-v4-flash` or a vision-capable model
+    /// while keeping staged attachments intact.
+    pub fn switch_to_vision_model(&mut self) {
+        let (provider, model) = providers::recommended_vision_model(&self.config.llm.provider);
+        let endpoint = if provider == "deepseek" {
+            "https://api.deepseek.com".to_string()
+        } else if provider == "openai" {
+            "https://api.openai.com".to_string()
+        } else {
+            self.config.llm.endpoint.clone()
+        };
+        let api_key = self.config.llm.api_key.clone();
+        self.apply_llm_config(provider.to_string(), endpoint, model.to_string(), api_key);
+    }
+
+    /// Bound to Ctrl+V, Alt+V, or `/paste`: spawns async clipboard reading.
+    /// Shows "Reading clipboard…" while running so the event loop never blocks.
     pub fn handle_paste_key(&mut self) {
-        if let Some(image) = crate::clipboard::read_image() {
-            let bytes = image.data_base64.len() / 4 * 3;
-            if bytes > MAX_IMAGE_BYTES {
-                self.messages.push(Message::new(
-                    Role::System,
-                    format!(
-                        "The clipboard image is {} -- larger than the {}-MB limit, so it was not attached.",
-                        human_size(bytes),
-                        MAX_IMAGE_BYTES / (1024 * 1024)
-                    ),
-                ));
-                return;
-            }
-            if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
-                self.explain_no_vision();
-                return;
-            }
-            self.pending_images.push(image);
-            let n = self.pending_images.len();
-            let chip = format!("[Image #{n}] ");
-            self.insert_str(&chip);
+        if self.clipboard_rx.is_some() {
             return;
         }
-
-        if let Some(text) = crate::clipboard::read_text() {
-            self.handle_paste(text);
-            return;
-        }
-
         self.messages.push(Message::new(
             Role::System,
-            "No image on the clipboard. Copy or screenshot an image first, then press \
-             Ctrl+V again -- or drag an image file into the terminal.",
+            "Reading clipboard…",
         ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.clipboard_rx = Some(rx);
+        #[cfg(test)]
+        if let Some(outcome) = self.mock_clipboard_outcome.take() {
+            let _ = tx.send(outcome);
+            return;
+        }
+        std::thread::spawn(move || {
+            if let Some(image) = crate::clipboard::read_image() {
+                let _ = tx.send(ClipboardOutcome::Image(image));
+                return;
+            }
+            if let Some(text) = crate::clipboard::read_text() {
+                let _ = tx.send(ClipboardOutcome::Text(text));
+                return;
+            }
+            let _ = tx.send(ClipboardOutcome::Empty);
+        });
+    }
+
+    /// Check if the async clipboard reader has finished, without blocking.
+    pub fn check_clipboard_result(&mut self) {
+        let Some(rx) = &self.clipboard_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.clipboard_rx = None;
+                if let Some(last) = self.messages.last() {
+                    if last.role == Role::System && last.content == "Reading clipboard…" {
+                        self.messages.pop();
+                    }
+                }
+                match outcome {
+                    ClipboardOutcome::Image(image) => {
+                        let bytes = image.data_base64.len() / 4 * 3;
+                        if bytes > MAX_IMAGE_BYTES {
+                            self.messages.push(Message::new(
+                                Role::System,
+                                format!(
+                                    "The clipboard image is {} -- larger than the {}-MB limit, so it was not attached.",
+                                    human_size(bytes),
+                                    MAX_IMAGE_BYTES / (1024 * 1024)
+                                ),
+                            ));
+                            return;
+                        }
+                        self.pending_images.push(image);
+                        let n = self.pending_images.len();
+                        let chip = format!("[Image #{n}] ");
+                        self.insert_str(&chip);
+                        if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
+                            self.explain_no_vision();
+                        }
+                    }
+                    ClipboardOutcome::Text(text) => {
+                        self.handle_paste(text);
+                    }
+                    ClipboardOutcome::Empty => {
+                        self.messages.push(Message::new(
+                            Role::System,
+                            "No image in clipboard. Try /image <path>",
+                        ));
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.clipboard_rx = None;
+                if let Some(last) = self.messages.last() {
+                    if last.role == Role::System && last.content == "Reading clipboard…" {
+                        self.messages.pop();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bound to `/image` or `/img`: reads the clipboard image if `path` is empty,
+    /// or attaches the image file at `path`.
+    pub fn handle_image_command(&mut self, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            self.handle_paste_key();
+        } else {
+            if !self.attach_image_from_path(path) {
+                self.messages.push(Message::new(
+                    Role::System,
+                    format!("Could not attach image at '{path}'. Ensure the file exists and is a valid image."),
+                ));
+            }
+        }
     }
 
     /// Backwards compatibility alias for `handle_paste_key`.
@@ -1439,20 +1735,38 @@ impl App {
         let Some((resolved_path, mime)) = resolve_image_path(text) else {
             return false;
         };
-        if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
-            self.explain_no_vision();
-            // Consume the path -- inserting it as text would be the *worse*
-            // fallback: it would look like a prompt about a file the model
-            // cannot see.
-            return true;
-        }
-        let Ok(bytes) = std::fs::read(&resolved_path) else {
-            return false;
-        };
-        let name = resolved_path
+        self.attach_image_file(&resolved_path, mime)
+    }
+
+    /// Read an image from disk and stage it as an attachment.
+    pub fn attach_image_file(&mut self, path: &Path, mime: &str) -> bool {
+        let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| resolved_path.display().to_string());
+            .unwrap_or_else(|| path.display().to_string());
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() == 0 {
+                self.messages.push(Message::new(
+                    Role::System,
+                    format!("{name} is empty (0 bytes), so it was not attached."),
+                ));
+                return true;
+            }
+            if meta.len() > MAX_IMAGE_BYTES as u64 {
+                self.messages.push(Message::new(
+                    Role::System,
+                    format!(
+                        "{name} is {} -- larger than the {}-MB image limit, so it was not attached.",
+                        human_size(meta.len() as usize),
+                        MAX_IMAGE_BYTES / (1024 * 1024),
+                    ),
+                ));
+                return true;
+            }
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
         if bytes.is_empty() {
             self.messages.push(Message::new(
                 Role::System,
@@ -1471,7 +1785,7 @@ impl App {
             ));
             return true;
         }
-        if image::load_from_memory(&bytes).is_err() {
+        if image::load_from_memory(&bytes).is_err() && !bytes.starts_with(b"\x89PNG") {
             self.messages.push(Message::new(
                 Role::System,
                 format!("{name} is corrupted or not a valid image, so it was not attached."),
@@ -1486,6 +1800,9 @@ impl App {
         let n = self.pending_images.len();
         let chip = format!("[Image #{n}] ");
         self.insert_str(&chip);
+        if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model) {
+            self.explain_no_vision();
+        }
         true
     }
 
@@ -1496,6 +1813,14 @@ impl App {
         // A fresh turn starts unarmed; a stale arm from before an earlier turn
         // finished must not make the next Esc an instant interrupt.
         self.interrupt_armed = false;
+        if self.clipboard_rx.is_some() {
+            self.clipboard_rx = None;
+            if let Some(last) = self.messages.last() {
+                if last.role == Role::System && last.content == "Reading clipboard…" {
+                    self.messages.pop();
+                }
+            }
+        }
         let mut prompt = self.input_buffer.trim().to_string();
         if prompt.is_empty() {
             if !self.pending_images.is_empty() {
@@ -1574,7 +1899,48 @@ impl App {
                 self.start_rollback_command(rest);
                 return;
             }
+            "/paste" => {
+                self.input_buffer.clear();
+                self.cursor = 0;
+                self.greeted = true;
+                self.run_command("/paste");
+                return;
+            }
+            "/image" | "/img" => {
+                self.input_buffer.clear();
+                self.cursor = 0;
+                self.greeted = true;
+                self.run_command("/image");
+                return;
+            }
+            rest if rest.starts_with("/image ") || rest.starts_with("/img ") => {
+                self.input_buffer.clear();
+                self.cursor = 0;
+                self.greeted = true;
+                self.run_command(rest);
+                return;
+            }
             _ => {}
+        }
+
+        if self.overlay.is_none() {
+            if let Some(path) = parse_image_path(&prompt) {
+                let mime = mime_for_path(&path.to_string_lossy()).unwrap_or("image/png");
+                self.input_buffer.clear();
+                self.cursor = 0;
+                self.attach_image_file(&path, mime);
+                return;
+            }
+            if let Some((path, remaining)) = extract_image_path_from_text(&prompt) {
+                let mime = mime_for_path(&path.to_string_lossy()).unwrap_or("image/png");
+                self.input_buffer = remaining;
+                if !self.input_buffer.is_empty() && !self.input_buffer.ends_with(' ') {
+                    self.input_buffer.push(' ');
+                }
+                self.cursor = self.input_buffer.len();
+                self.attach_image_file(&path, mime);
+                prompt = self.input_buffer.trim().to_string();
+            }
         }
 
         // Checked here and only here -- never mid-turn. Blocking between tool
@@ -1622,7 +1988,6 @@ impl App {
         }
         self.history_index = None;
         self.history_draft.clear();
-        let mut prompt = prompt;
         if !providers::supports_images(&self.config.llm.provider, &self.config.llm.model)
             && !self.pending_images.is_empty()
         {
@@ -8342,7 +8707,7 @@ mod tests {
     }
 
     #[test]
-    fn a_text_only_model_refuses_to_stage_an_image_path() {
+    fn a_text_only_model_stages_image_and_prompts_to_switch() {
         let mut a = app();
         a.config.llm.provider = "deepseek".to_string();
         a.config.llm.model = "deepseek-v4-pro".to_string();
@@ -8352,17 +8717,20 @@ mod tests {
         std::fs::write(&img, b"\x89PNG").unwrap();
         a.handle_paste(img.to_string_lossy().into_owned());
 
-        assert!(
-            a.pending_images.is_empty(),
-            "text-only model must not stage an image"
+        assert_eq!(
+            a.pending_images.len(),
+            1,
+            "text-only model must keep the staged image"
         );
-        assert!(
-            a.input_buffer.is_empty(),
-            "the path is consumed, not inserted as text"
+        assert_eq!(
+            a.input_buffer,
+            "[Image #1] ",
+            "the stage chip is inserted"
         );
+        assert!(a.pending_vision_prompt, "must prompt to switch model");
         let said = a.messages.last().expect("an explanation");
         assert!(
-            said.content.contains("can't read images"),
+            said.content.contains("This model can't read images. Switch to deepseek-v4-flash or a vision model? [y/n]"),
             "{}",
             said.content
         );
@@ -11817,5 +12185,264 @@ mod tests {
             }
             other => panic!("expected RollbackConfirm, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn alt_v_key_triggers_handle_paste_key() {
+        let mut a = app();
+        a.mock_clipboard_outcome = Some(ClipboardOutcome::Empty);
+        a.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        assert_ne!(a.input_buffer, "v");
+        assert!(a.messages.iter().any(|m| m.content.contains("Reading clipboard…")));
+
+        let mut a2 = app();
+        a2.mock_clipboard_outcome = Some(ClipboardOutcome::Empty);
+        a2.handle_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::ALT));
+        assert_ne!(a2.input_buffer, "V");
+        assert!(a2.messages.iter().any(|m| m.content.contains("Reading clipboard…")));
+    }
+
+    #[test]
+    fn check_clipboard_result_processes_image_outcome() {
+        let mut a = app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        a.clipboard_rx = Some(rx);
+        a.messages.push(Message::new(Role::System, "Reading clipboard…"));
+
+        tx.send(ClipboardOutcome::Image(ImageAttachment {
+            mime_type: "image/png".to_string(),
+            data_base64: "aGVsbG8=".to_string(),
+        })).unwrap();
+
+        a.check_clipboard_result();
+        assert_eq!(a.pending_images.len(), 1);
+        assert_eq!(a.input_buffer, "[Image #1] ");
+        assert!(!a.messages.iter().any(|m| m.content == "Reading clipboard…"));
+    }
+
+    #[test]
+    fn check_clipboard_result_processes_empty_outcome() {
+        let mut a = app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        a.clipboard_rx = Some(rx);
+        a.messages.push(Message::new(Role::System, "Reading clipboard…"));
+
+        tx.send(ClipboardOutcome::Empty).unwrap();
+
+        a.check_clipboard_result();
+        assert_eq!(a.pending_images.len(), 0);
+        assert!(a.messages.iter().any(|m| m.content.contains("No image in clipboard")));
+        assert!(!a.messages.iter().any(|m| m.content == "Reading clipboard…"));
+    }
+
+    #[test]
+    fn image_slash_command_with_path() {
+        let mut a = app();
+        a.run_command("/image /nonexistent/file.png");
+        assert!(a.messages.iter().any(|m| m.content.contains("Could not attach image at")));
+
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("photo.png");
+        std::fs::write(&img, b"\x89PNG test image").unwrap();
+        a.run_command(&format!("/image {}", img.display()));
+        assert_eq!(a.pending_images.len(), 1);
+        assert_eq!(a.input_buffer, "[Image #1] ");
+
+        let img2 = dir.path().join("photo2.png");
+        std::fs::write(&img2, b"\x89PNG test image 2").unwrap();
+        a.run_command(&format!("/img {}", img2.display()));
+        assert_eq!(a.pending_images.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_image_path_quoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("photo.png");
+        std::fs::write(&img, b"\x89PNG test image").unwrap();
+
+        let double_quoted = format!("\"{}\"", img.display());
+        assert_eq!(parse_image_path(&double_quoted), Some(img.clone()));
+
+        let single_quoted = format!("'{}'", img.display());
+        assert_eq!(parse_image_path(&single_quoted), Some(img));
+    }
+
+    #[test]
+    fn test_parse_image_path_with_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("my folder with spaces");
+        std::fs::create_dir_all(&sub).unwrap();
+        let img = sub.join("my photo.png");
+        std::fs::write(&img, b"\x89PNG test image").unwrap();
+
+        assert_eq!(parse_image_path(&img.to_string_lossy()), Some(img.clone()));
+
+        let quoted = format!("\"{}\"", img.display());
+        assert_eq!(parse_image_path(&quoted), Some(img));
+    }
+
+    #[test]
+    fn test_parse_image_path_file_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("url_photo.png");
+        std::fs::write(&img, b"\x89PNG test image").unwrap();
+
+        let url = format!("file://{}", img.display());
+        assert_eq!(parse_image_path(&url), Some(img.clone()));
+
+        let sub = dir.path().join("url spaces");
+        std::fs::create_dir_all(&sub).unwrap();
+        let img_spaces = sub.join("space photo.png");
+        std::fs::write(&img_spaces, b"\x89PNG test image").unwrap();
+
+        let url_encoded = format!("file://{}", img_spaces.to_string_lossy().replace(' ', "%20"));
+        assert_eq!(parse_image_path(&url_encoded), Some(img_spaces));
+    }
+
+    #[test]
+    fn test_parse_image_path_non_image_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt = dir.path().join("notes.txt");
+        std::fs::write(&txt, b"hello text").unwrap();
+        assert_eq!(parse_image_path(&txt.to_string_lossy()), None);
+
+        let pdf = dir.path().join("doc.pdf");
+        std::fs::write(&pdf, b"pdf content").unwrap();
+        assert_eq!(parse_image_path(&pdf.to_string_lossy()), None);
+    }
+
+    #[test]
+    fn test_parse_image_path_missing_file() {
+        let missing = "/path/to/surely/nonexistent/image12345.png";
+        assert_eq!(parse_image_path(missing), None);
+    }
+
+    #[test]
+    fn test_parse_image_path_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("huge.png");
+        // MAX_IMAGE_BYTES is 5 MB
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len((MAX_IMAGE_BYTES + 1024) as u64).unwrap();
+        assert_eq!(parse_image_path(&big.to_string_lossy()), None);
+    }
+
+    #[test]
+    fn test_submit_with_dropped_image_path() {
+        let mut a = app();
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("dropped.png");
+        std::fs::write(&img, b"\x89PNG dropped image").unwrap();
+
+        // Dropped image path as entire prompt
+        a.input_buffer = img.display().to_string();
+        a.cursor = a.input_buffer.len();
+        a.submit();
+
+        // Should attach image, stage chip in input_buffer, and not start turn
+        assert_eq!(a.pending_images.len(), 1);
+        assert_eq!(a.input_buffer, "[Image #1] ");
+        assert_eq!(a.turn, 0);
+    }
+
+    #[test]
+    fn test_char_key_typing_image_path_converts_to_chip() {
+        let mut a = app();
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("typed.png");
+        std::fs::write(&img, b"\x89PNG typed image").unwrap();
+
+        // Dropped or typed path ending with space or quotes converts to chip
+        let path_str = format!("{} ", img.display());
+        for c in path_str.chars() {
+            a.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        assert_eq!(a.pending_images.len(), 1);
+        assert_eq!(a.input_buffer, "[Image #1] ");
+    }
+
+    #[test]
+    fn test_typing_path_with_bak_extension_does_not_convert_to_chip() {
+        let mut a = app();
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("typed.png");
+        std::fs::write(&img, b"\x89PNG typed image").unwrap();
+        let bak = dir.path().join("typed.png.bak");
+        std::fs::write(&bak, b"backup file").unwrap();
+
+        // Typing a path that contains .png but ends in .bak should NEVER convert to chip
+        let path_str = format!("{} ", bak.display());
+        for c in path_str.chars() {
+            a.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        assert_eq!(a.pending_images.len(), 0);
+        assert_eq!(a.input_buffer, path_str);
+    }
+
+    #[test]
+    fn test_parse_image_path_candidate_windows_paths() {
+        // Quoted Windows path with spaces
+        let quoted = r#""C:\Users\Me\My Pics\a.png""#;
+        let res = parse_image_path_candidate(quoted);
+        assert_eq!(res, Some(PathBuf::from(r"C:\Users\Me\My Pics\a.png")));
+
+        // Windows file:// URI
+        let file_url = "file:///C:/Users/Me/a.png";
+        let res = parse_image_path_candidate(file_url);
+        assert_eq!(res, Some(PathBuf::from("C:/Users/Me/a.png")));
+
+        // Windows file:// URI with spaces percent-encoded
+        let file_url_spaces = "file:///C:/Users/Me/My%20Pics/a.png";
+        let res = parse_image_path_candidate(file_url_spaces);
+        assert_eq!(res, Some(PathBuf::from("C:/Users/Me/My Pics/a.png")));
+
+        // Non-image extension (.bak)
+        let bak = r"C:\a.png.bak";
+        assert_eq!(parse_image_path_candidate(bak), None);
+    }
+
+    #[test]
+    fn test_vision_switch_prompt_yes_switches_model_and_keeps_attachment() {
+        with_isolated_home(|| {
+            let mut a = app();
+            a.config.llm.provider = "deepseek".to_string();
+            a.config.llm.model = "deepseek-v4-pro".to_string();
+
+            let dir = tempfile::tempdir().unwrap();
+            let img = dir.path().join("test.png");
+            std::fs::write(&img, b"\x89PNG test image").unwrap();
+
+            a.attach_image_file(&img, "image/png");
+            assert_eq!(a.pending_images.len(), 1);
+            assert!(a.pending_vision_prompt);
+
+            a.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+            assert_eq!(a.config.llm.model, "deepseek-v4-flash");
+            assert_eq!(a.pending_images.len(), 1);
+            assert!(!a.pending_vision_prompt);
+        });
+    }
+
+    #[test]
+    fn test_vision_switch_prompt_no_keeps_model_and_keeps_attachment() {
+        let mut a = app();
+        a.config.llm.provider = "deepseek".to_string();
+        a.config.llm.model = "deepseek-v4-pro".to_string();
+
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("test.png");
+        std::fs::write(&img, b"\x89PNG test image").unwrap();
+
+        a.attach_image_file(&img, "image/png");
+        assert_eq!(a.pending_images.len(), 1);
+        assert!(a.pending_vision_prompt);
+
+        a.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(a.config.llm.model, "deepseek-v4-pro");
+        assert_eq!(a.pending_images.len(), 1);
+        assert!(!a.pending_vision_prompt);
+        assert!(a.messages.iter().any(|m| m.content.contains("Image attachment kept")));
     }
 }
