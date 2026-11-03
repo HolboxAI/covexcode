@@ -56,8 +56,32 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // would hide the thing being deployed while asking about it.
     let deploying = app.overlay == Some(Overlay::Deploy) && app.deploy.is_some();
 
+    // A live to-do list reserves a full-height column on the right edge, so the
+    // panel spans the whole terminal rather than hugging the transcript's
+    // bottom corner. Only when there is both a list to show and enough width
+    // to show it without starving the transcript -- on a narrow terminal the
+    // list stays in the footer's one-line summary instead.
+    //
+    // Decided *before* `bottom_height`, not after it: every panel below is
+    // drawn into `main_area`, and this column makes `main_area` narrower than
+    // the terminal. Sizing those panels from `size.width` reserved rows for a
+    // width they are never drawn at, so a prompt that wrapped to two rows at
+    // the real width was given room for one and the start of it scrolled
+    // silently out of the box.
+    let show_todo =
+        !app.todos.is_empty() && size.width > TODO_PANEL_WIDTH + MIN_SIDE_PANEL_SPLIT_WIDTH;
+    let (main_area, todo_area) = if show_todo {
+        let side = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(TODO_PANEL_WIDTH)])
+            .split(size);
+        (side[0], Some(side[1]))
+    } else {
+        (size, None)
+    };
+
     let bottom_height = if deploying {
-        let inner_width = size.width.saturating_sub(4).max(1) as usize;
+        let inner_width = main_area.width.saturating_sub(4).max(1) as usize;
         let lines = deployment_lines(app, inner_width);
         // Deliberately not clamped against the terminal height: on one shorter
         // than `MIN_INPUT_HEIGHT` that would put the ceiling below the floor,
@@ -67,11 +91,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     } else {
         match &approval {
             Some(request) => {
-                let inner_width = size.width.saturating_sub(4).max(1) as usize;
+                let inner_width = main_area.width.saturating_sub(4).max(1) as usize;
                 let (_, lines) = tool_approval_lines(app, request, inner_width);
                 (lines.len() as u16 + 2).clamp(MIN_INPUT_HEIGHT, MAX_APPROVAL_HEIGHT)
             }
-            None => input_height(app, size.width),
+            None => input_height(app, main_area.width),
         }
     };
 
@@ -87,23 +111,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         // added is silently clipped out of its own menu -- which is how a
         // command comes to look like it does not exist.
         (command_matches.len() as u16 + 2).min(MAX_COMMAND_MENU_HEIGHT)
-    };
-
-    // A live to-do list reserves a full-height column on the right edge, so the
-    // panel spans the whole terminal rather than hugging the transcript's
-    // bottom corner. Only when there is both a list to show and enough width
-    // to show it without starving the transcript -- on a narrow terminal the
-    // list stays in the footer's one-line summary instead.
-    let show_todo =
-        !app.todos.is_empty() && size.width > TODO_PANEL_WIDTH + MIN_SIDE_PANEL_SPLIT_WIDTH;
-    let (main_area, todo_area) = if show_todo {
-        let side = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(TODO_PANEL_WIDTH)])
-            .split(size);
-        (side[0], Some(side[1]))
-    } else {
-        (size, None)
     };
 
     // The viewport is a strip at the bottom of the real terminal, not a whole
@@ -553,9 +560,26 @@ fn render_live(f: &mut Frame, area: Rect, app: &mut App) {
     let skip = lines.len().saturating_sub(height);
     let shown: Vec<Line> = lines.into_iter().skip(skip).collect();
 
+    // Anchor the tail to the *bottom* of the strip instead of the top. This
+    // area exists to sit directly above the composer, so unused rows belong
+    // above the content -- a top-anchored `Paragraph` left them underneath it,
+    // which opened a gap of dead rows between the last message and the box you
+    // type into (`Min(0)` hands this area every row nothing else claimed).
+    // Bottom-anchoring also reads correctly while a reply streams: new lines
+    // push the older ones up, and the newest stays next to the prompt.
+    let used = shown.len().min(height) as u16;
+    if used == 0 {
+        return;
+    }
+    let strip = Rect {
+        y: area.y + area.height.saturating_sub(used),
+        height: used,
+        ..area
+    };
+
     f.render_widget(
         Paragraph::new(shown).block(Block::default().padding(Padding::new(GUTTER, 1, 0, 0))),
-        area,
+        strip,
     );
 }
 
@@ -1118,14 +1142,22 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // The frame is structure, not emphasis, so it takes `border` -- the same
+    // tone the command menu, the to-do column and the deployment panel are
+    // drawn in, and the only tone any other bordered widget in this file uses.
+    //
+    // It used to take `accent` while idle, which put the most saturated colour
+    // in the palette on two rules that run the full width of the terminal: at
+    // 100 columns that is 200 purple cells, permanently, which made a frame
+    // nobody interacts with the loudest thing on screen and read as a stray
+    // divider under the conversation. `accent` is for what changes *inside*
+    // the frame -- the `❯` marker, the spinner, a streaming line -- and the
+    // busy state still distinguishes itself by dimming the marker to `faint`
+    // (see `marker_style` above), so nothing is lost by dropping it here.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if busy {
-            Style::default().fg(theme::p().border)
-        } else {
-            Style::default().fg(theme::p().accent)
-        });
+        .border_style(Style::default().fg(theme::p().border));
 
     // Where the cursor sits in the *wrapped* text. Needed before drawing, not
     // after, because it is also what decides how far the box is scrolled.
@@ -4452,6 +4484,136 @@ mod tests {
         (0..h)
             .map(|y| (0..w).map(|x| buffer.get(x, y).symbol()).collect())
             .collect()
+    }
+
+    /// A prompt that wraps is only visible if the box reserved enough rows for
+    /// the width it is actually drawn at.
+    ///
+    /// The to-do panel makes `main_area` narrower than the terminal. Sizing the
+    /// composer from `size.width` instead reserved a row for a width it never
+    /// gets, and `render_input` scrolls to the cursor -- so the second half of
+    /// the prompt filled the box and the first half silently vanished, with no
+    /// clip marker to say anything was missing.
+    #[test]
+    fn a_prompt_wrapped_by_the_todo_panel_keeps_every_character_visible() {
+        let mut app = App::new(crate::config::Config::default());
+        app.todos = vec![crate::tools::TodoItem {
+            content: "one".to_string(),
+            status: crate::tools::TodoStatus::InProgress,
+        }];
+        app.input_buffer = "x".repeat(140);
+        app.cursor = 140;
+
+        let rows = rendered_rows(&mut app, 160, 24);
+        // Only the composer's own rows: "covexcode" elsewhere in the frame also
+        // contains an `x`, and counting those would make this a test of the
+        // whole screen rather than of what the box kept.
+        let top = rows
+            .iter()
+            .position(|r| r.contains('╭'))
+            .expect("the composer is drawn");
+        let bottom = rows
+            .iter()
+            .position(|r| r.contains('╰'))
+            .expect("the composer is drawn");
+        let shown: usize = rows[top + 1..bottom]
+            .iter()
+            .map(|r| r.matches('x').count())
+            .sum();
+        assert_eq!(shown, 140, "the whole prompt stays in the box: {rows:?}");
+    }
+
+    /// The live strip sits directly above the composer, so spare rows belong
+    /// above the content rather than between the content and the prompt.
+    ///
+    /// `Constraint::Min(0)` hands this area every row nothing else claimed; a
+    /// top-anchored `Paragraph` then left all of them as dead space under the
+    /// last line, which is the gap that reads as the transcript having fallen
+    /// away from the input box.
+    #[test]
+    fn the_live_transcript_sits_against_the_composer_rather_than_at_the_top() {
+        let mut app = App::new(crate::config::Config::default());
+        app.messages.push(crate::app::Message::new(
+            crate::app::Role::Assistant,
+            "the answer",
+        ));
+
+        let rows = rendered_rows(&mut app, 100, 12);
+        let content = rows
+            .iter()
+            .position(|r| r.contains("the answer"))
+            .expect("the message is drawn");
+        let composer = rows
+            .iter()
+            .position(|r| r.contains('╭'))
+            .expect("the composer is drawn");
+
+        assert!(
+            content > 0,
+            "content is anchored low, not at row 0: {rows:?}"
+        );
+        assert!(
+            content < composer,
+            "content stays above the composer: {rows:?}"
+        );
+    }
+
+    /// The composer's frame is structural chrome, so it is drawn in `border`,
+    /// the tone every other bordered panel in this file uses -- not in the
+    /// `accent` that is reserved for the logo, the spinner and the prompt
+    /// marker.
+    ///
+    /// Two rules running the full width of the terminal in the most saturated
+    /// colour of the palette is what reads as a stray purple divider under the
+    /// conversation, and it was drawn on every frame whether or not anything
+    /// was happening. `adapt` is applied to the expectation because
+    /// `adapt_colors_for_terminal` rewrites the frame on terminals that cannot
+    /// show 24-bit colour -- an assertion against the raw token would depend on
+    /// the terminal the suite happens to run in.
+    #[test]
+    fn the_composer_frame_is_drawn_in_the_structural_border_tone() {
+        let mut app = App::new(crate::config::Config::default());
+        app.input_buffer = "hello".to_string();
+        app.cursor = "hello".len();
+
+        const W: u16 = 100;
+        const H: u16 = 24;
+        let mut terminal = Terminal::new(TestBackend::new(W, H)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let find_row = |glyph: &str| {
+            (0..H)
+                .find(|&y| (0..W).any(|x| buffer.get(x, y).symbol() == glyph))
+                .unwrap_or_else(|| panic!("the composer draws {glyph}"))
+        };
+        let (top, bottom) = (find_row("╭"), find_row("╰"));
+
+        for y in [top, bottom] {
+            for x in 0..W {
+                let cell = buffer.get(x, y);
+                assert_eq!(
+                    cell.fg,
+                    theme::adapt(theme::p().border),
+                    "({x},{y}) {:?} is structure, not a highlight",
+                    cell.symbol()
+                );
+            }
+        }
+
+        // The accent has not left the composer: it is on the marker, which is
+        // the part that says where you are typing.
+        let marker_row = (top + 1..bottom)
+            .find(|&y| (0..W).any(|x| buffer.get(x, y).symbol() == "❯"))
+            .expect("the prompt marker is drawn");
+        let marker_x = (0..W)
+            .find(|&x| buffer.get(x, marker_row).symbol() == "❯")
+            .unwrap();
+        assert_eq!(
+            buffer.get(marker_x, marker_row).fg,
+            theme::adapt(theme::p().accent),
+            "the marker keeps the accent"
+        );
     }
 
     /// Pasting something enormous into the prompt must not take the app down.
