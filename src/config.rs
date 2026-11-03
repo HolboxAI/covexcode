@@ -1082,19 +1082,87 @@ pub(crate) mod test_support {
     // instead.
     pub(crate) static HOME_LOCK: Mutex<()> = Mutex::new(());
 
-    pub(crate) fn with_isolated_home<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("failed to create temp HOME");
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", dir.path());
+    /// The variables that together decide where this process keeps its state.
+    ///
+    /// `$HOME` alone is not it: `Config::config_dir` consults
+    /// `COVEXCODE_CONFIG_DIR` *first* and returns early, and the IDE exports
+    /// that into every terminal it opens. Overriding only `$HOME` therefore
+    /// left the suite reading and writing the real agent directory -- not
+    /// theoretically: a run from an IDE terminal overwrote a live
+    /// `config.toml` and appended hundreds of fixture prompts to the real
+    /// `prompt_history.jsonl`. `USERPROFILE` is `config_dir`'s documented
+    /// fallback for `$HOME` on Windows, so it moves with it.
+    const ISOLATED: [&str; 3] = ["HOME", "USERPROFILE", "COVEXCODE_CONFIG_DIR"];
 
-        let result = f();
+    pub(crate) fn redirect_home(
+        dir: &std::path::Path,
+    ) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        let prev = ISOLATED
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect();
+        std::env::set_var("HOME", dir);
+        std::env::set_var("USERPROFILE", dir);
+        // Removed rather than pointed at the temp dir: an override that
+        // short-circuits the `$HOME` path is exactly what defeated this
+        // before, so the tests exercise the route a stock install takes.
+        std::env::remove_var("COVEXCODE_CONFIG_DIR");
+        prev
+    }
 
-        match prev {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
+    pub(crate) fn restore_home(prev: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (name, value) in prev {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
         }
-        result
+    }
+
+    /// Isolation for a test body that has to `.await`.
+    ///
+    /// `with_isolated_home` takes a closure and runs it to completion, which an
+    /// async test cannot use: the body it would wrap is a future, and driving
+    /// one inside it needs a runtime nested in tokio's, which panics. This guard
+    /// does the same three things -- lock, redirect `HOME`, drop the override --
+    /// and undoes them on drop, whether the test passed or panicked. Holding it
+    /// across `.await` is the point; `#[tokio::test]` builds a current-thread
+    /// runtime, so the lock never blocks another thread of the same test.
+    ///
+    /// The subagent tests in `agent.rs` are the reason it exists: each one runs
+    /// a real turn against a local mock server, and a turn records usage -- so
+    /// without this they appended `test-model` rows to the developer's own
+    /// `usage.jsonl` on every run.
+    pub(crate) struct IsolatedHome {
+        // Restored in `drop` before the other fields go, so the environment is
+        // back to normal before the temp directory is removed.
+        prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _dir: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl IsolatedHome {
+        pub(crate) fn new() -> Self {
+            let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().expect("failed to create temp HOME");
+            let prev = redirect_home(dir.path());
+            Self {
+                prev,
+                _dir: dir,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            restore_home(std::mem::take(&mut self.prev));
+        }
+    }
+
+    pub(crate) fn with_isolated_home<R>(f: impl FnOnce() -> R) -> R {
+        let _isolated = IsolatedHome::new();
+        f()
     }
 }
 
@@ -1121,6 +1189,108 @@ mod tests {
             None => std::env::remove_var("COVEXCODE_CONFIG_DIR"),
         }
         assert_eq!(actual, expected);
+    }
+
+    /// Restores an environment variable when it goes out of scope, so a test
+    /// that plants one cannot leave it behind when an assertion fires.
+    struct EnvGuard {
+        name: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &std::path::Path) -> Self {
+            let prev = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.name, v),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    /// A test run must not be able to reach the real configuration directory
+    /// just because the shell that started it had exported an override.
+    ///
+    /// `Config::config_dir` checks `COVEXCODE_CONFIG_DIR` before `$HOME`, and
+    /// `with_isolated_home` used to isolate only `$HOME` -- so in an IDE
+    /// terminal, where that variable is always set, every test that saved a
+    /// config or appended to the prompt history wrote to the live agent
+    /// directory. This pins the fixed behaviour: the export does not survive
+    /// into the isolation, and the temporary `$HOME` decides the path.
+    #[test]
+    fn an_isolated_home_ignores_an_exported_config_dir() {
+        let planted = tempfile::tempdir().unwrap();
+        let _planted = EnvGuard::set("COVEXCODE_CONFIG_DIR", planted.path());
+
+        let (dir, override_inside, home_inside) = with_isolated_home(|| {
+            (
+                Config::config_dir(),
+                std::env::var_os("COVEXCODE_CONFIG_DIR"),
+                std::env::var_os("HOME").map(PathBuf::from),
+            )
+        });
+
+        assert!(
+            override_inside.is_none(),
+            "the override from the shell must not survive into the isolation"
+        );
+        let home = home_inside.expect("HOME is set inside the isolation");
+        assert_eq!(
+            dir,
+            home.join(".covexcode"),
+            "the temporary HOME decides where test state goes"
+        );
+        assert_ne!(
+            dir,
+            planted.path(),
+            "the planted override must be ignored, not honoured"
+        );
+    }
+
+    /// The damage this whole mechanism exists to prevent, end to end: with an
+    /// override exported, a test that saves a config and records usage must
+    /// write into the isolated directory and leave the exported one untouched.
+    ///
+    /// The lock is held for the whole body, and the redirection is done inline
+    /// rather than through `with_isolated_home`: planting a process-global
+    /// variable is visible to every test running alongside this one, and any of
+    /// them resolving `config_dir()` in that window would write here too.
+    /// `with_isolated_home` cannot be used for the same reason -- it takes the
+    /// very lock this test already holds.
+    #[test]
+    fn isolated_tests_do_not_touch_an_exported_config_dir() {
+        const SENTINEL: &str = "must not be written";
+        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let real = tempfile::tempdir().unwrap();
+        let real_config = real.path().join("config.toml");
+        let real_usage = real.path().join("usage.jsonl");
+        std::fs::write(&real_config, SENTINEL).unwrap();
+        std::fs::write(&real_usage, SENTINEL).unwrap();
+        let _planted = EnvGuard::set("COVEXCODE_CONFIG_DIR", real.path());
+
+        let fake_home = tempfile::tempdir().unwrap();
+        let prev = super::test_support::redirect_home(fake_home.path());
+        Config::default().save().unwrap();
+        crate::usage::record_turn(123, "test-model");
+        let isolated_usage =
+            std::fs::read_to_string(fake_home.path().join(".covexcode/usage.jsonl"))
+                .unwrap_or_default();
+        super::test_support::restore_home(prev);
+
+        assert!(
+            isolated_usage.contains("\"approx_tokens\":123"),
+            "usage goes to the isolated directory: {isolated_usage:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&real_config).unwrap(), SENTINEL);
+        assert_eq!(std::fs::read_to_string(&real_usage).unwrap(), SENTINEL);
     }
 
     /// The file holds an API key in clear text, so nobody else on the machine
