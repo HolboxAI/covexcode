@@ -2,7 +2,6 @@
 
 use crate::config::Config;
 use serde::Deserialize;
-use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -49,6 +48,25 @@ fn covexcode_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".covexcode")
+}
+
+/// Appends a log line to ~/.covexcode/covexcode.log.
+pub fn log_to_covexcode(msg: &str) {
+    let dir = covexcode_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("covexcode.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{secs}] {msg}");
+    }
 }
 
 fn account_token_path() -> PathBuf {
@@ -208,7 +226,12 @@ fn open_browser(url: &str) {
     };
     // Reaped on its own thread so a handler that keeps running does not leave a
     // zombie for the rest of the session.
-    if let Ok(mut child) = command.stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    if let Ok(mut child) = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
         std::thread::spawn(move || {
             let _ = child.wait();
         });
@@ -233,14 +256,7 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
         .verification_uri_complete
         .unwrap_or_else(|| format!("{}?code={}", start.verification_uri, start.user_code));
 
-    println!("covexcode login");
-    println!();
-    println!("  Opening the browser to authorize this device…");
-    println!();
-    println!("Sign in with Google if asked, then click Authorize.");
-    println!("Return here when the browser says you're connected.");
-    print!("Waiting");
-    let _ = io::stdout().flush();
+    log_to_covexcode("covexcode login: opening browser for device authorization");
     open_browser(&verify);
 
     let interval = Duration::from_secs(start.interval.unwrap_or(2).max(1));
@@ -248,14 +264,11 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = tokio::time::Instant::now() + MAX_WAIT;
     loop {
         if tokio::time::Instant::now() >= deadline {
-            println!();
             return Err(
                 "timed out waiting for the browser to authorize -- run /login again".into(),
             );
         }
         tokio::time::sleep(interval).await;
-        print!(".");
-        let _ = io::stdout().flush();
 
         let res = client
             .post(format!("{base}/api/auth/device/poll"))
@@ -264,13 +277,11 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
 
         if res.status() == reqwest::StatusCode::GONE {
-            println!();
             return Err("device code expired — run covexcode login again".into());
         }
 
         let body: PollResponse = res.json().await?;
         if body.api_key.is_some() {
-            println!();
             let mut config = Config::load().unwrap_or_default();
             if let Some(endpoint) = body.endpoint {
                 config.llm.endpoint = endpoint.trim_end_matches('/').to_string();
@@ -300,13 +311,10 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
                 write_account_email(email);
             }
 
-            println!(
+            log_to_covexcode(&format!(
                 "✓ Signed in as {}. Credentials saved to ~/.covexcode/config.toml",
                 body.email.unwrap_or_else(|| "you".into())
-            );
-            println!("  Endpoint: {}", config.llm.endpoint);
-            println!("  Model:    {}", config.llm.model);
-            println!("  IDE uses the same config file.");
+            ));
             // Immediate heartbeat so DAU counts this login.
             heartbeat_once().await;
             return Ok(());
@@ -315,12 +323,10 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
         match body.status.as_deref() {
             Some("pending") | None => continue,
             Some("expired") => {
-                println!();
                 return Err("device code expired — run covexcode login again".into());
             }
             _ => {
                 if let Some(err) = body.error {
-                    println!();
                     return Err(err.into());
                 }
                 continue;

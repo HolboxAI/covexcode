@@ -680,7 +680,7 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char('d') if ctrl => break,
-                        _ => app.handle_key(key),
+                        _ => app.handle_key_with_terminal(terminal, key),
                     }
                 }
                 Event::Paste(text) => app.handle_paste(text),
@@ -751,8 +751,7 @@ async fn run_app(
                     // rebuild, never a `clear()` -- see `reattach_terminal`.
                     terminal.clear()?;
                     restore_terminal(modes)?;
-                    println!("\n  Handing the terminal to `{}`.", command.program);
-                    println!("  Finish signing in here; this app comes back when it is done.\n");
+                    crate::login::log_to_covexcode(&format!("Handing the terminal to `{}`", command.program));
 
                     let output = deploy::runner::run_interactive(&command, &cwd).await;
 
@@ -780,7 +779,6 @@ async fn run_app(
             app.login_request = false;
             terminal.clear()?;
             restore_terminal(modes)?;
-            println!();
             let result = match login::login().await {
                 Ok(()) => Ok(()),
                 Err(e) => Err(e.to_string()),

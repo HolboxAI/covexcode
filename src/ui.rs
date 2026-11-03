@@ -170,6 +170,28 @@ fn adapt_colors_for_terminal(f: &mut Frame) {
     }
 }
 
+/// Shared preparation routine executed before any slash command runs:
+/// 1. Clear the input buffer and reset the cursor.
+/// 2. Set popup state to closed/hidden.
+/// 3. Call terminal.clear() to wipe the full terminal area including all rows the popup was occupying.
+/// 4. Call terminal.draw() once with popup closed and input cleared so Ratatui repaints clean cells over every old popup row.
+pub fn prepare_slash_command<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    app: &mut App,
+) -> std::io::Result<()> {
+    // 1. Clear the input buffer and reset the cursor.
+    app.input_buffer.clear();
+    app.cursor = 0;
+    // 2. Set popup state to closed/hidden.
+    app.command_menu_selected = 0;
+    app.overlay = None;
+    // 3. Wipe the inline viewport area.
+    terminal.clear()?;
+    // 4. Repaint clean cells over all former popup rows.
+    terminal.draw(|f| render(f, app))?;
+    Ok(())
+}
+
 /// The transcript, drawn without a box around it.
 ///
 /// A border here would frame the conversation as a widget in an application;
@@ -2356,6 +2378,42 @@ fn tool_approval_parts(
     }
     lines.push(Line::from(""));
 
+    // The "why?" prompt, when it is open, replaces the y/n choice outright.
+    //
+    // It is drawn as exactly the same three rows the y/n choice occupies, and
+    // that is deliberate rather than incidental: `render` sizes the whole
+    // approval box from `lines.len()` (see `bottom_height`), so an identical
+    // footer height means opening the prompt cannot change the box's height by
+    // even one row. Nothing above it is re-laid-out, nothing below it moves,
+    // and there is no vacated row for a stale prompt to survive in -- the
+    // failure mode the /login fix was about, avoided here by never creating
+    // the row in the first place rather than by clearing it afterwards.
+    if let Some(feedback) = &app.approval_feedback {
+        // Two rows of instructions here would repeat each other, so the third
+        // row is the caret's row extended: the reason, then the keys. Kept
+        // flat and prefix-free so a long reason clips from the right like any
+        // other single-line field rather than wrapping into the body.
+        let footer = vec![
+            Line::from(Span::styled(
+                "  Why? (optional — enter to send, esc to skip)",
+                theme::faint(),
+            )),
+            Line::from(vec![
+                Span::styled("❯ ", theme::accent()),
+                Span::styled(format!("{}▏", feedback.text()), theme::text()),
+            ]),
+            Line::from(Span::styled(
+                if feedback.is_blank() {
+                    "  enter skip · esc skip · it stays a plain refusal"
+                } else {
+                    "  enter send this reason to the model · esc skip"
+                },
+                theme::faint(),
+            )),
+        ];
+        return (title, lines, footer);
+    }
+
     // Two choices, one highlighted -- Up/Down move the cursor between them,
     // Enter confirms whichever one it is on, and y/n/esc still work directly
     // for anyone who already knows which they want. The highlighted key stays
@@ -2401,7 +2459,6 @@ fn tool_approval_parts(
 
     (title, lines, footer)
 }
-
 /// Draws the approval prompt into its reserved region at the bottom of the
 /// frame -- see the placement comment on `render`. No `Clear` and no
 /// centering: unlike a floating popup, this area belongs to the prompt alone,
@@ -2457,8 +2514,15 @@ fn render_tool_approval_inline(f: &mut Frame, area: Rect, app: &App, request: &A
         // of them.
         if (scroll > 0 || hidden_below > 0) && !footer.is_empty() {
             let last = footer.len() - 1;
+            // Which keys are worth naming depends on what the prompt is
+            // currently asking for: while the feedback input is open, y/n are
+            // ordinary characters and Up/Down are not the choice at all.
             footer[last] = Line::from(Span::styled(
-                "  ↑↓ choose · enter confirm · esc skip · PgUp/PgDn scroll",
+                if app.approval_feedback.is_some() {
+                    "  enter send · esc skip · PgUp/PgDn scroll"
+                } else {
+                    "  ↑↓ choose · enter confirm · esc skip · PgUp/PgDn scroll"
+                },
                 theme::faint(),
             ));
         }
@@ -5506,6 +5570,136 @@ mod tests {
         );
     }
 
+    /// The "why?" prompt, drawn at the two widths that matter: narrow enough
+    /// that everything on the row has to fit, and wide enough that nothing is
+    /// being clipped to make it pass.
+    ///
+    /// Drawn twice into the **same** terminal on purpose. A backend that is
+    /// reused across draws is what catches a row that was written in the first
+    /// frame and never overwritten in the second -- the failure mode the /login
+    /// fix was about. If the y/n choice were still visible anywhere after the
+    /// feedback prompt took over, that is exactly what a stale row looks like.
+    #[test]
+    fn the_feedback_prompt_replaces_the_choice_with_no_leftover_rows() {
+        for width in [60u16, 120u16] {
+            let mut app = approval_app();
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let before = rows(&terminal, width, 24);
+            assert!(
+                before.iter().any(|r| r.contains("y run")),
+                "{width}: the y/n choice should be on screen to begin with"
+            );
+
+            // Press `n`: the offer, not a decision.
+            app.handle_key(crate::event::KeyEvent::new(
+                crate::event::KeyCode::Char('n'),
+                crate::event::KeyModifiers::NONE,
+            ));
+            assert!(app.approval_feedback.is_some(), "{width}: n opens the prompt");
+
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let after = rows(&terminal, width, 24);
+
+            // Exactly one prompt, and it asks for a reason.
+            assert_eq!(
+                after.iter().filter(|r| r.contains("Why? (optional")).count(),
+                1,
+                "{width}: the prompt must be drawn once: {after:#?}"
+            );
+            // The input line, with its caret.
+            assert!(
+                after.iter().any(|r| r.contains('❯') && r.contains('▏')),
+                "{width}: the reason field must be visible: {after:#?}"
+            );
+            // Not one row of the choice it replaced survives.
+            assert!(
+                !after.iter().any(|r| r.contains("y run") || r.contains("deny")),
+                "{width}: the y/n rows must not linger: {after:#?}"
+            );
+        }
+    }
+
+    /// The box is sized from its line count, so an identical footer height is
+    /// what makes opening the prompt a pure repaint -- no growth, no shrink, and
+    /// therefore no row for anything to be left behind in.
+    #[test]
+    fn opening_the_feedback_prompt_does_not_change_the_box_height() {
+        for width in [60u16, 120u16] {
+            let inner = width.saturating_sub(4) as usize;
+            let request = approval_request();
+
+            let plain = approval_app();
+            let (_, plain_lines) = tool_approval_lines(&plain, &request, inner);
+
+            let mut asking = approval_app();
+            asking.approval_feedback = Some(crate::approval::Feedback::new());
+            let (_, asking_lines) = tool_approval_lines(&asking, &request, inner);
+
+            assert_eq!(
+                plain_lines.len(),
+                asking_lines.len(),
+                "{width}: the feedback prompt must occupy exactly the rows the choice did"
+            );
+        }
+    }
+
+    /// The reason is echoed as it is typed, so the user can see what the model
+    /// is about to be told.
+    #[test]
+    fn the_typed_reason_is_visible_in_the_input_line() {
+        let mut app = approval_app();
+        let mut feedback = crate::approval::Feedback::new();
+        for c in "step 2 is wrong".chars() {
+            feedback.handle_key(
+                crate::event::KeyCode::Char(c),
+                crate::event::KeyModifiers::NONE,
+            );
+        }
+        app.approval_feedback = Some(feedback);
+
+        let rows = rendered_rows(&mut app, 120, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("step 2 is wrong"))
+            .unwrap_or_else(|| panic!("the reason must be on screen: {rows:#?}"));
+        assert!(row.contains('❯'), "{row}");
+    }
+
+    fn approval_request() -> crate::approval::ApprovalRequest {
+        crate::approval::ApprovalRequest {
+            call: Default::default(),
+            action: Action::Command {
+                command: "ls -la".to_string(),
+                purpose: None,
+            },
+            remaining: 0,
+            preview: None,
+        }
+    }
+
+    /// An app sitting at an approval prompt, for the render tests above.
+    fn approval_app() -> App {
+        let mut app = App::new(crate::config::Config::default());
+        app.greeted = true;
+        app.state = AppState::AwaitingApproval;
+        app.workspace_root = "/tmp/project".to_string();
+        app.overlay = Some(Overlay::ToolApproval(approval_request()));
+        app
+    }
+
+    fn rows(
+        terminal: &Terminal<TestBackend>,
+        w: u16,
+        h: u16,
+    ) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buffer.get(x, y).symbol()).collect())
+            .collect()
+    }
+
     /// Regression: the approval box prints y/n/esc directly under the command,
     /// and the footer printed the same three keys one row below it. Two
     /// identical key bars a row apart read as two separate prompts.
@@ -5542,6 +5736,86 @@ mod tests {
             rows_with_keys, 1,
             "the y/n/esc bar must be drawn once, not twice"
         );
+    }
+
+    /// Regression: submitting a slash command must clean up every row previously
+    /// occupied by the autocomplete popup so no ghost rows linger in the buffer
+    /// or scroll into terminal history.
+    #[test]
+    fn slash_command_dispatch_clears_popup_rows_and_repaints_cleanly() {
+        let mut app = App::new(crate::config::Config::default());
+        app.greeted = true;
+        app.input_buffer = "/".to_string();
+        app.cursor = 1;
+
+        let w = 80;
+        let h = 24;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+
+        // 1. Renders the app with slash popup open and "/" in the input box.
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let initial_rows: Vec<String> = (0..h)
+            .map(|y| (0..w).map(|x| terminal.backend().buffer().get(x, y).symbol()).collect())
+            .collect();
+
+        let popup_row_indices: Vec<usize> = initial_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.contains("/plan") || r.contains("/provider") || r.contains("research first"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !popup_row_indices.is_empty(),
+            "the popup must be visible before Enter is pressed"
+        );
+
+        // 2. Simulates Enter to submit any slash command.
+        app.handle_key_with_terminal(
+            &mut terminal,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+
+        // 3. Renders one frame after dispatch.
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let after_rows: Vec<String> = (0..h)
+            .map(|y| (0..w).map(|x| terminal.backend().buffer().get(x, y).symbol()).collect())
+            .collect();
+
+        // 4. Asserts every cell in the former popup rows is blank — no /plan, /provider or any popup text remains.
+        for &row_idx in &popup_row_indices {
+            let row = &after_rows[row_idx];
+            assert!(
+                !row.contains("/plan"),
+                "row {row_idx} still contained '/plan': {row}"
+            );
+            assert!(
+                !row.contains("/provider"),
+                "row {row_idx} still contained '/provider': {row}"
+            );
+            assert!(
+                !row.contains("research first"),
+                "row {row_idx} still contained 'research first': {row}"
+            );
+            assert!(
+                row.trim().is_empty(),
+                "former popup row {row_idx} is not blank: {row:?}"
+            );
+            for x in 0..w {
+                let sym = terminal.backend().buffer().get(x, row_idx as u16).symbol();
+                assert!(
+                    sym.trim().is_empty(),
+                    "cell at ({x}, {row_idx}) is not blank: {sym:?}"
+                );
+            }
+        }
+
+        // 5. Asserts the input buffer is empty.
+        assert!(app.input_buffer.is_empty(), "input buffer must be empty after dispatch");
     }
 
     /// Regression: no live suggestions existed at all -- typing "/" showed

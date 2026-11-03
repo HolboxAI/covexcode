@@ -19,6 +19,7 @@
 
 use crate::llm::ToolCall;
 use crate::tools::Action;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 /// One thing the model wants to do, waiting for the user's answer.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,21 +49,135 @@ pub struct ApprovalRequest {
 }
 
 /// The user's answer to one [`ApprovalRequest`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Three cases, not two, because "no" has always carried more information
+/// than the binary could hold: the user knows *why* it was no, and the model
+/// did not. `DenyWithFeedback` is that reason travelling to the model instead
+/// of being thrown away -- see [`Feedback`] for the prompt that collects it.
+///
+/// Deliberately not `Copy` any more: the third case owns a `String`. Every
+/// consumer already either matched on it or passed it straight through, so
+/// the only change at a call site is that `is_allowed` now takes `&self`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     /// Run it. For a plan, adopt it; for a deployment, hand over to the
     /// deploy flow.
-    Allowed,
+    Allow,
     /// Don't. The model is told the call was declined and carries on without
-    /// it; nothing is executed.
-    Refused,
+    /// it; nothing is executed. Worded exactly as it was before feedback
+    /// existed, so a plain refusal is not a behaviour change.
+    Deny,
+    /// Don't, and here is why. The reason goes to the model verbatim.
+    ///
+    /// Unused in the ACP-only binary: `protocol::Decision::from` is the RPC
+    /// surface's equivalent, and a permission response there can only say
+    /// allow or reject -- there is no field to carry a reason in. So the whole
+    /// feedback half of this module is TUI-only by construction, not by
+    /// omission, and that binary is the one place it is dead weight.
+    #[allow(dead_code)]
+    DenyWithFeedback(String),
 }
 
+#[allow(dead_code)]
 impl Decision {
-    pub fn is_allowed(self) -> bool {
-        self == Decision::Allowed
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, Decision::Allow)
+    }
+
+    /// The reason the user gave, when they gave one.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Decision::DenyWithFeedback(reason) => Some(reason.as_str()),
+            _ => None,
+        }
     }
 }
+
+/// The one-line "why?" prompt that follows a `no`.
+///
+/// The whole point of this type is that there is exactly one of it. Every
+/// place in the app that can be told "no" by a person offers the same chance
+/// to say why, collects it the same way, and turns it into the same
+/// [`Decision`] -- so no call site can drift into its own slightly different
+/// idea of what pressing Esc means.
+///
+/// It holds only the typed text. The decision is not made until the user
+/// says it is: Enter sends, Esc abandons, and **neither is required** -- an
+/// empty Enter is a plain `Deny`, so pressing `n` and then Enter quickly is
+/// still the two-keystroke refusal it always was.
+#[allow(dead_code)]
+pub struct Feedback {
+    text: String,
+}
+
+#[allow(dead_code)]
+impl Default for Feedback {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(dead_code)]
+impl Feedback {
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Whether the user has typed nothing but whitespace, which is the case
+    /// that has to behave exactly like a plain `no`.
+    pub fn is_blank(&self) -> bool {
+        self.text.trim().is_empty()
+    }
+
+    /// Feed one keypress to the prompt.
+    ///
+    /// `Some(decision)` means the prompt is finished and the caller should
+    /// apply it; `None` means the key was text editing and the prompt stays
+    /// up. Every key that is not Backspace, Enter, Esc or a printable
+    /// character is swallowed here rather than falling through to the rest of
+    /// the app -- while this prompt is open, nothing else may act on a
+    /// keystroke.
+    pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Decision> {
+        match code {
+            // Esc skips the offer. Identical to an empty Enter, and identical
+            // to what Esc meant before this prompt existed -- which is why it
+            // is a bare `Deny` and not `self.decision()`: whatever had been
+            // typed must be thrown away, not sent.
+            KeyCode::Esc => Some(Decision::Deny),
+            KeyCode::Enter => Some(self.decision()),
+            KeyCode::Backspace => {
+                self.text.pop();
+                None
+            }
+            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                self.text.push(c);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Turn what has been typed so far into the answer it stands for.
+    ///
+    /// Trimmed, so a reason of only spaces is not sent as a reason -- the
+    /// model would otherwise be handed an empty string and told it was
+    /// feedback.
+    pub fn decision(&self) -> Decision {
+        let reason = self.text.trim();
+        if reason.is_empty() {
+            Decision::Deny
+        } else {
+            Decision::DenyWithFeedback(reason.to_string())
+        }
+    }
+}
+
 
 /// What to do with one queued call -- the pure decision `App::advance_approvals`
 /// makes as it walks `pending_tools`, extracted so a headless (RPC-driven)
@@ -202,5 +317,131 @@ fn is_read_only_action(action: &crate::tools::Action) -> bool {
         | crate::tools::Action::CheckInBrowser { .. } => true,
         crate::tools::Action::Command { command, .. } => crate::tools::is_read_only(command),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn typed(text: &str) -> Feedback {
+        let mut feedback = Feedback::new();
+        for c in text.chars() {
+            assert_eq!(feedback.handle_key(KeyCode::Char(c), KeyModifiers::NONE), None);
+        }
+        feedback
+    }
+
+    /// The core contract: what the user typed is what the model is told,
+    /// character for character.
+    #[test]
+    fn a_typed_reason_becomes_deny_with_feedback_verbatim() {
+        let mut feedback = typed("use the existing helper instead");
+        assert_eq!(
+            feedback.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Decision::DenyWithFeedback(
+                "use the existing helper instead".to_string()
+            ))
+        );
+    }
+
+    /// Pressing `n` and immediately Enter has to be a plain refusal -- feedback
+    /// is offered, never required.
+    #[test]
+    fn an_empty_enter_is_a_plain_deny() {
+        let mut feedback = Feedback::new();
+        assert_eq!(
+            feedback.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Decision::Deny)
+        );
+    }
+
+    #[test]
+    fn esc_is_a_plain_deny() {
+        let mut feedback = Feedback::new();
+        assert_eq!(
+            feedback.handle_key(KeyCode::Esc, KeyModifiers::NONE),
+            Some(Decision::Deny)
+        );
+    }
+
+    /// Esc means "forget it", not "send what I had half-typed".
+    #[test]
+    fn esc_after_typing_still_sends_nothing() {
+        let mut feedback = typed("half a thou");
+        assert_eq!(
+            feedback.handle_key(KeyCode::Esc, KeyModifiers::NONE),
+            Some(Decision::Deny)
+        );
+    }
+
+    /// Whitespace is not a reason: the model would otherwise be handed an empty
+    /// string and told it was feedback.
+    #[test]
+    fn a_blank_reason_is_a_plain_deny_not_an_empty_feedback() {
+        let mut feedback = typed("   ");
+        assert!(feedback.is_blank());
+        assert_eq!(
+            feedback.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Decision::Deny)
+        );
+    }
+
+    /// A reason is trimmed at the edges but never rewritten inside.
+    #[test]
+    fn a_reason_keeps_its_inner_punctuation_and_is_only_trimmed() {
+        let mut feedback = typed("  don't touch app.rs: it's mid-edit  ");
+        let decision = feedback
+            .handle_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            decision,
+            Decision::DenyWithFeedback("don't touch app.rs: it's mid-edit".to_string())
+        );
+    }
+
+    #[test]
+    fn backspace_edits_the_reason() {
+        let mut feedback = typed("wrong");
+        feedback.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(feedback.text(), "wron");
+    }
+
+    /// While this prompt is open, `y` and `n` are letters like any other. If
+    /// they were still the approval keys, a reason containing either would
+    /// answer the prompt by accident.
+    #[test]
+    fn y_and_n_are_ordinary_characters_inside_the_prompt() {
+        let mut feedback = typed("ny");
+        assert_eq!(
+            feedback.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Decision::DenyWithFeedback("ny".to_string()))
+        );
+    }
+
+    /// A control chord is not text: Ctrl-C has to stay the interrupt/exit it is,
+    /// and must not land a literal character in the reason.
+    #[test]
+    fn control_chords_are_swallowed_rather_than_typed() {
+        let mut feedback = Feedback::new();
+        assert_eq!(
+            feedback.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            None
+        );
+        assert_eq!(feedback.text(), "");
+    }
+
+    #[test]
+    fn is_allowed_is_only_true_for_allow() {
+        assert!(Decision::Allow.is_allowed());
+        assert!(!Decision::Deny.is_allowed());
+        assert!(!Decision::DenyWithFeedback("no".to_string()).is_allowed());
+    }
+
+    #[test]
+    fn reason_is_only_some_for_feedback() {
+        assert_eq!(Decision::Allow.reason(), None);
+        assert_eq!(Decision::Deny.reason(), None);
+        assert_eq!(Decision::DenyWithFeedback("no".to_string()).reason(), Some("no"));
     }
 }
