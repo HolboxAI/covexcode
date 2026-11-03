@@ -521,6 +521,50 @@ fn relaunch_in(dir: &std::path::Path) -> io::Result<()> {
 /// twice: once to count the lines, once to draw them. That is cheap next to
 /// the alternative of guessing and either clipping the message or leaving a
 /// gap.
+/// How many rows fit in one `insert_before` without outgrowing the buffer
+/// ratatui 0.26 allocates for it.
+///
+/// `Buffer::filled` sizes its content with `Rect::area()`, which is a `u16`
+/// and saturates at 65_535 cells, but the widgets then index the full
+/// requested area. A scrollback flush of `width * height` past that limit
+/// therefore panics with `len is 65535 but the index is 65535` -- which a
+/// long reply reaches easily at 80 columns. Splitting the flush keeps every
+/// temporary buffer inside the limit.
+fn scrollback_chunk_rows(width: u16) -> usize {
+    (u16::MAX as usize / width.max(1) as usize).max(1)
+}
+
+/// Draw `lines` above the inline viewport in buffers small enough for
+/// ratatui 0.26. See `scrollback_chunk_rows` for why this is not a single
+/// `insert_before`.
+fn insert_scrollback_lines<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    width: u16,
+    lines: Vec<ratatui::text::Line<'static>>,
+) -> io::Result<()> {
+    for chunk in lines.chunks(scrollback_chunk_rows(width)) {
+        let height = chunk.len() as u16;
+        if height == 0 {
+            continue;
+        }
+        terminal.insert_before(height, |buf| {
+            let area = Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            };
+            ratatui::widgets::Paragraph::new(chunk.to_vec())
+                .block(
+                    ratatui::widgets::Block::default()
+                        .padding(ratatui::widgets::Padding::new(2, 1, 0, 0)),
+                )
+                .render(area, buf);
+        })?;
+    }
+    Ok(())
+}
+
 fn flush_to_scrollback<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -535,21 +579,7 @@ fn flush_to_scrollback<B: ratatui::backend::Backend>(
 
     if !app.welcome_flushed {
         let lines = ui::welcome_lines(app, text_width);
-        let height = lines.len() as u16;
-        terminal.insert_before(height, |buf| {
-            let area = Rect {
-                x: 0,
-                y: 0,
-                width,
-                height,
-            };
-            ratatui::widgets::Paragraph::new(lines)
-                .block(
-                    ratatui::widgets::Block::default()
-                        .padding(ratatui::widgets::Padding::new(2, 1, 0, 0)),
-                )
-                .render(area, buf);
-        })?;
+        insert_scrollback_lines(terminal, width, lines)?;
         app.welcome_flushed = true;
     }
 
@@ -565,21 +595,7 @@ fn flush_to_scrollback<B: ratatui::backend::Backend>(
         // would swallow the paragraph break after a table or code block.
         let lines: Vec<_> = ui::wrapped_lines(text.strip_suffix('\n').unwrap_or(&text), text_width);
         if !lines.is_empty() {
-            let height = lines.len() as u16;
-            terminal.insert_before(height, |buf| {
-                let area = Rect {
-                    x: 0,
-                    y: 0,
-                    width,
-                    height,
-                };
-                ratatui::widgets::Paragraph::new(lines)
-                    .block(
-                        ratatui::widgets::Block::default()
-                            .padding(ratatui::widgets::Padding::new(2, 1, 0, 0)),
-                    )
-                    .render(area, buf);
-            })?;
+            insert_scrollback_lines(terminal, width, lines)?;
         }
         app.stream_printed += text.len();
     }
@@ -591,21 +607,7 @@ fn flush_to_scrollback<B: ratatui::backend::Backend>(
             app.flushed += 1;
             continue;
         }
-        let height = lines.len() as u16;
-        terminal.insert_before(height, |buf| {
-            let area = Rect {
-                x: 0,
-                y: 0,
-                width,
-                height,
-            };
-            ratatui::widgets::Paragraph::new(lines)
-                .block(
-                    ratatui::widgets::Block::default()
-                        .padding(ratatui::widgets::Padding::new(2, 1, 0, 0)),
-                )
-                .render(area, buf);
-        })?;
+        insert_scrollback_lines(terminal, width, lines)?;
         app.flushed += 1;
     }
     Ok(())
@@ -1112,6 +1114,38 @@ fn install_panic_hook(enhanced: bool, alternate_screen: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ratatui 0.26 sizes a `Buffer` with `Rect::area()`, a u16 that saturates
+    /// at 65_535 cells, while a widget indexes the full requested area. A
+    /// 1,000-line flush at 80 columns is 80,000 cells -- the shape that
+    /// panicked in the field with "len is 65535 but the index is 65535".
+    #[test]
+    fn a_tall_scrollback_flush_stays_inside_ratatuis_buffer_limit() {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(12),
+            },
+        )
+        .expect("terminal");
+        let lines = (0..1_000)
+            .map(|i| ratatui::text::Line::from(format!("line {i}")))
+            .collect();
+        insert_scrollback_lines(&mut terminal, 80, lines).expect("flush");
+    }
+
+    #[test]
+    fn scrollback_chunks_never_exceed_the_ratatui_buffer_limit() {
+        for width in [1u16, 2, 80, 200, 1_000, 65_535] {
+            let rows = scrollback_chunk_rows(width);
+            assert!(rows >= 1);
+            assert!(
+                rows * width.max(1) as usize <= u16::MAX as usize,
+                "width {width} produced {rows} rows"
+            );
+        }
+    }
 
     /// The conversation has to be gone, not one scroll away. `[2J` alone
     /// clears the visible screen and leaves the whole session in the
