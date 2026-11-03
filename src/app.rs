@@ -1566,25 +1566,35 @@ impl App {
     /// The current model cannot read images; say so once, prompting for switch.
     pub fn explain_no_vision(&mut self) {
         self.pending_vision_prompt = true;
+        let (_, model) = providers::recommended_vision_model(&self.config.llm.provider);
         self.messages.push(Message::new(
             Role::System,
-            "This model can't read images. Switch to deepseek-v4-flash or a vision model? [y/n]",
+            format!("This model can't read images. Switch to {model} or a vision model? [y/n]"),
         ));
     }
 
-    /// Switches the active model to `deepseek-v4-flash` or a vision-capable model
-    /// while keeping staged attachments intact.
+    /// Switches the active model to a vision-capable model while keeping staged
+    /// attachments intact. Managed-proxy and custom endpoints keep their
+    /// provider/endpoint/key; only a known direct provider switches hosts.
     pub fn switch_to_vision_model(&mut self) {
-        let (provider, model) = providers::recommended_vision_model(&self.config.llm.provider);
-        let endpoint = if provider == "deepseek" {
-            "https://api.deepseek.com".to_string()
-        } else if provider == "openai" {
-            "https://api.openai.com".to_string()
-        } else {
-            self.config.llm.endpoint.clone()
+        let (recommended_provider, model) =
+            providers::recommended_vision_model(&self.config.llm.provider);
+        let (provider, endpoint) = match self.config.llm.provider.as_str() {
+            "deepseek" => (
+                recommended_provider.to_string(),
+                "https://api.deepseek.com".to_string(),
+            ),
+            "openai" => (
+                recommended_provider.to_string(),
+                "https://api.openai.com".to_string(),
+            ),
+            _ => (
+                self.config.llm.provider.clone(),
+                self.config.llm.endpoint.clone(),
+            ),
         };
         let api_key = self.config.llm.api_key.clone();
-        self.apply_llm_config(provider.to_string(), endpoint, model.to_string(), api_key);
+        self.apply_llm_config(provider, endpoint, model.to_string(), api_key);
     }
 
     /// Bound to Ctrl+V, Alt+V, or `/paste`: spawns async clipboard reading.
@@ -1766,7 +1776,7 @@ impl App {
             ));
             return true;
         }
-        if image::load_from_memory(&bytes).is_err() && !bytes.starts_with(b"\x89PNG") {
+        if image::load_from_memory(&bytes).is_err() {
             self.messages.push(Message::new(
                 Role::System,
                 format!("{name} is corrupted or not a valid image, so it was not attached."),
@@ -5781,6 +5791,16 @@ mod tests {
     use crate::providers;
     use std::sync::Mutex;
 
+    /// A valid 1x1 transparent PNG. Tests must not use the bare PNG signature
+    /// as a stand-in: the loader correctly rejects a signature with no image body.
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+        0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+        0x9C, 0x63, 0x60, 0x60, 0x60, 0x60, 0x00, 0x00, 0x00, 0x05, 0x00, 0x01, 0xA5, 0xF6,
+        0x45, 0x40, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
     /// Serializes tests that mutate DEEPSEEK_API_KEY -- it's global process
     /// state, so two tests toggling it concurrently would race (mirrors
     /// config::test_support::HOME_LOCK's reasoning for $HOME).
@@ -8690,7 +8710,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("shot.png");
-        std::fs::write(&img, b"\x89PNG").unwrap();
+        std::fs::write(&img, PNG_1X1).unwrap();
         a.handle_paste(img.to_string_lossy().into_owned());
 
         assert_eq!(
@@ -12249,13 +12269,13 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("photo.png");
-        std::fs::write(&img, b"\x89PNG test image").unwrap();
+        std::fs::write(&img, PNG_1X1).unwrap();
         a.run_command(&format!("/image {}", img.display()));
         assert_eq!(a.pending_images.len(), 1);
         assert_eq!(a.input_buffer, "[Image #1] ");
 
         let img2 = dir.path().join("photo2.png");
-        std::fs::write(&img2, b"\x89PNG test image 2").unwrap();
+        std::fs::write(&img2, PNG_1X1).unwrap();
         a.run_command(&format!("/img {}", img2.display()));
         assert_eq!(a.pending_images.len(), 2);
     }
@@ -12264,7 +12284,7 @@ mod tests {
     fn test_parse_image_path_quoted() {
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("photo.png");
-        std::fs::write(&img, b"\x89PNG test image").unwrap();
+        std::fs::write(&img, PNG_1X1).unwrap();
 
         let double_quoted = format!("\"{}\"", img.display());
         assert_eq!(parse_image_path(&double_quoted), Some(img.clone()));
@@ -12279,7 +12299,7 @@ mod tests {
         let sub = dir.path().join("my folder with spaces");
         std::fs::create_dir_all(&sub).unwrap();
         let img = sub.join("my photo.png");
-        std::fs::write(&img, b"\x89PNG test image").unwrap();
+        std::fs::write(&img, PNG_1X1).unwrap();
 
         assert_eq!(parse_image_path(&img.to_string_lossy()), Some(img.clone()));
 
@@ -12291,7 +12311,7 @@ mod tests {
     fn test_parse_image_path_file_url() {
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("url_photo.png");
-        std::fs::write(&img, b"\x89PNG test image").unwrap();
+        std::fs::write(&img, PNG_1X1).unwrap();
 
         let url = format!("file://{}", img.display());
         assert_eq!(parse_image_path(&url), Some(img.clone()));
@@ -12299,7 +12319,7 @@ mod tests {
         let sub = dir.path().join("url spaces");
         std::fs::create_dir_all(&sub).unwrap();
         let img_spaces = sub.join("space photo.png");
-        std::fs::write(&img_spaces, b"\x89PNG test image").unwrap();
+        std::fs::write(&img_spaces, PNG_1X1).unwrap();
 
         let url_encoded = format!("file://{}", img_spaces.to_string_lossy().replace(' ', "%20"));
         assert_eq!(parse_image_path(&url_encoded), Some(img_spaces));
@@ -12338,7 +12358,7 @@ mod tests {
         let mut a = app();
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("dropped.png");
-        std::fs::write(&img, b"\x89PNG dropped image").unwrap();
+        std::fs::write(&img, PNG_1X1).unwrap();
 
         // Dropped image path as entire prompt
         a.input_buffer = img.display().to_string();
@@ -12356,7 +12376,7 @@ mod tests {
         let mut a = app();
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("typed.png");
-        std::fs::write(&img, b"\x89PNG typed image").unwrap();
+        std::fs::write(&img, PNG_1X1).unwrap();
 
         // Dropped or typed path ending with space or quotes converts to chip
         let path_str = format!("{} ", img.display());
@@ -12373,7 +12393,7 @@ mod tests {
         let mut a = app();
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("typed.png");
-        std::fs::write(&img, b"\x89PNG typed image").unwrap();
+        std::fs::write(&img, PNG_1X1).unwrap();
         let bak = dir.path().join("typed.png.bak");
         std::fs::write(&bak, b"backup file").unwrap();
 
@@ -12418,7 +12438,7 @@ mod tests {
 
             let dir = tempfile::tempdir().unwrap();
             let img = dir.path().join("test.png");
-            std::fs::write(&img, b"\x89PNG test image").unwrap();
+            std::fs::write(&img, PNG_1X1).unwrap();
 
             a.attach_image_file(&img, "image/png");
             assert_eq!(a.pending_images.len(), 1);
@@ -12439,7 +12459,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("test.png");
-        std::fs::write(&img, b"\x89PNG test image").unwrap();
+        std::fs::write(&img, PNG_1X1).unwrap();
 
         a.attach_image_file(&img, "image/png");
         assert_eq!(a.pending_images.len(), 1);
@@ -12450,5 +12470,38 @@ mod tests {
         assert_eq!(a.pending_images.len(), 1);
         assert!(!a.pending_vision_prompt);
         assert!(a.messages.iter().any(|m| m.content.contains("Image attachment kept")));
+    }
+
+    #[test]
+    fn vision_switch_keeps_managed_proxy_endpoint_and_key() {
+        with_isolated_home(|| {
+            let mut a = app();
+            a.config.llm.provider = String::new();
+            a.config.llm.endpoint = "https://llm.covexcode.com/v1".to_string();
+            a.config.llm.api_key = "bx-live-test".to_string();
+            a.config.llm.model = "deepseek-v4-pro".to_string();
+
+            a.switch_to_vision_model();
+
+            assert_eq!(a.config.llm.provider, "");
+            assert_eq!(a.config.llm.endpoint, "https://llm.covexcode.com/v1");
+            assert_eq!(a.config.llm.model, "deepseek-v4-flash");
+            assert_eq!(a.config.llm.api_key, "bx-live-test");
+        });
+    }
+
+    #[test]
+    fn png_signature_without_image_body_is_rejected() {
+        let mut a = app();
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("corrupt.png");
+        std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        assert!(a.attach_image_file(&img, "image/png"));
+        assert!(a.pending_images.is_empty());
+        assert!(a
+            .messages
+            .iter()
+            .any(|m| m.content.contains("corrupted or not a valid image")));
     }
 }

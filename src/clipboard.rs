@@ -179,6 +179,9 @@ pub fn read_clipboard_file_list() -> Option<ImageAttachment> {
             }
             if let Ok(bytes) = std::fs::read(&path) {
                 if !bytes.is_empty() {
+                    if image::load_from_memory(&bytes).is_err() {
+                        continue;
+                    }
                     let preferred_mime = match ext.as_str() {
                         "jpg" | "jpeg" => "image/jpeg",
                         "png" => "image/png",
