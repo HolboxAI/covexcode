@@ -1071,6 +1071,8 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let (text, style) = if app.input_buffer.is_empty() {
         let hint = if busy {
             "working… esc to interrupt".to_string()
+        } else if app.clipboard_rx.is_some() {
+            "reading clipboard…".to_string()
         } else if app.mode.is_plan() {
             "Describe the change — you'll get a plan to approve first…".to_string()
         } else {
@@ -1375,6 +1377,16 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             }
             spans.push(Span::styled("  ·  ", theme::faint()));
         }
+    }
+
+    if app.clipboard_rx.is_some() {
+        spans.push(Span::styled(
+            "reading clipboard…",
+            Style::default()
+                .fg(theme::p().accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled("  ·  ", theme::faint()));
     }
 
     // Staged image attachments — a persistent reminder until the next prompt

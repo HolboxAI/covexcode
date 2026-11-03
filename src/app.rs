@@ -1470,11 +1470,6 @@ impl App {
             KeyCode::Esc => {
                 if self.clipboard_rx.is_some() {
                     self.clipboard_rx = None;
-                    if let Some(last) = self.messages.last() {
-                        if last.role == Role::System && last.content == "Reading clipboard…" {
-                            self.messages.pop();
-                        }
-                    }
                 } else if self.interrupt_armed {
                     self.interrupt_armed = false;
                     self.cancel();
@@ -1593,15 +1588,11 @@ impl App {
     }
 
     /// Bound to Ctrl+V, Alt+V, or `/paste`: spawns async clipboard reading.
-    /// Shows "Reading clipboard…" while running so the event loop never blocks.
+    /// Runs in background without blocking the event loop; UI displays reading state reactively.
     pub fn handle_paste_key(&mut self) {
         if self.clipboard_rx.is_some() {
             return;
         }
-        self.messages.push(Message::new(
-            Role::System,
-            "Reading clipboard…",
-        ));
         let (tx, rx) = std::sync::mpsc::channel();
         self.clipboard_rx = Some(rx);
         #[cfg(test)]
@@ -1630,11 +1621,6 @@ impl App {
         match rx.try_recv() {
             Ok(outcome) => {
                 self.clipboard_rx = None;
-                if let Some(last) = self.messages.last() {
-                    if last.role == Role::System && last.content == "Reading clipboard…" {
-                        self.messages.pop();
-                    }
-                }
                 match outcome {
                     ClipboardOutcome::Image(image) => {
                         let bytes = image.data_base64.len() / 4 * 3;
@@ -1671,11 +1657,6 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.clipboard_rx = None;
-                if let Some(last) = self.messages.last() {
-                    if last.role == Role::System && last.content == "Reading clipboard…" {
-                        self.messages.pop();
-                    }
-                }
             }
         }
     }
@@ -1815,11 +1796,6 @@ impl App {
         self.interrupt_armed = false;
         if self.clipboard_rx.is_some() {
             self.clipboard_rx = None;
-            if let Some(last) = self.messages.last() {
-                if last.role == Role::System && last.content == "Reading clipboard…" {
-                    self.messages.pop();
-                }
-            }
         }
         let mut prompt = self.input_buffer.trim().to_string();
         if prompt.is_empty() {
@@ -12193,13 +12169,13 @@ mod tests {
         a.mock_clipboard_outcome = Some(ClipboardOutcome::Empty);
         a.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
         assert_ne!(a.input_buffer, "v");
-        assert!(a.messages.iter().any(|m| m.content.contains("Reading clipboard…")));
+        assert!(a.clipboard_rx.is_some());
 
         let mut a2 = app();
         a2.mock_clipboard_outcome = Some(ClipboardOutcome::Empty);
         a2.handle_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::ALT));
         assert_ne!(a2.input_buffer, "V");
-        assert!(a2.messages.iter().any(|m| m.content.contains("Reading clipboard…")));
+        assert!(a2.clipboard_rx.is_some());
     }
 
     #[test]
@@ -12207,7 +12183,6 @@ mod tests {
         let mut a = app();
         let (tx, rx) = std::sync::mpsc::channel();
         a.clipboard_rx = Some(rx);
-        a.messages.push(Message::new(Role::System, "Reading clipboard…"));
 
         tx.send(ClipboardOutcome::Image(ImageAttachment {
             mime_type: "image/png".to_string(),
@@ -12217,7 +12192,7 @@ mod tests {
         a.check_clipboard_result();
         assert_eq!(a.pending_images.len(), 1);
         assert_eq!(a.input_buffer, "[Image #1] ");
-        assert!(!a.messages.iter().any(|m| m.content == "Reading clipboard…"));
+        assert!(a.clipboard_rx.is_none());
     }
 
     #[test]
@@ -12225,14 +12200,45 @@ mod tests {
         let mut a = app();
         let (tx, rx) = std::sync::mpsc::channel();
         a.clipboard_rx = Some(rx);
-        a.messages.push(Message::new(Role::System, "Reading clipboard…"));
 
         tx.send(ClipboardOutcome::Empty).unwrap();
 
         a.check_clipboard_result();
         assert_eq!(a.pending_images.len(), 0);
         assert!(a.messages.iter().any(|m| m.content.contains("No image in clipboard")));
-        assert!(!a.messages.iter().any(|m| m.content == "Reading clipboard…"));
+        assert!(a.clipboard_rx.is_none());
+    }
+
+    #[test]
+    fn clipboard_paste_does_not_pollute_messages_or_break_scrollback_drain() {
+        let mut a = app();
+        let initial_msg_count = a.messages.len();
+        let initial_flushed = a.flushed;
+
+        a.handle_paste_key();
+        assert_eq!(a.messages.len(), initial_msg_count, "handle_paste_key must not push transient system messages");
+        assert_eq!(a.flushed, initial_flushed);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        a.clipboard_rx = Some(rx);
+        tx.send(ClipboardOutcome::Image(ImageAttachment {
+            mime_type: "image/png".to_string(),
+            data_base64: "aGVsbG8=".to_string(),
+        })).unwrap();
+
+        a.check_clipboard_result();
+        assert_eq!(a.messages.len(), initial_msg_count);
+        assert_eq!(a.flushed, initial_flushed);
+        assert_eq!(a.pending_images.len(), 1);
+        assert_eq!(a.input_buffer, "[Image #1] ");
+
+        a.insert_str("what is in this picture?");
+        a.submit();
+
+        let drainable = a.drainable();
+        assert!(!drainable.is_empty(), "user message must be drainable to scrollback");
+        assert!(matches!(drainable[0].role, Role::User));
+        assert!(drainable[0].content.contains("[Image #1] what is in this picture?"));
     }
 
     #[test]
