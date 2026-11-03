@@ -42,9 +42,11 @@ mod workspace;
 use app::App;
 use config::{ApprovalMode, Config};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+#[cfg(unix)]
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
     LeaveAlternateScreen,
@@ -710,6 +712,8 @@ async fn run_app<B: ratatui::backend::Backend>(
             app.show_hosted(projects);
         }
 
+        app.check_clipboard_result();
+
         // `/hosted` asking the control plane what is still up. Spawned like
         // everything else that touches the network: four requests behind each
         // other's timeouts would freeze the UI for as long as the slowest one.
@@ -1093,6 +1097,7 @@ fn restore_terminal(enhanced: bool, alternate_screen: bool) -> Result<(), Box<dy
     if enhanced {
         let _ = crossterm::execute!(stdout, PopKeyboardEnhancementFlags);
     }
+    #[cfg(unix)]
     crossterm::execute!(stdout, DisableBracketedPaste)?;
     if alternate_screen {
         crossterm::execute!(stdout, LeaveAlternateScreen)?;
