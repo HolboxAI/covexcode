@@ -60,6 +60,7 @@ use ratatui::widgets::Widget;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::error::Error;
 use std::io;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use workspace::Workspace;
@@ -220,40 +221,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(telemetry::ping_active_if_new_day(VERSION));
     login::spawn_heartbeat_loop();
 
-    let enhanced = setup_terminal()?;
-
-    let backend = CrosstermBackend::new(io::stdout());
-    // An inline viewport owns only the bottom strip; everything above it is
-    // ordinary terminal output. `VIEWPORT_ROWS` is fixed because ratatui takes
-    // the inline height at construction -- which is workable precisely because
-    // the approval prompt scrolls inside its own box rather than growing.
-    const VIEWPORT_ROWS: u16 = 12;
-    // Setting up an inline viewport asks the terminal where the cursor is and
-    // waits for the answer. Practically every terminal replies -- it is a far
-    // older and better-supported query than the OSC background one that had to
-    // be removed for hanging -- but "practically every" is not "every", and a
-    // terminal that stays silent must not leave the app unable to start at all.
-    //
-    // So: fall back to the full screen. That loses the scrollback this whole
-    // change exists to provide, which is worth saying out loud rather than
-    // failing silently, but it does start.
-    let (mut terminal, alternate_screen) = match Terminal::with_options(
-        CrosstermBackend::new(io::stdout()),
-        TerminalOptions {
-            viewport: Viewport::Inline(VIEWPORT_ROWS),
-        },
-    ) {
-        Ok(terminal) => (terminal, false),
-        Err(e) => {
-            eprintln!(
-                "Note: this terminal did not report its cursor position ({e}), so session \
-                 history will not go to its scrollback."
-            );
-            crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
-            (Terminal::new(backend)?, true)
-        }
-    };
-    install_panic_hook(enhanced, alternate_screen);
+    // The two modes the app has to be able to undo, kept where the panic hook
+    // and the post-login reattach can both read the current ones -- see
+    // `TerminalModes`.
+    let modes = TerminalModes::new(setup_terminal()?, false);
+    let mut terminal = open_terminal(&modes)?;
+    install_panic_hook(modes.clone());
 
     let mut app = App::new(config);
     if plan {
@@ -398,8 +371,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &mut deploy_rx,
         hosted_tx,
         &mut hosted_rx,
-        enhanced,
-        alternate_screen,
+        &modes,
     )
     .await;
 
@@ -412,10 +384,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // box with text through it. Clearing first, then leaving one blank line,
     // means the shell comes back to a clean row.
     let _ = terminal.clear();
+    let (_, alternate_screen) = modes.get();
     if !alternate_screen {
         println!();
     }
-    restore_terminal(enhanced, alternate_screen)?;
+    restore_terminal(&modes)?;
 
     // Then, on a clean exit, take the conversation off the terminal entirely.
     //
@@ -669,8 +642,11 @@ fn open_workspace(config: &Config, override_root: Option<&str>) -> (Option<Works
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_app<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
+async fn run_app(
+    // Concrete rather than generic: taking the terminal back after a login
+    // means replacing it wholesale, and the replacement is built for this
+    // backend -- see `reattach_terminal`.
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     workspace: Option<&Workspace>,
     session_log: &mut session::SessionLog,
@@ -680,8 +656,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     deploy_rx: &mut mpsc::Receiver<deploy::DeployEvent>,
     hosted_tx: mpsc::Sender<Vec<backend::Mine>>,
     hosted_rx: &mut mpsc::Receiver<Vec<backend::Mine>>,
-    enhanced: bool,
-    alternate_screen: bool,
+    modes: &TerminalModes,
 ) -> Result<(), Box<dyn Error>> {
     loop {
         // Hand finished messages to the terminal before drawing. Once printed
@@ -770,14 +745,18 @@ async fn run_app<B: ratatui::backend::Backend>(
                 // inline rather than spawned: two things cannot own one
                 // terminal, and there is nothing to draw while it is not ours.
                 deploy::DeployAction::RunInteractive { step, command, cwd } => {
-                    restore_terminal(enhanced, alternate_screen)?;
+                    // Erase the band while the terminal is still ours to erase
+                    // cleanly, so the child's output starts below the session
+                    // instead of printed over the composer. Coming back is a
+                    // rebuild, never a `clear()` -- see `reattach_terminal`.
+                    terminal.clear()?;
+                    restore_terminal(modes)?;
                     println!("\n  Handing the terminal to `{}`.", command.program);
                     println!("  Finish signing in here; this app comes back when it is done.\n");
 
                     let output = deploy::runner::run_interactive(&command, &cwd).await;
 
-                    setup_terminal()?;
-                    terminal.clear()?;
+                    *terminal = reattach_terminal(modes)?;
                     app.handle_deploy_event(deploy::DeployEvent::Finished { step, output });
                 }
 
@@ -792,16 +771,21 @@ async fn run_app<B: ratatui::backend::Backend>(
 
         // `/login` needs the real terminal the same way a vendor CLI login
         // does: print progress, open the browser, poll until Authorize.
+        //
+        // The same handoff as the one above, in the same two steps and for the
+        // same reasons: erase the band while it is still ours to erase, then
+        // rebuild rather than clear. See `reattach_terminal` for what clearing
+        // on the way back actually costs.
         if app.login_request {
             app.login_request = false;
-            restore_terminal(enhanced, alternate_screen)?;
+            terminal.clear()?;
+            restore_terminal(modes)?;
             println!();
             let result = match login::login().await {
                 Ok(()) => Ok(()),
                 Err(e) => Err(e.to_string()),
             };
-            setup_terminal()?;
-            terminal.clear()?;
+            *terminal = reattach_terminal(modes)?;
             app.finish_login(result);
         }
 
@@ -1079,6 +1063,120 @@ KEYS:
     );
 }
 
+/// The height of the inline viewport.
+///
+/// At module level because the terminal is now built in two places: at startup,
+/// and again whenever something else has owned the terminal and the TUI takes it
+/// back (see `reattach_terminal`).
+///
+/// An inline viewport owns only the bottom strip; everything above it is ordinary
+/// terminal output. `VIEWPORT_ROWS` is fixed because ratatui takes the inline
+/// height at construction -- which is workable precisely because the approval
+/// prompt scrolls inside its own box rather than growing.
+const VIEWPORT_ROWS: u16 = 12;
+
+/// What the app has to undo when it stops owning the terminal: whether the kitty
+/// keyboard protocol was pushed, and whether the alternate screen was entered.
+///
+/// Shared behind a lock rather than copied into the panic hook because both
+/// values are re-derived when the TUI takes the terminal back after a login, and
+/// the hook -- installed once, at startup -- is still the thing that runs if the
+/// app panics an hour later. A hook holding the startup values would leave a
+/// terminal in raw mode, or on the alternate screen, which is precisely the
+/// failure it exists to prevent.
+#[derive(Clone)]
+struct TerminalModes(Arc<Mutex<(bool, bool)>>);
+
+impl TerminalModes {
+    fn new(enhanced: bool, alternate_screen: bool) -> Self {
+        Self(Arc::new(Mutex::new((enhanced, alternate_screen))))
+    }
+
+    /// `(enhanced, alternate_screen)`.
+    fn get(&self) -> (bool, bool) {
+        // A poisoned lock still holds two bools, and refusing to restore the
+        // terminal over that would be worse than trusting them.
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set(&self, enhanced: bool, alternate_screen: bool) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = (enhanced, alternate_screen);
+    }
+}
+
+/// Build the terminal the TUI draws into: the inline viewport where the terminal
+/// will say where its cursor is, the full screen where it will not.
+///
+/// Setting up an inline viewport asks the terminal for its cursor position and
+/// waits for the answer. Practically every terminal replies -- it is a far older
+/// and better-supported query than the OSC background one that had to be removed
+/// for hanging -- but "practically every" is not "every", and a terminal that
+/// stays silent must not leave the app unable to start, or unable to come back
+/// from a login. So: fall back to the full screen. That loses the scrollback this
+/// whole design exists to provide, which is worth saying out loud rather than
+/// failing silently, but it does work.
+fn open_terminal(
+    modes: &TerminalModes,
+) -> Result<Terminal<CrosstermBackend<io::Stdout>>, Box<dyn Error>> {
+    match Terminal::with_options(
+        CrosstermBackend::new(io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Inline(VIEWPORT_ROWS),
+        },
+    ) {
+        Ok(terminal) => Ok(terminal),
+        Err(e) => {
+            eprintln!(
+                "Note: this terminal did not report its cursor position ({e}), so session \
+                 history will not go to its scrollback."
+            );
+            crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
+            let (enhanced, _) = modes.get();
+            modes.set(enhanced, true);
+            Ok(Terminal::new(CrosstermBackend::new(io::stdout()))?)
+        }
+    }
+}
+
+/// Take the terminal back after something else owned it -- a browser login, a
+/// vendor's own sign-in CLI -- and hand back a `Terminal` that knows where its
+/// viewport actually is.
+///
+/// This is why the handoff rebuilds instead of calling `clear()`, which is what
+/// it used to do. An inline viewport is a strip at a row ratatui remembers, and
+/// it only ever refreshes that row at construction, on `resize()` and in
+/// `insert_before()`. Once foreign output has scrolled the terminal that
+/// remembered row is simply wrong, so `clear()` erases a band that is not where
+/// the UI is -- after which the two disagree for the rest of the session: a
+/// second composer frame, a footer part-way up the screen, and no way back,
+/// because the viewport rect has no public setter. A new `Terminal` asks the
+/// terminal where the cursor is, which is the ground truth `clear()` cannot
+/// recover.
+fn reattach_terminal(
+    modes: &TerminalModes,
+) -> Result<Terminal<CrosstermBackend<io::Stdout>>, Box<dyn Error>> {
+    let (_, alternate_screen) = modes.get();
+    modes.set(setup_terminal()?, alternate_screen);
+    // Before asking the terminal anything: whatever was typed at the browser
+    // while nothing was reading this one is still in the tty buffer, and a stray
+    // escape sequence arriving mid-query can be taken for the query's answer.
+    drain_pending_input();
+    open_terminal(modes)
+}
+
+/// Throw away input that arrived while the TUI was not reading the terminal.
+///
+/// Keys typed at a browser tab, a line nobody meant to send: none of it was
+/// meant for the composer, and letting it replay the moment the app comes back
+/// looks like the app typing on its own.
+fn drain_pending_input() {
+    while event::poll(Duration::ZERO).unwrap_or(false) {
+        if event::read().is_err() {
+            break;
+        }
+    }
+}
+
 /// Returns true if the kitty keyboard protocol was enabled (so it can be popped later).
 fn setup_terminal() -> Result<bool, Box<dyn Error>> {
     enable_raw_mode()?;
@@ -1112,7 +1210,8 @@ fn setup_terminal() -> Result<bool, Box<dyn Error>> {
     Ok(enhanced)
 }
 
-fn restore_terminal(enhanced: bool, alternate_screen: bool) -> Result<(), Box<dyn Error>> {
+fn restore_terminal(modes: &TerminalModes) -> Result<(), Box<dyn Error>> {
+    let (enhanced, alternate_screen) = modes.get();
     let mut stdout = io::stdout();
     if enhanced {
         let _ = crossterm::execute!(stdout, PopKeyboardEnhancementFlags);
@@ -1128,10 +1227,10 @@ fn restore_terminal(enhanced: bool, alternate_screen: bool) -> Result<(), Box<dy
 
 /// Without this a panic leaves the terminal in raw mode, with the backtrace
 /// invisible -- and on the alternate screen too, when that fallback is in use.
-fn install_panic_hook(enhanced: bool, alternate_screen: bool) {
+fn install_panic_hook(modes: TerminalModes) {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = restore_terminal(enhanced, alternate_screen);
+        let _ = restore_terminal(&modes);
         default_hook(info);
     }));
 }

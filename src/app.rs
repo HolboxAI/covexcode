@@ -1016,6 +1016,15 @@ impl App {
     /// slash-autocomplete Enter path and the Ctrl+P palette, so a command added
     /// to `COMMANDS` only needs wiring here once.
     fn run_command(&mut self, cmd: &str) {
+        // The slash menu has no open flag of its own -- it is derived from the
+        // input buffer (`command_menu_active`), so anything left in the buffer
+        // after a command runs keeps it on screen forever: it re-renders every
+        // frame, scrolls into the terminal's history, and the command's own
+        // system lines then appear underneath it. Clearing here rather than at
+        // each call site covers the Ctrl+P palette too, which never cleared it.
+        self.input_buffer.clear();
+        self.cursor = 0;
+        self.command_menu_selected = 0;
         match cmd {
             "/plan" => self.toggle_plan_mode(),
             "/provider" => self.open_provider_picker(),
@@ -1224,9 +1233,6 @@ impl App {
                 if alt || shift {
                     self.insert_str("\n");
                 } else if let Some(cmd) = self.selected_command() {
-                    self.input_buffer.clear();
-                    self.cursor = 0;
-                    self.command_menu_selected = 0;
                     self.run_command(cmd);
                 } else {
                     self.submit();
@@ -7996,6 +8002,37 @@ mod tests {
 
         a.handle_key(key(KeyCode::Esc));
         assert!(a.overlay.is_none(), "Esc closes without running anything");
+    }
+
+    /// The reported bug, reproduced: type `/`, open the palette with Ctrl+P,
+    /// pick a command, Enter. The palette path cleared `overlay` but never the
+    /// input buffer, and the slash menu has no open flag of its own -- it is
+    /// derived from that buffer -- so it stayed "open" after the command ran,
+    /// re-rendering into the terminal's scrollback every frame with the
+    /// command's own system lines printed underneath it.
+    #[test]
+    fn running_a_command_from_the_palette_clears_the_slash_menu() {
+        let mut a = app();
+        type_str(&mut a, "/");
+        assert!(a.command_menu_active(), "a lone slash opens the menu");
+
+        a.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(matches!(a.overlay, Some(Overlay::CommandPalette { .. })));
+
+        // /help runs without opening a picker of its own, so the only lasting
+        // effect is the menu going away.
+        type_str(&mut a, "help");
+        a.handle_key(key(KeyCode::Enter));
+
+        assert!(a.overlay.is_none());
+        assert!(
+            a.input_buffer.is_empty(),
+            "the command should consume the input"
+        );
+        assert!(
+            !a.command_menu_active(),
+            "the slash menu must not survive the command"
+        );
     }
 
     /// Once a space is typed, the "/word" is finished -- what follows is an

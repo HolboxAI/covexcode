@@ -144,6 +144,36 @@ Worth checking by hand, since no test can:
    grep -r "your-test-value" ~/.covexcode/    # must find nothing
    ```
 
+### 3b. Manual `/login` Testing
+
+The browser handover needs a human, but everything around it is checkable by
+hand, and three of those checks have been wrong before:
+
+1. **The slash menu after a command.** Type `/`, press Ctrl+P, pick a command,
+   Enter. The popup must disappear completely — it has no open flag of its own,
+   it is derived from the input buffer, so a buffer left behind re-renders the
+   menu into the scrollback every frame. Covered by
+   `running_a_command_from_the_palette_clears_the_slash_menu`, but worth seeing
+   once in a real terminal, since only the terminal shows scrollback.
+2. **One composer, no gap.** After `/login` finishes, exactly one input box
+   should sit below the transcript. The fixed 12-row viewport leaves empty rows
+   above it by design; the box itself must not be duplicated or clipped.
+3. **The System lines.** "Handing the terminal to the browser…" and "Signed in
+   via covexcode.com" must each be on their own lines with no box characters
+   anywhere in them.
+4. **Widths and resize.** Repeat at 60, 100 and 160 columns. Growing the window
+   mid-login is safe; *shrinking* to roughly 80×24 draws the footer over the
+   composer's bottom border — that predates `/login` and reproduces with no
+   login at all, so do not read it as a handover bug.
+5. **Failure.** Point `COVEXCODE_AUTH_URL` at a closed port and run `/login`: a
+   single `Login failed: …` line, no popup, no clipped box.
+
+A throwaway device-flow stub makes all of this repeatable without a network:
+serve `/api/auth/device/start`, `/poll` and `/heartbeat` on `127.0.0.1`, then
+run with `COVEXCODE_AUTH_URL=http://127.0.0.1:<port>` and a scratch `HOME`.
+Use a threaded HTTP server — a single-threaded one keeps the browser's
+keep-alive connection open and every later request hangs.
+
 ## CI/CD Tests
 GitHub Actions runs:
 - `cargo build --release` - Compilation

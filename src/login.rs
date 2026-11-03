@@ -4,9 +4,29 @@ use crate::config::Config;
 use serde::Deserialize;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
 const DEFAULT_AUTH_BASE: &str = "https://covexcode.com";
+
+/// How long any one request may take.
+///
+/// Bounded on purpose: the TUI stands down for the whole of `login()` -- raw
+/// mode off, nothing drawn, nothing reading the keyboard -- so a request that
+/// never answers leaves the user in a terminal that looks hung, with the only
+/// way out being to kill the process.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the device-code wait may last in total.
+///
+/// The code expires server-side and says so (see the `GONE` and `expired`
+/// answers in `login()`), but a server that goes quiet must not hold the
+/// terminal hostage either way.
+const MAX_WAIT: Duration = Duration::from_secs(300);
+
+fn http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build()
+}
 
 fn is_promo_proxy(endpoint: &str) -> bool {
     let e = endpoint.to_lowercase();
@@ -147,26 +167,59 @@ struct PollResponse {
     error: Option<String>,
 }
 
-fn open_browser(url: &str) {
+/// The command that hands `url` to the desktop's default browser, or `None` on
+/// a platform with no such convention.
+fn browser_command(url: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(url).status();
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg(url);
+        Some(cmd)
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open").arg(url).status();
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(url);
+        Some(cmd)
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .status();
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", "", url]);
+        Some(cmd)
     }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = url;
+        None
+    }
+}
+
+/// Open the browser, without letting it near this terminal.
+///
+/// Detached, not waited on: `open` blocks until the handler exits on some
+/// systems, and this is called from the event loop while the whole UI is stood
+/// down. Both streams go to `/dev/null` -- inherited ones would print the
+/// browser's own chatter into a terminal this app is about to redraw on, which
+/// is half of what made `/login` leave a mess behind.
+fn open_browser(url: &str) {
+    let Some(mut command) = browser_command(url) else {
+        return;
+    };
+    // Reaped on its own thread so a handler that keeps running does not leave a
+    // zombie for the rest of the session.
+    if let Ok(mut child) = command.stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+    // A browser that will not open is not worth failing the login over: the URL
+    // is printed above, so the worst case is opening it by hand.
 }
 
 pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
     let base = auth_base();
-    let client = reqwest::Client::new();
+    let client = http_client()?;
 
     let start: StartResponse = client
         .post(format!("{base}/api/auth/device/start"))
@@ -191,7 +244,15 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
     open_browser(&verify);
 
     let interval = Duration::from_secs(start.interval.unwrap_or(2).max(1));
+    // Bounded even though the code itself expires: see `MAX_WAIT`.
+    let deadline = tokio::time::Instant::now() + MAX_WAIT;
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            println!();
+            return Err(
+                "timed out waiting for the browser to authorize -- run /login again".into(),
+            );
+        }
         tokio::time::sleep(interval).await;
         print!(".");
         let _ = io::stdout().flush();
@@ -306,7 +367,9 @@ pub async fn heartbeat_once() {
         return;
     }
     let base = auth_base();
-    let client = reqwest::Client::new();
+    let Ok(client) = http_client() else {
+        return;
+    };
     let _ = client
         .post(format!("{base}/api/heartbeat"))
         .bearer_auth(token)
