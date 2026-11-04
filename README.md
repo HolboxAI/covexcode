@@ -67,6 +67,11 @@ cargo build --release --no-default-features --bin covexcode-agent
 ./target/release/covexcode-agent --acp
 ```
 
+`--listen [ADDR]` serves the same protocol over TCP for local clients
+(default `127.0.0.1:7422`). Each connection gets its own session set. The
+address must be loopback: this process can run shell commands, and the
+transport has no authentication.
+
 It also supports `--version` and `--providers-json` for the IDE's doctor and
 provider picker. Set `COVEXCODE_CONFIG_DIR` to isolate its config, sessions,
 and artifacts from the terminal client.

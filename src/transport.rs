@@ -46,7 +46,7 @@ use crate::protocol::{
 use crate::workspace::Workspace;
 use serde_json::json;
 use std::collections::HashMap;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 /// One incoming line, classified. ACP's own JSON-RPC envelope doesn't carry
@@ -697,9 +697,23 @@ impl Router {
 /// closes. Selected by `main.rs` via `covexcode --acp`, mutually exclusive
 /// with the normal TUI (this never touches a terminal, only pipes).
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let stdin = tokio::io::stdin();
-    let mut lines = BufReader::new(stdin).lines();
-    let mut stdout = tokio::io::stdout();
+    run_stream(config, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+/// The ACP loop over any byte stream. `run` is the stdio instantiation;
+/// a TCP daemon or an in-process test can drive the identical protocol
+/// without touching stdin/stdout.
+pub async fn run_stream<R, W>(
+    config: Config,
+    reader: R,
+    writer: W,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut lines = BufReader::new(reader).lines();
+    let mut writer = writer;
 
     let (outgoing_tx, mut outgoing_in) = mpsc::channel::<Outgoing>(256);
     let mut router = Router::new(config, outgoing_tx);
@@ -707,7 +721,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             line = lines.next_line() => {
-                let Some(line) = line? else { break }; // stdin closed
+                let Some(line) = line? else { break }; // stream closed
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -716,8 +730,8 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => continue, // malformed line, not this process's job to crash over
                 };
                 if let Some(out) = router.handle(classify(&value)).await {
-                    stdout.write_all(out.as_bytes()).await?;
-                    stdout.flush().await?;
+                    writer.write_all(out.as_bytes()).await?;
+                    writer.flush().await?;
                 }
             }
             Some(outgoing) = outgoing_in.recv() => {
@@ -730,16 +744,43 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                     .to_ndjson_line(),
                     Outgoing::Line(line) => line,
                 };
-                stdout.write_all(line.as_bytes()).await?;
-                stdout.flush().await?;
+                writer.write_all(line.as_bytes()).await?;
+                writer.flush().await?;
             }
             Some(out) = router.next_outgoing_client_request() => {
-                stdout.write_all(out.as_bytes()).await?;
-                stdout.flush().await?;
+                writer.write_all(out.as_bytes()).await?;
+                writer.flush().await?;
             }
         }
     }
     Ok(())
+}
+
+/// Serve ACP over TCP on `addr`, one [`Router`] and one session set per
+/// connection. Refuses a non-loopback bind: this process can run shell
+/// commands and there is no transport authentication yet, so it must not be
+/// reachable from the network.
+pub async fn serve(config: Config, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local = listener.local_addr()?;
+    if !local.ip().is_loopback() {
+        return Err(format!(
+            "refusing to listen on {local}: the agent can run commands and this build has no \
+             transport authentication. Bind a loopback address instead."
+        )
+        .into());
+    }
+    eprintln!("covexcode-agent: listening on {local}");
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let config = config.clone();
+        tokio::spawn(async move {
+            let (reader, writer) = stream.into_split();
+            if let Err(error) = run_stream(config, reader, writer).await {
+                eprintln!("covexcode-agent: connection ended: {error}");
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1281,5 +1322,78 @@ mod tests {
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
             "hi\n"
         );
+    }
+
+    /// The listen-mode seam in one test: the same ACP loop runs over any
+    /// async byte stream, not just stdin/stdout. A daemon connection and a
+    /// real client are exactly this shape.
+    #[tokio::test]
+    async fn run_stream_serves_acp_over_any_byte_stream() {
+        use tokio::io::{duplex, AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (client, server) = duplex(1 << 16);
+        let (server_read, server_write) = tokio::io::split(server);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = Config::default();
+        // `Box<dyn Error>` is not `Send`, so map it to a string before the
+        // result crosses the task boundary.
+        let server = tokio::spawn(async move {
+            run_stream(config, server_read, server_write)
+                .await
+                .map_err(|error| error.to_string())
+        });
+
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut lines = BufReader::new(client_read).lines();
+        client_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": { "protocolVersion": 1 }
+                    })
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write initialize");
+        let response = lines.next_line().await.expect("read").expect("a line");
+        let value: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+        assert_eq!(value["id"], 1);
+        assert_eq!(value["result"]["protocolVersion"], 1);
+
+        client_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({
+                        "jsonrpc": "2.0", "id": 2, "method": "session/new",
+                        "params": { "cwd": dir.path().display().to_string(), "mcpServers": [] }
+                    })
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write session/new");
+        let response = lines.next_line().await.expect("read").expect("a line");
+        let value: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+        assert_eq!(value["id"], 2);
+        assert_eq!(value["result"]["sessionId"], "sess_1");
+
+        // `tokio::io::split` keeps the underlying stream alive until *both*
+        // halves drop, so dropping the write half alone would leave the
+        // server's `next_line` waiting forever. Shut the write direction down
+        // explicitly so it observes EOF.
+        client_write
+            .shutdown()
+            .await
+            .expect("shut the client write half");
+        drop(client_write);
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("the server must observe EOF promptly")
+            .expect("server task")
+            .expect("the stream loop ends cleanly on EOF");
     }
 }

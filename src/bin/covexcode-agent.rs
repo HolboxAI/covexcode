@@ -6,7 +6,8 @@
 //!
 //! This binary deliberately shares the protocol, session, tool, and LLM
 //! modules with the terminal client, but omits the TUI, login/logout, and
-//! self-update command surface. It speaks ACP over stdio and nothing else.
+//! self-update command surface. It speaks ACP over stdio by default, or over
+//! loopback TCP with `--listen` for local multi-connection clients.
 
 #[path = "../approval.rs"]
 mod approval;
@@ -86,14 +87,19 @@ fn print_help() {
     println!("covexcode-agent {VERSION}");
     println!();
     println!("ACP (Agent Client Protocol) runtime bundled with Covexcode IDE.");
-    println!("It reads and writes ndjson on stdio; there is no interactive UI.");
+    println!("By default it reads and writes ndjson on stdio; --listen serves the");
+    println!("same protocol over TCP for local clients, one session set per connection.");
     println!();
-    println!("Usage: covexcode-agent [--acp] [--providers-json] [--version]");
+    println!("Usage: covexcode-agent [--acp] [--listen [ADDR]] [--providers-json] [--version]");
+    println!();
+    println!("  --listen [ADDR]  Serve ACP over TCP (default 127.0.0.1:7422, loopback only)");
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    for arg in std::env::args().skip(1) {
+    let mut listen: Option<String> = None;
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "-V" | "--version" => {
                 // Keep the same shape as the CLI: the IDE's doctor parses it.
@@ -113,6 +119,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Ok(());
             }
             "--acp" => {}
+            "--listen" => {
+                // Peek rather than consume: `--listen --providers-json` must
+                // keep its second flag, not swallow it as an address.
+                let addr = match args.peek() {
+                    Some(next) if !next.starts_with('-') => args.next().unwrap(),
+                    _ => "127.0.0.1:7422".to_string(),
+                };
+                listen = Some(addr);
+            }
             other => {
                 eprintln!("Unknown argument: {other}\n");
                 print_help();
@@ -121,9 +136,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // ACP is the default and only mode. `--acp` is accepted so the IDE can
-    // keep launching both this binary and the terminal CLI with the same
-    // argument list.
+    // ACP is the default mode. `--acp` is accepted so the IDE can keep
+    // launching both this binary and the terminal CLI with the same argument
+    // list. `--listen` swaps the stdio transport for a loopback TCP server.
     let config = config::Config::load()?;
-    transport::run(config).await
+    match listen {
+        Some(addr) => transport::serve(config, &addr).await,
+        None => transport::run(config).await,
+    }
 }

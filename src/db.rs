@@ -297,7 +297,13 @@ mod tests {
             .expect("canonicalize")
             .to_string_lossy()
             .into_owned();
-        let registry_path = fake_home.join(".boxcode").join("artifacts.json");
+        // Write the current config directory directly. This used to write
+        // `.boxcode` and rely on `Config::config_dir`'s legacy adoption to
+        // move it, but that adoption can run on another test's thread while
+        // this one holds `HOME_LOCK` -- and then `write` lands on a path that
+        // was renamed out from under it ("write registry: No such file or
+        // directory").
+        let registry_path = fake_home.join(".covexcode").join("artifacts.json");
         std::fs::create_dir_all(registry_path.parent().unwrap()).expect("mkdir");
         let published_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
