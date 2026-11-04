@@ -165,6 +165,12 @@ pub enum SessionEvent {
         session_id: SessionId,
         turn: TurnId,
     },
+    /// The session's coarse lifecycle state changed. A client can render
+    /// "working" / "waiting for you" without inferring it from turn events.
+    StatusChanged {
+        session_id: SessionId,
+        status: SessionStatus,
+    },
     TextDelta {
         session_id: SessionId,
         turn: TurnId,
@@ -251,6 +257,18 @@ mod tests {
         };
         let json = serde_json::to_string(&finished).unwrap();
         assert!(json.contains("\"reason\":\"end_turn\""), "{json}");
+
+        let waiting = SessionEvent::StatusChanged {
+            session_id: SessionId::new("sess_1"),
+            status: SessionStatus::WaitingForApproval,
+        };
+        let json = serde_json::to_string(&waiting).unwrap();
+        assert!(json.contains("\"type\":\"status_changed\""), "{json}");
+        assert!(
+            json.contains("\"status\":\"waiting_for_approval\""),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), waiting);
     }
 
     #[test]
