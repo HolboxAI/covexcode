@@ -13,6 +13,7 @@ mod dateutil;
 mod db;
 mod deploy;
 mod diff;
+mod domain;
 mod errors;
 mod headless;
 mod history;

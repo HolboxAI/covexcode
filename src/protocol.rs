@@ -248,8 +248,10 @@ pub struct Implementation {
 // session/new
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SessionId(pub String);
+// The identity is a domain concept, not part of the wire format. Re-export it
+// here so every ACP type and existing `protocol::SessionId` construction keeps
+// working unchanged.
+pub use crate::domain::SessionId;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NewSessionRequest {
