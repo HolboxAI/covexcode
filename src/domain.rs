@@ -127,6 +127,43 @@ pub enum Isolation {
     Worktree,
 }
 
+/// Why a turn ended, independent of the ACP wire enum. The engine emits this
+/// to every client; the ACP adapter maps it back to `StopReason`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStopReason {
+    EndTurn,
+    MaxTokens,
+    MaxTurnRequests,
+    Refusal,
+    Cancelled,
+}
+
+/// Transport-agnostic output from a session engine.
+///
+/// The ACP path continues to emit its own `SessionUpdate` stream; this is the
+/// stream a TUI, daemon, or orchestration client can consume without speaking
+/// ACP. It starts with the turn/text spine; tool and approval events are
+/// added when the engine loop moves behind this boundary.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionEvent {
+    TurnStarted {
+        session_id: SessionId,
+        turn: TurnId,
+    },
+    TextDelta {
+        session_id: SessionId,
+        turn: TurnId,
+        text: String,
+    },
+    TurnFinished {
+        session_id: SessionId,
+        turn: TurnId,
+        reason: TurnStopReason,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +193,26 @@ mod tests {
             "7",
             "TurnId is a number on the wire"
         );
+    }
+
+    #[test]
+    fn session_events_carry_their_envelope_and_round_trip() {
+        let event = SessionEvent::TextDelta {
+            session_id: SessionId::new("sess_1"),
+            turn: TurnId::new(2),
+            text: "hello".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"text_delta\""), "{json}");
+        assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), event);
+
+        let finished = SessionEvent::TurnFinished {
+            session_id: SessionId::new("sess_1"),
+            turn: TurnId::new(2),
+            reason: TurnStopReason::EndTurn,
+        };
+        let json = serde_json::to_string(&finished).unwrap();
+        assert!(json.contains("\"reason\":\"end_turn\""), "{json}");
     }
 
     #[test]
