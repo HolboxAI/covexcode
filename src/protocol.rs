@@ -347,10 +347,9 @@ pub enum StopReason {
 // session/cancel
 // ---------------------------------------------------------------------------
 
-// Defined for the ACP wire surface but not yet sent: covexcode cancels a turn
-// in-process rather than announcing it, so no `session/cancel` is emitted. The
-// type is kept to match the spec until a client asks for the path.
-#[allow(dead_code)]
+// Inbound only: covexcode stops a turn in-process and does not emit this
+// notification itself, but it accepts `session/cancel` from a client and
+// routes it to the matching session's `CancelHandle`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CancelNotification {
     #[serde(rename = "sessionId")]

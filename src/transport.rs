@@ -32,7 +32,7 @@
 
 use crate::config::Config;
 use crate::headless::{
-    BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult,
+    BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult, CancelHandle,
     HeadlessSession, PermissionAsk,
 };
 use crate::protocol::{
@@ -259,6 +259,9 @@ impl SessionActor {
 /// explicit type (and table) per real use.
 struct Router {
     sessions: HashMap<SessionId, mpsc::Sender<SessionMsg>>,
+    /// Cancellation is signaled directly, not through the session actor: the
+    /// actor is busy awaiting the very prompt that needs to stop.
+    cancels: HashMap<SessionId, CancelHandle>,
     pending_permission_responses: HashMap<RequestId, oneshot::Sender<RequestPermissionOutcome>>,
     pending_browser_responses: HashMap<RequestId, oneshot::Sender<BrowserCheckResult>>,
     pending_browser_interact_responses: HashMap<RequestId, oneshot::Sender<BrowserInteractResult>>,
@@ -283,6 +286,7 @@ impl Router {
         let (browser_interact_relay_tx, browser_interact_relay_in) = mpsc::channel(64);
         Self {
             sessions: HashMap::new(),
+            cancels: HashMap::new(),
             pending_permission_responses: HashMap::new(),
             pending_browser_responses: HashMap::new(),
             pending_browser_interact_responses: HashMap::new(),
@@ -332,12 +336,16 @@ impl Router {
             }
             Incoming::Notification { method, params } => {
                 if method == "session/cancel" {
-                    // v1 has no cancellation plumbing into HeadlessSession
-                    // yet (see headless.rs's own module docs: no
-                    // compaction, no plan mode -- cancellation is the same
-                    // class of not-yet-built as those). Accepted and
-                    // acknowledged as received, not silently unparsed.
-                    let _ = params;
+                    // Signal the live turn directly. The actor is awaiting
+                    // `prompt`, so a queued SessionMsg::Cancel would not be
+                    // seen until the work it needs to stop had finished.
+                    if let Ok(notification) =
+                        serde_json::from_value::<crate::protocol::CancelNotification>(params)
+                    {
+                        if let Some(cancel) = self.cancels.get(&notification.session_id) {
+                            cancel.cancel();
+                        }
+                    }
                 }
                 None
             }
@@ -435,6 +443,7 @@ impl Router {
                 let session_id = SessionId(format!("sess_{}", self.sessions.len() + 1));
                 let session =
                     HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
+                let cancel = session.cancel_handle();
                 let handle = SessionActor::spawn(
                     session,
                     self.outgoing_tx.clone(),
@@ -445,6 +454,7 @@ impl Router {
                     session_id.clone(),
                 );
                 self.sessions.insert(session_id.clone(), handle);
+                self.cancels.insert(session_id.clone(), cancel);
 
                 // Configs are validated here; the handshake itself happens in
                 // SessionActor::spawn, which calls session.connect_mcp() off the
@@ -976,6 +986,99 @@ mod tests {
         assert_eq!(final_value["id"], 3);
         assert_eq!(final_value["result"]["stopReason"], "end_turn");
         assert_eq!(final_value["result"]["turn"], 1);
+    }
+
+    /// `session/cancel` must reach the session that owns the live turn, not
+    /// just be accepted by the router. The actor is awaiting the prompt, so a
+    /// queued message could never be read; the router signals the engine's
+    /// cancel handle directly. The server reports when the request is
+    /// actually in flight, so this cannot race the prompt's start.
+    #[tokio::test]
+    async fn session_cancel_stops_a_prompt_through_the_router() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let (in_flight_tx, in_flight_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let _ = in_flight_tx.send(());
+            // Hold the response past the test's timeout: only cancellation
+            // can finish this turn in time.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+                      data: {\"choices\":[{\"delta\":{\"content\":\"too late\"}}]}\n\ndata: [DONE]\n\n",
+                )
+                .await;
+            let _ = socket.shutdown().await;
+        });
+
+        let mut config = Config::default();
+        config.llm.endpoint = format!("http://{addr}");
+        config.llm.model = "test-model".to_string();
+        config.llm.api_key = "sk-test".to_string();
+
+        let (outgoing_tx, mut outgoing_in) = mpsc::channel(64);
+        let mut router = Router::new(config, outgoing_tx);
+
+        router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": 1 }
+            })))
+            .await;
+        router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "session/new",
+                "params": { "cwd": dir.path().display().to_string(), "mcpServers": [] }
+            })))
+            .await;
+        let prompt_ack = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                "params": { "sessionId": "sess_1", "prompt": [{ "type": "text", "text": "hello" }] }
+            })))
+            .await;
+        assert_eq!(prompt_ack, None);
+
+        tokio::time::timeout(Duration::from_secs(5), in_flight_rx)
+            .await
+            .expect("the model request must reach the endpoint")
+            .expect("the server signals when the request is in flight");
+
+        let cancel_ack = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "method": "session/cancel",
+                "params": { "sessionId": "sess_1" }
+            })))
+            .await;
+        assert_eq!(cancel_ack, None, "a notification never produces a line");
+
+        let final_line = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match outgoing_in
+                    .recv()
+                    .await
+                    .expect("the deferred response arrives")
+                {
+                    Outgoing::Line(line) => break line,
+                    Outgoing::Update(_) => continue,
+                }
+            }
+        })
+        .await
+        .expect("cancel must end the turn promptly");
+        let final_value: serde_json::Value =
+            serde_json::from_str(final_line.trim()).expect("valid JSON line");
+        assert_eq!(final_value["id"], 3);
+        assert_eq!(final_value["result"]["stopReason"], "cancelled");
     }
 
     /// The other half of `next_outgoing_client_request`: proves the merged
