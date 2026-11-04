@@ -1120,6 +1120,36 @@ impl HeadlessSession {
                 continue;
             }
 
+            // Independent read-only research tasks: run a contiguous run of
+            // auto-approved `agent` calls concurrently. Inline-edit mode
+            // already refused them above, and plan mode allows them. Judging
+            // each call with the same `verdict_for` as the one-at-a-time path
+            // means a future policy that asks for an agent call still gets
+            // its prompt instead of being silently batched past.
+            if matches!(&verdict, Verdict::AutoApprove) && calls[i].function.name == tools::AGENT {
+                let start = i;
+                i += 1;
+                while i < calls.len()
+                    && calls[i].function.name == tools::AGENT
+                    && matches!(
+                        verdict_for(
+                            &calls[i],
+                            Path::new(self.workspace.root()),
+                            self.mode,
+                            self.config.tools.approval,
+                        ),
+                        Verdict::AutoApprove
+                    )
+                {
+                    i += 1;
+                }
+                let contents = self.run_agent_batch(&calls[start..i], updates).await;
+                for (call, content) in calls[start..i].iter().zip(contents) {
+                    results.push((call.id.clone(), content, Vec::new()));
+                }
+                continue;
+            }
+
             let call = &calls[i];
             i += 1;
 
@@ -1214,34 +1244,56 @@ impl HeadlessSession {
     /// gets the same `explore` guarantees: the child is offered only
     /// `subagent_schemas()`, every call is re-checked against
     /// `subagent_call_allowed`, and only its final report comes back.
-    async fn run_agent_call(&mut self, call: &ToolCall, updates: &UpdateSink<'_>) -> String {
-        let title = tools::describe_action(call)
-            .map(|a| a.label())
-            .unwrap_or_else(|| call.function.name.clone());
-        let _ = updates
-            .send(SessionUpdate::ToolCall(AcpToolCall {
-                tool_call_id: ToolCallId(call.id.clone()),
-                title,
-                kind: ToolKind::Other,
-                status: ToolCallStatus::InProgress,
-            }))
-            .await;
-        let mut outcome = crate::subagent::run_subagent(
-            call,
-            &self.workspace,
-            &self.config,
-            // No per-call activity stream in this engine yet; the client sees
-            // the call start and the final report.
-            None,
-        )
-        .await;
-        if let Some(record) = outcome.rollback.take() {
-            self.rollback.record_turn(record, self.turn);
+    async fn run_agent_call(&self, call: &ToolCall, updates: &UpdateSink<'_>) -> String {
+        self.run_agent_batch(std::slice::from_ref(call), updates)
+            .await
+            .pop()
+            .unwrap_or_default()
+    }
+
+    /// Run read-only `agent` calls concurrently, up to the configured
+    /// `subagent_concurrency`, and report every call before and after it runs.
+    /// Results come back in call order, so the transcript does not change.
+    async fn run_agent_batch(&self, calls: &[ToolCall], updates: &UpdateSink<'_>) -> Vec<String> {
+        for call in calls {
+            let title = tools::describe_action(call)
+                .map(|a| a.label())
+                .unwrap_or_else(|| call.function.name.clone());
+            let _ = updates
+                .send(SessionUpdate::ToolCall(AcpToolCall {
+                    tool_call_id: ToolCallId(call.id.clone()),
+                    title,
+                    kind: ToolKind::Other,
+                    status: ToolCallStatus::InProgress,
+                }))
+                .await;
         }
-        let _ = updates
-            .send(SessionUpdate::ToolCallUpdate((&outcome).into()))
-            .await;
-        outcome.content
+        let concurrency = self.config.tools.subagent_concurrency;
+        let cap = if concurrency == 0 {
+            calls.len()
+        } else {
+            concurrency
+        };
+        let mut contents = Vec::with_capacity(calls.len());
+        for chunk in calls.chunks(cap.max(1)) {
+            let futures = chunk.iter().map(|call| {
+                let call = call.clone();
+                let workspace = self.workspace.clone();
+                let config = self.config.clone();
+                async move {
+                    // No per-call activity stream in this engine yet; the
+                    // client sees the call start and the final report.
+                    crate::subagent::run_subagent(&call, &workspace, &config, None).await
+                }
+            });
+            for outcome in futures::future::join_all(futures).await {
+                let _ = updates
+                    .send(SessionUpdate::ToolCallUpdate((&outcome).into()))
+                    .await;
+                contents.push(outcome.content);
+            }
+        }
+        contents
     }
 
     /// `write_file`/`edit_file` in inline-edit mode: compute the before/after
@@ -1942,6 +1994,22 @@ mod tests {
         ))
     }
 
+    /// One response asking for two tool calls at once.
+    fn two_tool_call_round(first: (&str, &str), second: (&str, &str)) -> String {
+        let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        sse(&format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[\
+             {{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":\
+             {{\"name\":\"{}\",\"arguments\":\"{}\"}}}},\
+             {{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":\
+             {{\"name\":\"{}\",\"arguments\":\"{}\"}}}}]}}}}]}}\n\ndata: [DONE]\n\n",
+            first.0,
+            escape(first.1),
+            second.0,
+            escape(second.1)
+        ))
+    }
+
     async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -2162,6 +2230,58 @@ mod tests {
                 ..
             } if tool_call_id == "call_1"
         )));
+    }
+
+    /// Two independent agent calls in one response both run, and both
+    /// reports reach the parent in call order.
+    #[tokio::test]
+    async fn sibling_agent_calls_in_one_response_all_run() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![
+            two_tool_call_round(
+                (tools::AGENT, r#"{"task":"one","agent_type":"explore"}"#),
+                (tools::AGENT, r#"{"task":"two","agent_type":"explore"}"#),
+            ),
+            text_round("report one"),
+            text_round("report two"),
+            text_round("done"),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "research both".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let mut reports = Vec::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::ToolCallUpdate(update) = update {
+                if let Some(ToolCallContent::Text { text }) = update.content {
+                    if text.starts_with("report ") {
+                        reports.push(text);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            reports,
+            vec!["report one".to_string(), "report two".to_string()],
+            "every child must report, in call order"
+        );
     }
 
     /// The ACP engine used to answer an `agent` call with "not supported".
