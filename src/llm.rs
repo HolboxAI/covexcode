@@ -2,6 +2,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -481,6 +482,26 @@ pub struct Target<'a> {
     pub temperature: Option<f32>,
 }
 
+/// One pooled HTTP client for every model request.
+///
+/// A `reqwest::Client` owns its connection pool and TLS sessions. Building one
+/// per request threw both away on every round, which is especially costly for
+/// a multi-round turn or a fan-out of subagents hitting the same endpoint.
+/// The client itself is cheap to share; per-request timeouts and the retry
+/// policy remain in `run`.
+fn http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .build()
+                .map_err(|e| format!("Could not create HTTP client: {e}"))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
 pub async fn stream_chat(
     target: Target<'_>,
     messages: Vec<ChatMessage>,
@@ -545,10 +566,7 @@ async fn run(
         temperature,
     };
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("Could not create HTTP client: {e}"))?;
+    let client = http_client()?;
 
     let primary_url = chat_completions_url(endpoint);
     let legacy_url = legacy_proxy_url(&primary_url);
@@ -2210,6 +2228,16 @@ mod tests {
             }
             other => panic!("expected an Error event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_http_client_is_reused_across_requests() {
+        let first = http_client().expect("the shared client builds");
+        let second = http_client().expect("the shared client builds");
+        assert!(
+            std::ptr::eq(first, second),
+            "every model request must share one connection pool"
+        );
     }
 
     /// Retries are bounded: a rate limit that never clears still ends in the
