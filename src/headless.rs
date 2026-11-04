@@ -33,6 +33,7 @@
 
 use crate::approval::{verdict_for, Decision, Verdict};
 use crate::config::Config;
+use crate::domain::{SessionEvent, TurnId, TurnStopReason};
 use crate::llm::{self, ApiUsage, ChatMessage, StreamEvent, Target, ToolCall};
 use crate::protocol::{
     AcpToolCall, ChangeEntry, ContentBlock, DiffHunk, DiffHunkLine, DiffLineChange,
@@ -218,6 +219,10 @@ pub struct HeadlessSession {
     /// `decide_and_run`/`ask_permission`'s own calls to `.record(...)`) --
     /// not a parallel reimplementation, the same mechanism reused.
     rollback: crate::rollback::Journal,
+    /// Optional transport-agnostic event stream. The ACP transport leaves this
+    /// unset and keeps using `SessionUpdate`; a TUI/daemon client can subscribe
+    /// without changing the ACP path.
+    events: Option<mpsc::UnboundedSender<SessionEvent>>,
 }
 
 impl HeadlessSession {
@@ -236,7 +241,45 @@ impl HeadlessSession {
             last_prompt_tokens: None,
             rollback: crate::rollback::Journal::default(),
             mcp: crate::mcp::McpRegistry::default(),
+            events: None,
         }
+    }
+
+    /// Attach the transport-agnostic event sink. ACP does not use it; this is
+    /// the seam the TUI/daemon client will consume instead of ACP types.
+    pub fn set_event_sink(&mut self, tx: mpsc::UnboundedSender<SessionEvent>) {
+        self.events = Some(tx);
+    }
+
+    fn emit(&self, event: SessionEvent) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(event);
+        }
+    }
+
+    fn emit_text(&self, turn: TurnId, text: &str) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(SessionEvent::TextDelta {
+                session_id: self.session_id.clone(),
+                turn,
+                text: text.to_string(),
+            });
+        }
+    }
+
+    fn finish_turn(&self, reason: StopReason) -> StopReason {
+        self.emit(SessionEvent::TurnFinished {
+            session_id: self.session_id.clone(),
+            turn: TurnId::new(self.turn),
+            reason: match &reason {
+                StopReason::EndTurn => TurnStopReason::EndTurn,
+                StopReason::MaxTokens => TurnStopReason::MaxTokens,
+                StopReason::MaxTurnRequests => TurnStopReason::MaxTurnRequests,
+                StopReason::Refusal => TurnStopReason::Refusal,
+                StopReason::Cancelled => TurnStopReason::Cancelled,
+            },
+        });
+        reason
     }
 
     /// Connects this session's MCP servers and caches what they advertise.
@@ -295,6 +338,10 @@ impl HeadlessSession {
         // first prompt maps to "turn 1". The rollback journal records files
         // against this value (see `record_turn` below).
         self.turn += 1;
+        self.emit(SessionEvent::TurnStarted {
+            session_id: self.session_id.clone(),
+            turn: TurnId::new(self.turn),
+        });
         // The step budget is *per turn*, not per session: without this reset a
         // long-lived ACP session would accumulate tool rounds across turns and
         // eventually withhold the schemas on every later turn, permanently
@@ -353,7 +400,7 @@ impl HeadlessSession {
                     message_id: None,
                 })
                 .await;
-            return StopReason::Refusal;
+            return self.finish_turn(StopReason::Refusal);
         }
 
         // One rescue per turn. If the summary itself cannot fit, or the retry
@@ -404,7 +451,7 @@ impl HeadlessSession {
                     // Same moment as the TUI: only after an ordinary completed
                     // turn, never after a failure or a compaction itself.
                     self.maybe_auto_compact(updates).await;
-                    return StopReason::EndTurn;
+                    return self.finish_turn(StopReason::EndTurn);
                 }
                 RoundOutcome::Error(message) => {
                     // A request refused by the context guard is recoverable
@@ -430,7 +477,7 @@ impl HeadlessSession {
                             message_id: None,
                         })
                         .await;
-                    return StopReason::Refusal;
+                    return self.finish_turn(StopReason::Refusal);
                 }
                 RoundOutcome::ToolCalls(calls) => {
                     self.tool_steps += 1;
@@ -494,7 +541,7 @@ impl HeadlessSession {
                         }
                     }
                     if !budget_left {
-                        return StopReason::MaxTurnRequests;
+                        return self.finish_turn(StopReason::MaxTurnRequests);
                     }
                     // Loop again: the model gets to react to what just ran.
                 }
@@ -672,6 +719,7 @@ impl HeadlessSession {
         schemas: Vec<serde_json::Value>,
         updates: &mpsc::Sender<SessionUpdate>,
     ) -> RoundOutcome {
+        let turn = TurnId::new(self.turn);
         let (tx, mut rx) = mpsc::channel(64);
         let target = Target {
             endpoint: &self.config.llm.endpoint,
@@ -695,6 +743,7 @@ impl HeadlessSession {
                 received = rx.recv() => match received {
                     Some((_, StreamEvent::Token(t))) => {
                         text.push_str(&t);
+                        self.emit_text(turn, &t);
                         let _ = updates
                             .send(SessionUpdate::AgentMessageChunk {
                                 content: ContentBlock::Text { text: t },
@@ -1817,6 +1866,8 @@ mod tests {
         let (permissions_tx, _permissions_rx) = mpsc::channel(16);
         let (browser_tx, _browser_rx) = mpsc::channel(16);
         let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        session.set_event_sink(events_tx);
 
         let stop = session
             .prompt(
@@ -1833,6 +1884,26 @@ mod tests {
         assert_eq!(stop, StopReason::EndTurn);
         let update = updates_rx.recv().await.expect("one chunk");
         assert!(matches!(update, SessionUpdate::AgentMessageChunk { .. }));
+
+        let mut events = Vec::new();
+        while let Ok(event) = events_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(matches!(
+            events.first(),
+            Some(crate::domain::SessionEvent::TurnStarted { turn, .. }) if turn.get() == 1
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            crate::domain::SessionEvent::TextDelta { text, .. } if text == "Hello!"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(crate::domain::SessionEvent::TurnFinished {
+                reason: crate::domain::TurnStopReason::EndTurn,
+                ..
+            })
+        ));
     }
 
     /// The truthfulness gap the cost meter closes: exact usage reported by the
