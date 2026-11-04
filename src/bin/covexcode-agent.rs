@@ -32,6 +32,8 @@ mod db;
 mod deploy;
 #[path = "../diff.rs"]
 mod diff;
+#[path = "../domain.rs"]
+mod domain;
 #[path = "../errors.rs"]
 mod errors;
 #[path = "../headless.rs"]
