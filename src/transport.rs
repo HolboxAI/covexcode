@@ -123,6 +123,13 @@ fn classify(value: &serde_json::Value) -> Incoming {
     }
 }
 
+/// `session/attach`: subscribe this connection to another session's updates.
+#[derive(serde::Deserialize)]
+struct AttachSessionRequest {
+    #[serde(rename = "sessionId")]
+    session_id: SessionId,
+}
+
 /// A message sent to one session's own task.
 enum SessionMsg {
     Prompt {
@@ -291,11 +298,11 @@ impl SessionActor {
 
 /// One live session on this connection: the queue its actor reads and the
 /// handle that can stop the turn it is currently awaiting.
+#[derive(Clone)]
 struct SessionHandle {
     commands: mpsc::Sender<SessionMsg>,
     cancel: CancelHandle,
     /// Where another connection subscribes when it attaches to this session.
-    #[allow(dead_code)] // read by the cross-connection attach path, next PR
     updates: UpdateHub,
 }
 
@@ -352,6 +359,11 @@ impl SessionRegistry {
     }
 }
 
+/// The session table shared by every connection a server accepts. A plain
+/// stdio run gets its own private one; `serve` creates a single table and
+/// hands clones to each connection.
+type SharedSessions = Arc<tokio::sync::Mutex<SessionRegistry>>;
+
 /// Owns everything the read loop needs across the life of the connection:
 /// the active session registry, and the tables correlating a
 /// `session/request_permission`, `session/checkInBrowser` or
@@ -361,7 +373,7 @@ impl SessionRegistry {
 /// `PermissionAsk`/`BrowserCheckAsk`/`BrowserInteractAsk` split: a small,
 /// explicit type (and table) per real use.
 struct Router {
-    sessions: SessionRegistry,
+    sessions: SharedSessions,
     /// ACP request id -> the engine-local id and handle that answer it. The
     /// engine waits on the handle, so the transport never owns a oneshot for
     /// a permission ask.
@@ -384,11 +396,23 @@ struct Router {
 
 impl Router {
     fn new(config: Config, outgoing_tx: mpsc::Sender<Outgoing>) -> Self {
+        Self::with_sessions(
+            config,
+            outgoing_tx,
+            Arc::new(tokio::sync::Mutex::new(SessionRegistry::new())),
+        )
+    }
+
+    fn with_sessions(
+        config: Config,
+        outgoing_tx: mpsc::Sender<Outgoing>,
+        sessions: SharedSessions,
+    ) -> Self {
         let (permission_relay_tx, permission_relay_in) = mpsc::channel(64);
         let (browser_relay_tx, browser_relay_in) = mpsc::channel(64);
         let (browser_interact_relay_tx, browser_interact_relay_in) = mpsc::channel(64);
         Self {
-            sessions: SessionRegistry::new(),
+            sessions,
             pending_permission_responses: HashMap::new(),
             pending_browser_responses: HashMap::new(),
             pending_browser_interact_responses: HashMap::new(),
@@ -444,7 +468,10 @@ impl Router {
                     if let Ok(notification) =
                         serde_json::from_value::<crate::protocol::CancelNotification>(params)
                     {
-                        self.sessions.cancel(&notification.session_id);
+                        self.sessions
+                            .lock()
+                            .await
+                            .cancel(&notification.session_id);
                     }
                 }
                 None
@@ -542,7 +569,7 @@ impl Router {
                 let mcp_configs = crate::mcp::parse_server_configs(&req.mcp_servers)
                     .map_err(|e| (-32602, format!("invalid mcpServers: {e}")))?;
 
-                let session_id = self.sessions.allocate_id();
+                let session_id = self.sessions.lock().await.allocate_id();
                 let updates = UpdateHub::new(session_id.clone());
                 // The creating connection is the first subscriber; an attach
                 // path later just adds another sender.
@@ -558,8 +585,12 @@ impl Router {
                     self.browser_interact_relay_tx.clone(),
                     mcp_configs.clone(),
                 );
-                self.sessions
-                    .insert(session_id.clone(), handle, cancel, updates);
+                self.sessions.lock().await.insert(
+                    session_id.clone(),
+                    handle,
+                    cancel,
+                    updates,
+                );
 
                 // Configs are validated here; the handshake itself happens in
                 // SessionActor::spawn, which calls session.connect_mcp() off the
@@ -581,11 +612,32 @@ impl Router {
             // trip, so there's no risk of the deadlock class that makes
             // session/prompt's own response need deferring (see that
             // method's own doc comment).
+            //
+            // Custom (not ACP v1): attach this connection to a session that
+            // another connection owns. It starts receiving that session's
+            // updates immediately; history is not replayed.
+            "session/attach" => {
+                let req: AttachSessionRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let hub = {
+                    let sessions = self.sessions.lock().await;
+                    sessions
+                        .get(&req.session_id)
+                        .map(|handle| handle.updates.clone())
+                };
+                let Some(hub) = hub else {
+                    return Err((-32001, "no such session".to_string()));
+                };
+                hub.subscribe(self.outgoing_tx.clone()).await;
+                Ok(serde_json::json!({}))
+            }
             "session/rollback" => {
                 let req: RollbackRequest = serde_json::from_value(params)
                     .map_err(|e| (-32602, format!("invalid params: {e}")))?;
                 let handle = self
                     .sessions
+                    .lock()
+                    .await
                     .get(&req.session_id)
                     .ok_or_else(|| (-32001, "no such session".to_string()))?
                     .commands
@@ -608,6 +660,8 @@ impl Router {
                     .map_err(|e| (-32602, format!("invalid params: {e}")))?;
                 let handle = self
                     .sessions
+                    .lock()
+                    .await
                     .get(&req.session_id)
                     .ok_or_else(|| (-32001, "no such session".to_string()))?
                     .commands
@@ -663,6 +717,8 @@ impl Router {
         };
         let Some(commands) = self
             .sessions
+            .lock()
+            .await
             .get(&req.session_id)
             .map(|handle| handle.commands.clone())
         else {
@@ -816,11 +872,27 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let sessions = Arc::new(tokio::sync::Mutex::new(SessionRegistry::new()));
+    run_stream_with_sessions(config, reader, writer, sessions).await
+}
+
+/// The same loop with a session table supplied by the caller. `serve` uses
+/// this so every accepted connection sees the same sessions.
+async fn run_stream_with_sessions<R, W>(
+    config: Config,
+    reader: R,
+    writer: W,
+    sessions: SharedSessions,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut lines = BufReader::new(reader).lines();
     let mut writer = writer;
 
     let (outgoing_tx, mut outgoing_in) = mpsc::channel::<Outgoing>(256);
-    let mut router = Router::new(config, outgoing_tx);
+    let mut router = Router::with_sessions(config, outgoing_tx, sessions);
 
     loop {
         tokio::select! {
@@ -860,10 +932,11 @@ where
     Ok(())
 }
 
-/// Serve ACP over TCP on `addr`, one [`Router`] and one session set per
-/// connection. Refuses a non-loopback bind: this process can run shell
-/// commands and there is no transport authentication yet, so it must not be
-/// reachable from the network.
+/// Serve ACP over TCP on `addr`, one [`Router`] per connection but one shared
+/// session table, so a connection can attach to a session created on another.
+/// Refuses a non-loopback bind: this process can run shell commands and there
+/// is no transport authentication yet, so it must not be reachable from the
+/// network.
 pub async fn serve(config: Config, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
@@ -875,12 +948,14 @@ pub async fn serve(config: Config, addr: &str) -> Result<(), Box<dyn std::error:
         .into());
     }
     eprintln!("covexcode-agent: listening on {local}");
+    let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(SessionRegistry::new()));
     loop {
         let (stream, _) = listener.accept().await?;
         let config = config.clone();
+        let sessions = sessions.clone();
         tokio::spawn(async move {
             let (reader, writer) = stream.into_split();
-            if let Err(error) = run_stream(config, reader, writer).await {
+            if let Err(error) = run_stream_with_sessions(config, reader, writer, sessions).await {
                 eprintln!("covexcode-agent: connection ended: {error}");
             }
         });
@@ -1499,6 +1574,87 @@ mod tests {
             .expect("the server must observe EOF promptly")
             .expect("server task")
             .expect("the stream loop ends cleanly on EOF");
+    }
+
+    /// The shared-session milestone: a session created on one connection can
+    /// be attached from another, and the second connection receives its live
+    /// updates.
+    #[tokio::test]
+    async fn a_second_connection_can_attach_and_see_updates() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+                      data: {\"choices\":[{\"delta\":{\"content\":\"hello from A\"}}]}\n\ndata: [DONE]\n\n",
+                )
+                .await;
+            let _ = socket.shutdown().await;
+        });
+
+        let mut config = Config::default();
+        config.llm.endpoint = format!("http://{addr}");
+        config.llm.model = "test-model".to_string();
+        config.llm.api_key = "sk-test".to_string();
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(SessionRegistry::new()));
+        let (out_a, _in_a) = mpsc::channel(64);
+        let mut a = Router::with_sessions(config.clone(), out_a, sessions.clone());
+        let (out_b, mut in_b) = mpsc::channel(64);
+        let mut b = Router::with_sessions(config, out_b, sessions);
+
+        a.handle(classify(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": 1 }
+        })))
+        .await;
+        let created = a
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "session/new",
+                "params": { "cwd": dir.path().display().to_string(), "mcpServers": [] }
+            })))
+            .await
+            .expect("session/new answers");
+        assert!(created.contains("sess_1"), "{created}");
+
+        let attached = b
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "session/attach",
+                "params": { "sessionId": "sess_1" }
+            })))
+            .await
+            .expect("attach answers synchronously");
+        assert!(attached.contains("\"result\""), "{attached}");
+
+        let prompt_ack = a
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+                "params": { "sessionId": "sess_1", "prompt": [{ "type": "text", "text": "hi" }] }
+            })))
+            .await;
+        assert_eq!(prompt_ack, None);
+
+        let notification = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match in_b.recv().await.expect("the attached connection stays open") {
+                    Outgoing::Update(notification) => break notification,
+                    Outgoing::Line(_) => continue,
+                }
+            }
+        })
+        .await
+        .expect("the attached connection must receive live updates");
+        let value = serde_json::to_value(&notification).expect("serializes");
+        assert_eq!(value["sessionId"], "sess_1");
     }
 
     /// The registry is the one place ids and cancellation are owned now:
