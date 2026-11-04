@@ -200,8 +200,9 @@ pub enum ApprovalDetail {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalResolution {
     Selected { option_id: String },
-    /// The client accepted some hunks and returned the merged file text.
-    Partial,
+    /// The client accepted some hunks and returned the merged file text the
+    /// engine should write instead of executing the original call.
+    Partial { new_text: String },
     Cancelled,
     /// The client disconnected before answering.
     Unavailable,

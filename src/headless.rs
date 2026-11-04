@@ -46,7 +46,9 @@ use crate::protocol::{
 };
 use crate::tools::{self, Action, BrowserInteraction, Mode};
 use crate::workspace::Workspace;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -218,6 +220,57 @@ impl CancelHandle {
     }
 }
 
+/// Answers an outstanding approval without going through the ACP permission
+/// channel. Pending requests are keyed by the engine-local id carried in
+/// `SessionEvent::ApprovalRequested`.
+///
+/// The map holds only oneshot senders and is never held across an await, so a
+/// plain `std::sync::Mutex` is enough.
+#[derive(Clone, Default)]
+pub struct ApprovalHandle {
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ApprovalResolution>>>>,
+}
+
+/// Removes a pending approval entry when the waiting code leaves its scope,
+/// including when the whole turn is cancelled and this future is dropped.
+struct PendingApproval<'a> {
+    approvals: &'a ApprovalHandle,
+    request_id: u64,
+}
+
+impl Drop for PendingApproval<'_> {
+    fn drop(&mut self) {
+        self.approvals.remove(self.request_id);
+    }
+}
+
+impl ApprovalHandle {
+    /// Answer one request. Returns false when the id is unknown (already
+    /// answered, wrong session, or never issued).
+    pub fn respond(&self, request_id: u64, resolution: ApprovalResolution) -> bool {
+        let pending = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.remove(&request_id)
+        };
+        match pending {
+            Some(sender) => sender.send(resolution).is_ok(),
+            None => false,
+        }
+    }
+
+    fn register(&self, request_id: u64) -> oneshot::Receiver<ApprovalResolution> {
+        let (sender, receiver) = oneshot::channel();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.insert(request_id, sender);
+        receiver
+    }
+
+    fn remove(&self, request_id: u64) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.remove(&request_id);
+    }
+}
+
 /// Adapts the engine's ACP-shaped progress updates to the
 /// transport-agnostic event stream in one place.
 ///
@@ -296,6 +349,22 @@ impl From<ToolCallStatus> for ToolStatus {
             ToolCallStatus::InProgress => Self::InProgress,
             ToolCallStatus::Completed => Self::Completed,
             ToolCallStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+/// Turn a direct command answer back into the engine's internal ACP-shaped
+/// outcome, so both answer paths feed the same downstream logic. A client
+/// that sends `Unavailable` is treated as having cancelled: there is nothing
+/// to execute.
+fn resolution_outcome(resolution: ApprovalResolution) -> RequestPermissionOutcome {
+    match resolution {
+        ApprovalResolution::Selected { option_id } => RequestPermissionOutcome::Selected {
+            option_id: PermissionOptionId(option_id),
+        },
+        ApprovalResolution::Partial { new_text } => RequestPermissionOutcome::Partial { new_text },
+        ApprovalResolution::Cancelled | ApprovalResolution::Unavailable => {
+            RequestPermissionOutcome::Cancelled
         }
     }
 }
@@ -416,6 +485,8 @@ pub struct HeadlessSession {
     /// Cooperative cancellation for the currently running turn. Reset at the
     /// start of every prompt, so a stale cancel cannot kill the next turn.
     cancel: CancelHandle,
+    /// Direct answers to outstanding approval requests, from a non-ACP client.
+    approvals: ApprovalHandle,
 }
 
 impl HeadlessSession {
@@ -438,7 +509,14 @@ impl HeadlessSession {
             mcp: crate::mcp::McpRegistry::default(),
             events: None,
             cancel: CancelHandle::default(),
+            approvals: ApprovalHandle::default(),
         }
+    }
+
+    /// A cloneable handle a client can use to answer approval requests by the
+    /// engine-local id from `SessionEvent::ApprovalRequested`.
+    pub fn approval_handle(&self) -> ApprovalHandle {
+        self.approvals.clone()
     }
 
     /// A cloneable handle a transport can use to cancel the current turn
@@ -466,12 +544,15 @@ impl HeadlessSession {
         });
     }
 
-    /// Announce an approval request on the transport-agnostic stream and
-    /// return its engine-issued id. The ACP request still carries its own
-    /// JSON-RPC id; this one is what a non-ACP client answers with.
-    fn emit_approval_requested(&mut self, request: &RequestPermissionRequest) -> u64 {
+    fn next_approval_id(&mut self) -> u64 {
         self.approval_seq += 1;
-        let request_id = self.approval_seq;
+        self.approval_seq
+    }
+
+    /// Announce an approval request on the transport-agnostic stream. The ACP
+    /// request still carries its own JSON-RPC id; `request_id` is the
+    /// engine-local id a non-ACP client answers with.
+    fn emit_approval_requested(&self, request_id: u64, request: &RequestPermissionRequest) {
         self.emit(SessionEvent::ApprovalRequested {
             session_id: self.session_id.clone(),
             turn: TurnId::new(self.turn),
@@ -498,21 +579,24 @@ impl HeadlessSession {
                 })
                 .collect(),
         });
-        request_id
     }
 
     fn emit_approval_resolved(
         &self,
         request_id: u64,
-        outcome: &Result<RequestPermissionOutcome, oneshot::error::RecvError>,
+        outcome: Option<&RequestPermissionOutcome>,
     ) {
         let resolution = match outcome {
-            Ok(RequestPermissionOutcome::Selected { option_id }) => ApprovalResolution::Selected {
-                option_id: option_id.0.clone(),
+            Some(RequestPermissionOutcome::Selected { option_id }) => {
+                ApprovalResolution::Selected {
+                    option_id: option_id.0.clone(),
+                }
+            }
+            Some(RequestPermissionOutcome::Partial { new_text }) => ApprovalResolution::Partial {
+                new_text: new_text.clone(),
             },
-            Ok(RequestPermissionOutcome::Partial { .. }) => ApprovalResolution::Partial,
-            Ok(RequestPermissionOutcome::Cancelled) => ApprovalResolution::Cancelled,
-            Err(_) => ApprovalResolution::Unavailable,
+            Some(RequestPermissionOutcome::Cancelled) => ApprovalResolution::Cancelled,
+            None => ApprovalResolution::Unavailable,
         };
         self.emit_approval_resolution(request_id, resolution);
     }
@@ -1625,7 +1709,15 @@ impl HeadlessSession {
         };
         let (respond, receive) = oneshot::channel();
         self.emit_status(SessionStatus::WaitingForApproval);
-        let approval_request_id = self.emit_approval_requested(&request);
+        let approval_request_id = self.next_approval_id();
+        // Register before announcing: a client that answers the instant it
+        // sees the event must find the slot already there.
+        let mut direct = self.approvals.register(approval_request_id);
+        let pending = PendingApproval {
+            approvals: &self.approvals,
+            request_id: approval_request_id,
+        };
+        self.emit_approval_requested(approval_request_id, &request);
         if permissions
             .send(PermissionAsk { request, respond })
             .await
@@ -1638,9 +1730,15 @@ impl HeadlessSession {
                 Vec::new(),
             );
         }
-        let outcome = receive.await;
+        // The ACP channel and the direct command are two doors to the same
+        // answer; whichever arrives first wins and the other is dropped.
+        let outcome = tokio::select! {
+            acp = receive => acp.ok(),
+            resolution = &mut direct => resolution.ok().map(resolution_outcome),
+        };
         self.emit_status(SessionStatus::Running);
-        self.emit_approval_resolved(approval_request_id, &outcome);
+        self.emit_approval_resolved(approval_request_id, outcome.as_ref());
+        drop(pending);
 
         // Per-hunk review: the client accepted some hunks and returned the
         // merged file text. `Partial` never reaches the `Decision` mapping
@@ -1650,7 +1748,7 @@ impl HeadlessSession {
         // just edited). Without a `partial_path` (the call previewed no file
         // diff) the client sent a shape it has no business sending, so fall
         // through to the binary decision instead of writing to nowhere.
-        if let (Ok(RequestPermissionOutcome::Partial { new_text }), Some(path)) =
+        if let (Some(RequestPermissionOutcome::Partial { new_text }), Some(path)) =
             (&outcome, partial_path.as_ref())
         {
             let synthetic = ToolCall {
@@ -1674,8 +1772,8 @@ impl HeadlessSession {
         }
 
         let decision: Decision = match outcome {
-            Ok(o) => o.into(),
-            Err(_) => Decision::Refused,
+            Some(o) => o.into(),
+            None => Decision::Refused,
         };
 
         if decision.is_allowed() {
@@ -1800,7 +1898,15 @@ impl HeadlessSession {
         };
         let (respond, receive) = oneshot::channel();
         self.emit_status(SessionStatus::WaitingForApproval);
-        let approval_request_id = self.emit_approval_requested(&request);
+        let approval_request_id = self.next_approval_id();
+        // Register before announcing: a client that answers the instant it
+        // sees the event must find the slot already there.
+        let mut direct = self.approvals.register(approval_request_id);
+        let pending = PendingApproval {
+            approvals: &self.approvals,
+            request_id: approval_request_id,
+        };
+        self.emit_approval_requested(approval_request_id, &request);
         if permissions
             .send(PermissionAsk { request, respond })
             .await
@@ -1813,12 +1919,18 @@ impl HeadlessSession {
                 Vec::new(),
             );
         }
-        let outcome = receive.await;
+        // The ACP channel and the direct command are two doors to the same
+        // answer; whichever arrives first wins and the other is dropped.
+        let outcome = tokio::select! {
+            acp = receive => acp.ok(),
+            resolution = &mut direct => resolution.ok().map(resolution_outcome),
+        };
         self.emit_status(SessionStatus::Running);
-        self.emit_approval_resolved(approval_request_id, &outcome);
+        self.emit_approval_resolved(approval_request_id, outcome.as_ref());
+        drop(pending);
         let decision: Decision = match outcome {
-            Ok(o) => o.into(),
-            Err(_) => Decision::Refused,
+            Some(o) => o.into(),
+            None => Decision::Refused,
         };
 
         if decision.is_allowed() {
@@ -3564,6 +3676,70 @@ mod tests {
         // queued response would never have been consumed and this task
         // would hang instead of returning `EndTurn`.
         let _ = dir; // kept for the tempdir's own lifetime, not asserted on
+    }
+
+    /// An approval can be answered through `ApprovalHandle` without anyone
+    /// touching the ACP permission channel -- the command-side seam a TUI or
+    /// daemon will use.
+    #[tokio::test]
+    async fn an_approval_can_be_answered_directly() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![
+            tool_call_round(tools::RUN_COMMAND, r#"{"command":"rm -rf build"}"#),
+            text_round("stopped"),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let approvals = session.approval_handle();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        session.set_event_sink(events_tx);
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let prompt = tokio::spawn(async move {
+            session
+                .prompt(
+                    "clean the build dir".to_string(),
+                    Vec::new(),
+                    None,
+                    &updates_tx,
+                    &permissions_tx,
+                    &browser_tx,
+                    &browser_interact_tx,
+                )
+                .await
+        });
+
+        let request_id = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = events_rx.recv().await {
+                if let SessionEvent::ApprovalRequested { request_id, .. } = event {
+                    return request_id;
+                }
+            }
+            panic!("the event stream closed before an approval request");
+        })
+        .await
+        .expect("the approval request must arrive promptly");
+
+        assert!(approvals.respond(request_id, ApprovalResolution::Cancelled));
+        assert!(
+            !approvals.respond(request_id, ApprovalResolution::Cancelled),
+            "an id is answered once"
+        );
+
+        let stop = prompt.await.expect("task joins");
+        assert_eq!(stop, StopReason::EndTurn);
+
+        let mut resolution = None;
+        while let Ok(event) = events_rx.try_recv() {
+            if let SessionEvent::ApprovalResolved { resolution: r, .. } = event {
+                resolution = Some(r);
+            }
+        }
+        assert_eq!(resolution, Some(ApprovalResolution::Cancelled));
     }
 
     /// The actual point of wiring `tools::preview_change_text` into
