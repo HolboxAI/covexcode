@@ -151,13 +151,68 @@ pub enum ToolStatus {
     Failed,
 }
 
+/// One option a client can choose for an approval request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ApprovalOption {
+    /// Opaque engine option id, echoed back in the resolution.
+    pub id: String,
+    pub label: String,
+    pub kind: ApprovalOptionKind,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalOptionKind {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
+}
+
+/// What the client is being asked to approve, in transport-neutral terms.
+/// Mirrors the shapes the engine already builds for the ACP permission
+/// request, so a non-ACP client can render the same review.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApprovalDetail {
+    Text {
+        text: String,
+    },
+    Diff {
+        path: String,
+        old_text: Option<String>,
+        new_text: String,
+    },
+    Plan {
+        title: String,
+        summary: String,
+        steps: Vec<String>,
+        not_doing: Vec<String>,
+    },
+    Image {
+        mime_type: String,
+        data_base64: String,
+    },
+}
+
+/// How an approval request ended.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApprovalResolution {
+    Selected { option_id: String },
+    /// The client accepted some hunks and returned the merged file text.
+    Partial,
+    Cancelled,
+    /// The client disconnected before answering.
+    Unavailable,
+}
+
 /// Transport-agnostic output from a session engine.
 ///
 /// The ACP path continues to emit its own `SessionUpdate` stream; this is the
 /// stream a TUI, daemon, or orchestration client can consume without speaking
-/// ACP. It covers the turn spine, streamed text, tool lifecycle, and usage;
-/// approval requests stay on the engine's existing approval channel until the
-/// command side of the contract lands.
+/// ACP. It covers the turn spine, status, streamed text, tool lifecycle, usage,
+/// and approval requests/resolutions.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
@@ -200,6 +255,22 @@ pub enum SessionEvent {
         /// The model's context window, `0` when unknown.
         size: u64,
         prompt_tokens: Option<u64>,
+    },
+    ApprovalRequested {
+        session_id: SessionId,
+        turn: TurnId,
+        /// Engine-issued id the client echoes in its resolution.
+        request_id: u64,
+        tool_call_id: String,
+        title: String,
+        detail: Option<ApprovalDetail>,
+        options: Vec<ApprovalOption>,
+    },
+    ApprovalResolved {
+        session_id: SessionId,
+        turn: TurnId,
+        request_id: u64,
+        resolution: ApprovalResolution,
     },
     TurnFinished {
         session_id: SessionId,
@@ -310,6 +381,46 @@ mod tests {
         let json = serde_json::to_string(&usage).unwrap();
         assert!(json.contains("\"type\":\"usage_updated\""), "{json}");
         assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), usage);
+    }
+
+    #[test]
+    fn approval_events_round_trip() {
+        let requested = SessionEvent::ApprovalRequested {
+            session_id: SessionId::new("sess_1"),
+            turn: TurnId::new(3),
+            request_id: 7,
+            tool_call_id: "call_1".to_string(),
+            title: "write src/lib.rs".to_string(),
+            detail: Some(ApprovalDetail::Diff {
+                path: "src/lib.rs".to_string(),
+                old_text: Some("old".to_string()),
+                new_text: "new".to_string(),
+            }),
+            options: vec![ApprovalOption {
+                id: "allow_once".to_string(),
+                label: "Allow".to_string(),
+                kind: ApprovalOptionKind::AllowOnce,
+            }],
+        };
+        let json = serde_json::to_string(&requested).unwrap();
+        assert!(json.contains("\"type\":\"approval_requested\""), "{json}");
+        assert!(json.contains("\"kind\":\"allow_once\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<SessionEvent>(&json).unwrap(),
+            requested
+        );
+
+        let resolved = SessionEvent::ApprovalResolved {
+            session_id: SessionId::new("sess_1"),
+            turn: TurnId::new(3),
+            request_id: 7,
+            resolution: ApprovalResolution::Selected {
+                option_id: "allow_once".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&resolved).unwrap();
+        assert!(json.contains("\"type\":\"approval_resolved\""), "{json}");
+        assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), resolved);
     }
 
     #[test]
