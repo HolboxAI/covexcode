@@ -523,6 +523,12 @@ pub struct ToolsConfig {
     /// its own tokens.
     #[serde(default = "default_subagent_concurrency")]
     pub subagent_concurrency: usize,
+    /// Model read-only subagents use. `None` keeps the parent's model.
+    /// Pointing research at a fast, cheap model gives the concurrency above
+    /// its biggest win: a child's job is reading and summarizing, and it
+    /// usually takes several rounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<String>,
     /// Attach `check_in_browser`'s screenshot to the model's own next
     /// request as real image input, not just show it to the human. Off by
     /// default: this costs real image tokens on every check, and only
@@ -659,6 +665,7 @@ impl Default for ToolsConfig {
             subagent_max_steps: default_subagent_max_steps(),
             subagent_token_budget: default_subagent_token_budget(),
             subagent_concurrency: default_subagent_concurrency(),
+            subagent_model: None,
             attach_browser_screenshots: false,
         }
     }
