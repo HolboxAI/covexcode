@@ -123,9 +123,9 @@ fn classify(value: &serde_json::Value) -> Incoming {
     }
 }
 
-/// `session/attach`: subscribe this connection to another session's updates.
+/// The custom session methods that take one id: attach and close.
 #[derive(serde::Deserialize)]
-struct AttachSessionRequest {
+struct SessionIdRequest {
     #[serde(rename = "sessionId")]
     session_id: SessionId,
 }
@@ -404,6 +404,20 @@ impl SessionRegistry {
             handle.cancel.cancel();
         }
     }
+
+    /// Every live session, sorted so a client's list is stable between calls.
+    fn list(&self) -> Vec<SessionId> {
+        let mut ids: Vec<SessionId> = self.sessions.keys().cloned().collect();
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        ids
+    }
+
+    /// Remove a session and hand its handle to the caller. Dropping the handle
+    /// closes the actor's command channel, which ends the actor once its
+    /// current turn finishes.
+    fn remove(&mut self, id: &SessionId) -> Option<SessionHandle> {
+        self.sessions.remove(id)
+    }
 }
 
 /// The session table shared by every connection a server accepts. A plain
@@ -663,11 +677,34 @@ impl Router {
             // session/prompt's own response need deferring (see that
             // method's own doc comment).
             //
+            // Custom (not ACP v1): every live session on this server.
+            "session/list" => {
+                let ids = self.sessions.lock().await.list();
+                let sessions: Vec<serde_json::Value> = ids
+                    .into_iter()
+                    .map(|id| serde_json::json!({ "sessionId": id }))
+                    .collect();
+                Ok(serde_json::json!({ "sessions": sessions }))
+            }
+            // Custom: stop the turn and end the session's actor. Dropping the
+            // handle closes the last command sender, which ends the actor once
+            // its current turn unwinds.
+            "session/close" => {
+                let req: SessionIdRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let removed = self.sessions.lock().await.remove(&req.session_id);
+                let Some(handle) = removed else {
+                    return Err((-32001, "no such session".to_string()));
+                };
+                handle.cancel.cancel();
+                drop(handle);
+                Ok(serde_json::json!({}))
+            }
             // Custom (not ACP v1): attach this connection to a session that
             // another connection owns. It starts receiving that session's
             // updates immediately; history is not replayed.
             "session/attach" => {
-                let req: AttachSessionRequest = serde_json::from_value(params)
+                let req: SessionIdRequest = serde_json::from_value(params)
                     .map_err(|e| (-32602, format!("invalid params: {e}")))?;
                 let hubs = {
                     let sessions = self.sessions.lock().await;
@@ -1706,6 +1743,71 @@ mod tests {
         .expect("the attached connection must receive live updates");
         let value = serde_json::to_value(&notification).expect("serializes");
         assert_eq!(value["sessionId"], "sess_1");
+    }
+
+    /// Custom lifecycle methods: a client can discover live sessions and end
+    /// one. Closing drops the last command sender, so a later attach/close
+    /// reports "no such session".
+    #[tokio::test]
+    async fn sessions_can_be_listed_and_closed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (outgoing_tx, _outgoing_in) = mpsc::channel(64);
+        let mut router = Router::new(Config::default(), outgoing_tx);
+
+        router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": 1 }
+            })))
+            .await;
+        let created = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "session/new",
+                "params": { "cwd": dir.path().display().to_string(), "mcpServers": [] }
+            })))
+            .await
+            .expect("session/new answers");
+        assert!(created.contains("sess_1"), "{created}");
+
+        let listed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "session/list", "params": {}
+            })))
+            .await
+            .expect("session/list answers");
+        let value: serde_json::Value = serde_json::from_str(listed.trim()).unwrap();
+        assert_eq!(value["result"]["sessions"][0]["sessionId"], "sess_1");
+
+        let closed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 4, "method": "session/close",
+                "params": { "sessionId": "sess_1" }
+            })))
+            .await
+            .expect("session/close answers");
+        assert!(closed.contains("\"result\""), "{closed}");
+
+        let listed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 5, "method": "session/list", "params": {}
+            })))
+            .await
+            .expect("session/list answers");
+        let value: serde_json::Value = serde_json::from_str(listed.trim()).unwrap();
+        assert_eq!(
+            value["result"]["sessions"].as_array().unwrap().len(),
+            0,
+            "the closed session is gone"
+        );
+
+        let attach = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 6, "method": "session/attach",
+                "params": { "sessionId": "sess_1" }
+            })))
+            .await
+            .expect("attach answers with an error line");
+        assert!(attach.contains("no such session"), "{attach}");
     }
 
     /// Every attached connection gets its own copy of an approval ask, so any
