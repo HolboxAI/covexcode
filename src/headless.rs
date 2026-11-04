@@ -74,6 +74,7 @@ fn images_for_model(
 /// `RequestPermissionRequest` a turn needs answered. The answer comes back
 /// through the same `ApprovalHandle` a non-ACP client uses, keyed by the
 /// engine-local `request_id` -- so there is one answer path, not two.
+#[derive(Clone)]
 pub struct PermissionAsk {
     pub request: RequestPermissionRequest,
     pub request_id: u64,
