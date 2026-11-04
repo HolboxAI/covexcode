@@ -33,7 +33,10 @@
 
 use crate::approval::{verdict_for, Decision, Verdict};
 use crate::config::Config;
-use crate::domain::{SessionEvent, SessionStatus, ToolStatus, TurnId, TurnStopReason};
+use crate::domain::{
+    ApprovalDetail, ApprovalOption, ApprovalOptionKind, ApprovalResolution, SessionEvent,
+    SessionStatus, ToolStatus, TurnId, TurnStopReason,
+};
 use crate::llm::{self, ApiUsage, ChatMessage, StreamEvent, Target, ToolCall};
 use crate::protocol::{
     AcpToolCall, ChangeEntry, ContentBlock, DiffHunk, DiffHunkLine, DiffLineChange,
@@ -297,6 +300,38 @@ impl From<ToolCallStatus> for ToolStatus {
     }
 }
 
+/// The transport-neutral review payload for one approval request.
+fn approval_detail(update: &ToolCallUpdate) -> Option<ApprovalDetail> {
+    match update.content.as_ref()? {
+        ToolCallContent::Text { text } => Some(ApprovalDetail::Text { text: text.clone() }),
+        ToolCallContent::Diff {
+            path,
+            old_text,
+            new_text,
+            ..
+        } => Some(ApprovalDetail::Diff {
+            path: path.clone(),
+            old_text: old_text.clone(),
+            new_text: new_text.clone(),
+        }),
+        ToolCallContent::Plan {
+            title,
+            summary,
+            steps,
+            not_doing,
+        } => Some(ApprovalDetail::Plan {
+            title: title.clone(),
+            summary: summary.clone(),
+            steps: steps.clone(),
+            not_doing: not_doing.clone(),
+        }),
+        ToolCallContent::Image { mime_type, data } => Some(ApprovalDetail::Image {
+            mime_type: mime_type.clone(),
+            data_base64: data.clone(),
+        }),
+    }
+}
+
 /// The ACP checklist for an approved plan: completed steps ticked, the next
 /// pending one in progress, the rest pending. ACP has no blocked state, so a
 /// step recorded as blocked stays pending -- its note is in the tool result.
@@ -336,6 +371,10 @@ pub struct HeadlessSession {
     mcp: crate::mcp::McpRegistry,
     messages: Vec<ChatMessage>,
     request_id: u64,
+    /// Monotonic id for approval requests sent to the client. Distinct from
+    /// `request_id` (the model round) so a client can correlate an answer
+    /// without knowing anything about ACP's JSON-RPC ids.
+    approval_seq: u64,
     tool_steps: usize,
     /// The 1-based turn counter, incremented once per `session/prompt`. It
     /// is the "turn" the rollback journal attributes each file to, so a
@@ -387,6 +426,7 @@ impl HeadlessSession {
             config,
             messages: Vec::new(),
             request_id: 0,
+            approval_seq: 0,
             tool_steps: 0,
             turn: 0,
             mode: Mode::Normal,
@@ -423,6 +463,66 @@ impl HeadlessSession {
         self.emit(SessionEvent::StatusChanged {
             session_id: self.session_id.clone(),
             status,
+        });
+    }
+
+    /// Announce an approval request on the transport-agnostic stream and
+    /// return its engine-issued id. The ACP request still carries its own
+    /// JSON-RPC id; this one is what a non-ACP client answers with.
+    fn emit_approval_requested(&mut self, request: &RequestPermissionRequest) -> u64 {
+        self.approval_seq += 1;
+        let request_id = self.approval_seq;
+        self.emit(SessionEvent::ApprovalRequested {
+            session_id: self.session_id.clone(),
+            turn: TurnId::new(self.turn),
+            request_id,
+            tool_call_id: request.tool_call.tool_call_id.0.clone(),
+            title: request
+                .tool_call
+                .title
+                .clone()
+                .unwrap_or_else(|| "approval".to_string()),
+            detail: approval_detail(&request.tool_call),
+            options: request
+                .options
+                .iter()
+                .map(|option| ApprovalOption {
+                    id: option.option_id.0.clone(),
+                    label: option.name.clone(),
+                    kind: match option.kind {
+                        PermissionOptionKind::AllowOnce => ApprovalOptionKind::AllowOnce,
+                        PermissionOptionKind::AllowAlways => ApprovalOptionKind::AllowAlways,
+                        PermissionOptionKind::RejectOnce => ApprovalOptionKind::RejectOnce,
+                        PermissionOptionKind::RejectAlways => ApprovalOptionKind::RejectAlways,
+                    },
+                })
+                .collect(),
+        });
+        request_id
+    }
+
+    fn emit_approval_resolved(
+        &self,
+        request_id: u64,
+        outcome: &Result<RequestPermissionOutcome, oneshot::error::RecvError>,
+    ) {
+        let resolution = match outcome {
+            Ok(RequestPermissionOutcome::Selected { option_id }) => ApprovalResolution::Selected {
+                option_id: option_id.0.clone(),
+            },
+            Ok(RequestPermissionOutcome::Partial { .. }) => ApprovalResolution::Partial,
+            Ok(RequestPermissionOutcome::Cancelled) => ApprovalResolution::Cancelled,
+            Err(_) => ApprovalResolution::Unavailable,
+        };
+        self.emit_approval_resolution(request_id, resolution);
+    }
+
+    fn emit_approval_resolution(&self, request_id: u64, resolution: ApprovalResolution) {
+        self.emit(SessionEvent::ApprovalResolved {
+            session_id: self.session_id.clone(),
+            turn: TurnId::new(self.turn),
+            request_id,
+            resolution,
         });
     }
 
@@ -1525,12 +1625,14 @@ impl HeadlessSession {
         };
         let (respond, receive) = oneshot::channel();
         self.emit_status(SessionStatus::WaitingForApproval);
+        let approval_request_id = self.emit_approval_requested(&request);
         if permissions
             .send(PermissionAsk { request, respond })
             .await
             .is_err()
         {
             self.emit_status(SessionStatus::Running);
+            self.emit_approval_resolution(approval_request_id, ApprovalResolution::Unavailable);
             return (
                 "The client disconnected before answering.".to_string(),
                 Vec::new(),
@@ -1538,6 +1640,7 @@ impl HeadlessSession {
         }
         let outcome = receive.await;
         self.emit_status(SessionStatus::Running);
+        self.emit_approval_resolved(approval_request_id, &outcome);
 
         // Per-hunk review: the client accepted some hunks and returned the
         // merged file text. `Partial` never reaches the `Decision` mapping
@@ -1697,12 +1800,14 @@ impl HeadlessSession {
         };
         let (respond, receive) = oneshot::channel();
         self.emit_status(SessionStatus::WaitingForApproval);
+        let approval_request_id = self.emit_approval_requested(&request);
         if permissions
             .send(PermissionAsk { request, respond })
             .await
             .is_err()
         {
             self.emit_status(SessionStatus::Running);
+            self.emit_approval_resolution(approval_request_id, ApprovalResolution::Unavailable);
             return (
                 "The client disconnected before answering.".to_string(),
                 Vec::new(),
@@ -1710,6 +1815,7 @@ impl HeadlessSession {
         }
         let outcome = receive.await;
         self.emit_status(SessionStatus::Running);
+        self.emit_approval_resolved(approval_request_id, &outcome);
         let decision: Decision = match outcome {
             Ok(o) => o.into(),
             Err(_) => Decision::Refused,
@@ -3406,9 +3512,23 @@ mod tests {
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
         let mut statuses = Vec::new();
+        let mut approval_request = None;
+        let mut approval_resolution = None;
         while let Ok(event) = events_rx.try_recv() {
-            if let SessionEvent::StatusChanged { status, .. } = event {
-                statuses.push(status);
+            match event {
+                SessionEvent::StatusChanged { status, .. } => statuses.push(status),
+                SessionEvent::ApprovalRequested {
+                    request_id,
+                    tool_call_id,
+                    options,
+                    ..
+                } => approval_request = Some((request_id, tool_call_id, options)),
+                SessionEvent::ApprovalResolved {
+                    request_id,
+                    resolution,
+                    ..
+                } => approval_resolution = Some((request_id, resolution)),
+                _ => {}
             }
         }
         assert_eq!(
@@ -3420,6 +3540,20 @@ mod tests {
                 SessionStatus::Idle,
             ],
             "the client must see why the turn is paused and when it resumes"
+        );
+        let (request_id, tool_call_id, options) =
+            approval_request.expect("the approval must be on the event stream");
+        assert_eq!(request_id, 1);
+        assert_eq!(tool_call_id, "call_1");
+        assert!(options.iter().any(|option| option.id == "reject"));
+        assert_eq!(
+            approval_resolution,
+            Some((
+                request_id,
+                ApprovalResolution::Selected {
+                    option_id: "reject".to_string()
+                }
+            ))
         );
         // rm -rf on a directory that never existed is a no-op either way,
         // so the real proof this was refused (not just answered oddly) is
