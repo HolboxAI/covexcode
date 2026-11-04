@@ -31,7 +31,7 @@
 //! isn't unit tested for the same reason `main`'s own top-level loop isn't.
 
 use crate::config::Config;
-use crate::domain::ApprovalResolution;
+use crate::domain::{ApprovalResolution, SessionEvent, SessionStatus};
 use crate::headless::{
     ApprovalHandle, BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult,
     CancelHandle, HeadlessSession, PermissionAsk,
@@ -349,6 +349,9 @@ struct SessionHandle {
     /// Where another connection subscribes when it attaches to this session.
     updates: UpdateHub,
     approvals: ApprovalHub,
+    /// Last status the engine reported. Starts `Idle`; a tracker task keeps
+    /// it current from `SessionEvent::StatusChanged`.
+    status: SessionStatus,
 }
 
 /// The sessions one connection owns.
@@ -389,6 +392,7 @@ impl SessionRegistry {
                 cancel,
                 updates,
                 approvals,
+                status: SessionStatus::Idle,
             },
         );
     }
@@ -405,11 +409,22 @@ impl SessionRegistry {
         }
     }
 
-    /// Every live session, sorted so a client's list is stable between calls.
-    fn list(&self) -> Vec<SessionId> {
-        let mut ids: Vec<SessionId> = self.sessions.keys().cloned().collect();
-        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        ids
+    /// Every live session with its last reported status, sorted so a client's
+    /// list is stable between calls.
+    fn list(&self) -> Vec<(SessionId, SessionStatus)> {
+        let mut entries: Vec<(SessionId, SessionStatus)> = self
+            .sessions
+            .iter()
+            .map(|(id, handle)| (id.clone(), handle.status))
+            .collect();
+        entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        entries
+    }
+
+    fn set_status(&mut self, id: &SessionId, status: SessionStatus) {
+        if let Some(handle) = self.sessions.get_mut(id) {
+            handle.status = status;
+        }
     }
 
     /// Remove a session and hand its handle to the caller. Dropping the handle
@@ -424,6 +439,22 @@ impl SessionRegistry {
 /// stdio run gets its own private one; `serve` creates a single table and
 /// hands clones to each connection.
 type SharedSessions = Arc<tokio::sync::Mutex<SessionRegistry>>;
+
+/// Keeps the registry's status for one session current. The engine's event hub
+/// closes when the actor ends, which ends this task too.
+fn spawn_status_tracker(
+    sessions: SharedSessions,
+    session_id: SessionId,
+    mut events: mpsc::UnboundedReceiver<SessionEvent>,
+) {
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let SessionEvent::StatusChanged { status, .. } = event {
+                sessions.lock().await.set_status(&session_id, status);
+            }
+        }
+    });
+}
 
 /// Owns everything the read loop needs across the life of the connection:
 /// the active session registry, and the tables correlating a
@@ -639,6 +670,7 @@ impl Router {
                 approvals.subscribe(self.permission_relay_tx.clone()).await;
                 let session =
                     HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
+                let events = session.subscribe_events();
                 let cancel = session.cancel_handle();
                 let handle = SessionActor::spawn(
                     session,
@@ -655,6 +687,7 @@ impl Router {
                     updates,
                     approvals,
                 );
+                spawn_status_tracker(self.sessions.clone(), session_id.clone(), events);
 
                 // Configs are validated here; the handshake itself happens in
                 // SessionActor::spawn, which calls session.connect_mcp() off the
@@ -679,10 +712,10 @@ impl Router {
             //
             // Custom (not ACP v1): every live session on this server.
             "session/list" => {
-                let ids = self.sessions.lock().await.list();
-                let sessions: Vec<serde_json::Value> = ids
+                let entries = self.sessions.lock().await.list();
+                let sessions: Vec<serde_json::Value> = entries
                     .into_iter()
-                    .map(|id| serde_json::json!({ "sessionId": id }))
+                    .map(|(id, status)| serde_json::json!({ "sessionId": id, "status": status }))
                     .collect();
                 Ok(serde_json::json!({ "sessions": sessions }))
             }
@@ -1777,6 +1810,7 @@ mod tests {
             .expect("session/list answers");
         let value: serde_json::Value = serde_json::from_str(listed.trim()).unwrap();
         assert_eq!(value["result"]["sessions"][0]["sessionId"], "sess_1");
+        assert_eq!(value["result"]["sessions"][0]["status"], "idle");
 
         let closed = router
             .handle(classify(&json!({
@@ -1808,6 +1842,49 @@ mod tests {
             .await
             .expect("attach answers with an error line");
         assert!(attach.contains("no such session"), "{attach}");
+    }
+
+    /// The engine's status events must reach the shared registry; that is what
+    /// `session/list` reports to a client.
+    #[tokio::test]
+    async fn the_status_tracker_updates_the_registry() {
+        use std::time::Duration;
+
+        let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(SessionRegistry::new()));
+        let id = {
+            let mut registry = sessions.lock().await;
+            let id = registry.allocate_id();
+            let (commands, _rx) = mpsc::channel(1);
+            registry.insert(
+                id.clone(),
+                commands,
+                CancelHandle::default(),
+                UpdateHub::new(id.clone()),
+                ApprovalHub::new(),
+            );
+            id
+        };
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        spawn_status_tracker(sessions.clone(), id.clone(), events_rx);
+        events_tx
+            .send(SessionEvent::StatusChanged {
+                session_id: id.clone(),
+                status: SessionStatus::Running,
+            })
+            .unwrap();
+
+        let status = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let status = sessions.lock().await.list()[0].1;
+                if status == SessionStatus::Running {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the tracker must apply the event");
+        assert_eq!(status, SessionStatus::Running);
     }
 
     /// Every attached connection gets its own copy of an approval ask, so any
