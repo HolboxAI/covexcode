@@ -26,7 +26,7 @@
 //! - No compaction. `App::finish_compaction`'s logic isn't replicated here;
 //!   a long headless session just keeps growing its own history for now.
 //!
-//! One round of `stream_chat` is consumed the same way `agent::run_subagent`
+//! One round of `stream_chat` is consumed the same way `subagent::run_subagent`
 //! already does (`tokio::select!` over the pinned stream future and its
 //! event channel) -- a proven pattern in this codebase, not a new one
 //! invented for this module.
@@ -855,7 +855,7 @@ impl HeadlessSession {
         }
     }
 
-    /// One `stream_chat` round, consumed the same way `agent::run_subagent`
+    /// One `stream_chat` round, consumed the same way `subagent::run_subagent`
     /// already does -- see that function's own comments for why
     /// `tokio::select!` over the pinned future is the right shape here
     /// (this was not reinvented for this module).
