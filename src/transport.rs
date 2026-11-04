@@ -1381,9 +1381,18 @@ mod tests {
         assert_eq!(value["id"], 2);
         assert_eq!(value["result"]["sessionId"], "sess_1");
 
-        drop(client_write);
-        server
+        // `tokio::io::split` keeps the underlying stream alive until *both*
+        // halves drop, so dropping the write half alone would leave the
+        // server's `next_line` waiting forever. Shut the write direction down
+        // explicitly so it observes EOF.
+        client_write
+            .shutdown()
             .await
+            .expect("shut the client write half");
+        drop(client_write);
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("the server must observe EOF promptly")
             .expect("server task")
             .expect("the stream loop ends cleanly on EOF");
     }
