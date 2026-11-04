@@ -139,12 +139,25 @@ pub enum TurnStopReason {
     Cancelled,
 }
 
+/// Lifecycle of one tool call as a client needs to render it. This is the
+/// transport-agnostic counterpart of the ACP tool status; `Completed` and
+/// `Failed` are both terminal.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+}
+
 /// Transport-agnostic output from a session engine.
 ///
 /// The ACP path continues to emit its own `SessionUpdate` stream; this is the
 /// stream a TUI, daemon, or orchestration client can consume without speaking
-/// ACP. It starts with the turn/text spine; tool and approval events are
-/// added when the engine loop moves behind this boundary.
+/// ACP. It covers the turn spine, streamed text, tool lifecycle, and usage;
+/// approval requests stay on the engine's existing approval channel until the
+/// command side of the contract lands.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
@@ -156,6 +169,31 @@ pub enum SessionEvent {
         session_id: SessionId,
         turn: TurnId,
         text: String,
+    },
+    ToolCallStarted {
+        session_id: SessionId,
+        turn: TurnId,
+        tool_call_id: String,
+        title: String,
+    },
+    ToolCallUpdated {
+        session_id: SessionId,
+        turn: TurnId,
+        tool_call_id: String,
+        status: Option<ToolStatus>,
+        /// Text the client should show for this call (an error, a short
+        /// result). Diffs are not copied into the stream; an interactive
+        /// client gets the change through the approval request.
+        text: Option<String>,
+    },
+    UsageUpdated {
+        session_id: SessionId,
+        turn: TurnId,
+        /// Prompt + completion spend of this one response.
+        used: u64,
+        /// The model's context window, `0` when unknown.
+        size: u64,
+        prompt_tokens: Option<u64>,
     },
     TurnFinished {
         session_id: SessionId,
@@ -213,6 +251,47 @@ mod tests {
         };
         let json = serde_json::to_string(&finished).unwrap();
         assert!(json.contains("\"reason\":\"end_turn\""), "{json}");
+    }
+
+    #[test]
+    fn tool_and_usage_events_round_trip() {
+        let started = SessionEvent::ToolCallStarted {
+            session_id: SessionId::new("sess_1"),
+            turn: TurnId::new(1),
+            tool_call_id: "call_1".to_string(),
+            title: "Read hello.txt".to_string(),
+        };
+        let json = serde_json::to_string(&started).unwrap();
+        assert!(json.contains("\"type\":\"tool_call_started\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<SessionEvent>(&json).unwrap(),
+            started
+        );
+
+        let updated = SessionEvent::ToolCallUpdated {
+            session_id: SessionId::new("sess_1"),
+            turn: TurnId::new(1),
+            tool_call_id: "call_1".to_string(),
+            status: Some(ToolStatus::Completed),
+            text: Some("hi".to_string()),
+        };
+        let json = serde_json::to_string(&updated).unwrap();
+        assert!(json.contains("\"status\":\"completed\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<SessionEvent>(&json).unwrap(),
+            updated
+        );
+
+        let usage = SessionEvent::UsageUpdated {
+            session_id: SessionId::new("sess_1"),
+            turn: TurnId::new(1),
+            used: 120,
+            size: 200_000,
+            prompt_tokens: Some(100),
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        assert!(json.contains("\"type\":\"usage_updated\""), "{json}");
+        assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), usage);
     }
 
     #[test]
