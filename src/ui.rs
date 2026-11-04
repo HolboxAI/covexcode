@@ -1523,6 +1523,9 @@ fn render_overlay(f: &mut Frame, area: Rect, app: &App) {
             filter,
             selected,
         }) => render_prompt_picker(f, area, items, filter, *selected),
+        Some(Overlay::SessionsPicker { items, selected }) => {
+            render_sessions_picker(f, area, items, *selected)
+        }
         Some(Overlay::QueryRollbackPicker { queries, selected }) => {
             render_query_rollback_picker(f, area, queries, *selected)
         }
@@ -3202,6 +3205,126 @@ fn render_prompt_picker(
         vec![ListItem::new("No matching prompts found.")]
     } else {
         rows.iter().map(|r| ListItem::new(r.clone())).collect()
+    };
+    let list = List::new(list_items)
+        .style(theme::text())
+        .highlight_style(
+            Style::default()
+                .fg(theme::p().accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        )
+        .highlight_symbol("❯ ");
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    *state.offset_mut() = start;
+
+    let list_rect = Rect {
+        x: list_area.x,
+        y: list_area.y,
+        width: list_area.width.saturating_sub(1),
+        height: list_area.height,
+    };
+    f.render_stateful_widget(list, list_rect, &mut state);
+
+    let scrollbar_rect = Rect {
+        x: list_area.x + list_area.width.saturating_sub(1),
+        y: list_area.y,
+        width: 1,
+        height: list_area.height,
+    };
+    let track = list_area.height as usize;
+    let thumb = if content_length == 0 || visible >= content_length {
+        track
+    } else {
+        (((visible as f64 / content_length as f64) * track as f64).round() as usize).clamp(1, track)
+    };
+    let max_scroll = content_length.saturating_sub(visible);
+    let thumb_top = if max_scroll == 0 {
+        0
+    } else {
+        (((start as f64 / max_scroll as f64) * (track - thumb) as f64).round() as usize)
+            .min(track - thumb)
+    };
+    let bar: Vec<Line> = (0..track)
+        .map(|row| {
+            let in_thumb = row >= thumb_top && row < thumb_top + thumb;
+            let (symbol, style) = if in_thumb {
+                ("┃", Style::default().fg(theme::p().accent))
+            } else {
+                ("│", Style::default().fg(theme::p().border))
+            };
+            Line::from(Span::styled(symbol, style))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(bar), scrollbar_rect);
+}
+
+/// `/sessions`: one row per recorded conversation, newest first. Same
+/// fixed-height, scrollbar-bearing list as the prompt picker -- a project can
+/// accumulate dozens of sessions, and a popup that grew past the screen would
+/// push its own hint line off the bottom.
+fn render_sessions_picker(
+    f: &mut Frame,
+    area: Rect,
+    items: &[crate::session::SavedSession],
+    selected: usize,
+) {
+    let rows: Vec<String> = items
+        .iter()
+        .map(|session| {
+            format!(
+                "{}  ·  {} message{}  ·  {}",
+                session.date,
+                session.messages,
+                if session.messages == 1 { "" } else { "s" },
+                session.preview
+            )
+        })
+        .collect();
+
+    let height = FIXED_PICKER_HEIGHT.clamp(MIN_POPUP_HEIGHT, area.height);
+    let popup = centered_rect(76, height, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::p().accent))
+        .title(Span::styled(" Sessions ", theme::accent_bold()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let hint = Line::from(vec![
+        Span::styled("↑↓", theme::key()),
+        Span::styled(" move  ", theme::faint()),
+        Span::styled("↵", theme::key()),
+        Span::styled(" resume  ", theme::faint()),
+        Span::styled("esc", theme::key()),
+        Span::styled(" close", theme::faint()),
+    ]);
+    f.render_widget(Paragraph::new(hint), inner);
+
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+
+    let visible = list_area.height as usize;
+    let content_length = rows.len();
+    let start = if visible == 0 {
+        0
+    } else {
+        selected
+            .saturating_sub(visible - 1)
+            .min(content_length.saturating_sub(visible))
+    };
+
+    let list_items: Vec<ListItem> = if rows.is_empty() {
+        vec![ListItem::new("No recorded sessions for this directory.")]
+    } else {
+        rows.iter().map(|row| ListItem::new(row.clone())).collect()
     };
     let list = List::new(list_items)
         .style(theme::text())

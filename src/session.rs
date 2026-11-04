@@ -18,7 +18,7 @@
 //! resumed-from file is never appended to either: resuming copies the loaded
 //! messages into a new file and continues there.
 
-use crate::message::Message;
+use crate::message::{Message, Role};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -172,6 +172,95 @@ pub fn latest_for(workspace: &str) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// One recorded conversation, reduced to what a picker shows. Parsing every
+/// message of every file is deliberate: the files are small, and a preview
+/// that guessed from the first line would show a tool result or a system
+/// note instead of the prompt the user typed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedSession {
+    pub path: PathBuf,
+    /// Filename stamp (milliseconds since the epoch): the sort key.
+    pub stamp: u128,
+    /// The header's date, for display.
+    pub date: String,
+    /// The first user prompt, one line, clipped.
+    pub preview: String,
+    /// How many messages actually parsed out of the file.
+    pub messages: usize,
+}
+
+/// Every recorded conversation for `workspace`, newest first.
+pub fn list_for(workspace: &str) -> Vec<SavedSession> {
+    let Some(dir) = sessions_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut sessions = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(stamp) = name.parse::<u128>() else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(first) = content.lines().next() else {
+            continue;
+        };
+        let Ok(header) = serde_json::from_str::<Header>(first) else {
+            continue;
+        };
+        if header.workspace != workspace {
+            continue;
+        }
+        let messages: Vec<Message> = content
+            .lines()
+            .skip(1)
+            .filter_map(|line| serde_json::from_str::<Message>(line).ok())
+            .collect();
+        if messages.is_empty() {
+            continue;
+        }
+        let preview = messages
+            .iter()
+            .find(|message| message.role == Role::User)
+            .map(preview_of)
+            .filter(|preview| !preview.is_empty())
+            .unwrap_or_else(|| "(no prompt)".to_string());
+        sessions.push(SavedSession {
+            path,
+            stamp,
+            date: header.date,
+            preview,
+            messages: messages.len(),
+        });
+    }
+    sessions.sort_by(|a, b| b.stamp.cmp(&a.stamp));
+    sessions
+}
+
+/// The first non-empty line of a message, clipped for a one-line picker row.
+fn preview_of(message: &Message) -> String {
+    let text = message
+        .content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let mut chars = text.chars();
+    let clipped: String = chars.by_ref().take(72).collect();
+    if chars.next().is_some() {
+        format!("{clipped}…")
+    } else {
+        clipped
+    }
+}
+
 /// The messages recorded in one session file, in order. Unparseable lines --
 /// the header, a truncated final write, an older format -- are skipped.
 pub fn load(path: &Path) -> Vec<Message> {
@@ -307,6 +396,57 @@ mod tests {
             let loaded = load(&path);
             assert_eq!(loaded.len(), 1);
             assert_eq!(loaded[0].content, "kept");
+        });
+    }
+
+    #[test]
+    fn sessions_are_listed_newest_first_for_one_workspace() {
+        crate::config::test_support::with_isolated_home(|| {
+            let dir = sessions_dir().expect("sessions dir");
+            std::fs::create_dir_all(&dir).unwrap();
+            let write = |stamp: u128, workspace: &str, messages: &[Message]| {
+                let header = Header {
+                    workspace: workspace.to_string(),
+                    date: "2026-01-01".to_string(),
+                };
+                let mut lines = vec![serde_json::to_string(&header).unwrap()];
+                lines.extend(messages.iter().map(|m| serde_json::to_string(m).unwrap()));
+                std::fs::write(dir.join(format!("{stamp}.jsonl")), lines.join("\n")).unwrap();
+            };
+            write(
+                2,
+                "/tmp/proj",
+                &[msg(Role::User, "second"), msg(Role::Assistant, "ok")],
+            );
+            write(1, "/tmp/proj", &[msg(Role::User, "first")]);
+            write(3, "/tmp/other", &[msg(Role::User, "elsewhere")]);
+            write(4, "/tmp/proj", &[msg(Role::Assistant, "no prompt")]);
+
+            let listed = list_for("/tmp/proj");
+            assert_eq!(listed.len(), 3);
+            assert_eq!(listed[0].stamp, 4);
+            assert_eq!(listed[0].preview, "(no prompt)");
+            assert_eq!(listed[1].stamp, 2);
+            assert_eq!(listed[1].preview, "second");
+            assert_eq!(listed[1].messages, 2);
+            assert_eq!(listed[1].date, "2026-01-01");
+            assert_eq!(listed[2].preview, "first");
+        });
+    }
+
+    #[test]
+    fn a_long_preview_is_clipped_to_one_line() {
+        crate::config::test_support::with_isolated_home(|| {
+            let mut log = SessionLog::new("/tmp/proj");
+            // A leading blank line must be skipped, and the single long line
+            // must be clipped rather than wrapped into the row.
+            let long = format!("\n{}", "x".repeat(200));
+            log.append(&[msg(Role::User, &long)]);
+            let listed = list_for("/tmp/proj");
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].preview.chars().count(), 73);
+            assert!(listed[0].preview.ends_with('…'));
+            assert!(!listed[0].preview.contains('\n'));
         });
     }
 }
