@@ -40,7 +40,7 @@ use crate::protocol::{
     CheckInBrowserOutcome, CheckInBrowserRequest, Implementation, InitializeRequest,
     InitializeResponse, InteractInBrowserOutcome, InteractInBrowserRequest, JsonRpcVersion,
     ListChangesRequest, ListChangesResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse, RequestId, RequestPermissionOutcome, RequestPermissionRequest, RollbackRequest,
+    PromptResponse, RequestId, RequestPermissionOutcome, RollbackRequest,
     RollbackResponse, RpcError, RpcErrorObject, RpcRequest, RpcResponse, SessionId,
     SessionNotification, PROTOCOL_VERSION,
 };

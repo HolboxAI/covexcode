@@ -4058,11 +4058,13 @@ mod tests {
             browser_interact_rx.try_recv().is_err(),
             "must not act before the user answers the permission ask"
         );
-        let _ = permission_ask
-            .respond
-            .send(RequestPermissionOutcome::Selected {
+        let _ = permission_ask.approvals.respond(
+            permission_ask.request_id,
+            RequestPermissionOutcome::Selected {
                 option_id: PermissionOptionId("allow".to_string()),
-            });
+            }
+            .into(),
+        );
 
         let interact_ask = browser_interact_rx
             .recv()
@@ -4142,11 +4144,13 @@ mod tests {
         });
 
         let permission_ask = permissions_rx.recv().await.expect("a permission ask");
-        let _ = permission_ask
-            .respond
-            .send(RequestPermissionOutcome::Selected {
+        let _ = permission_ask.approvals.respond(
+            permission_ask.request_id,
+            RequestPermissionOutcome::Selected {
                 option_id: PermissionOptionId("reject".to_string()),
-            });
+            }
+            .into(),
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
