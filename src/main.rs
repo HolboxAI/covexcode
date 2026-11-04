@@ -65,8 +65,26 @@ use workspace::Workspace;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Opt-in stderr tracing for benchmarks and troubleshooting.
+///
+/// Silent unless `COVEXCODE_TRACE` is set, so normal CLI output is unchanged.
+/// The `perf` target carries model-request timings; other targets keep their
+/// existing behavior.
+fn init_tracing() {
+    if std::env::var_os("COVEXCODE_TRACE").is_none() {
+        return;
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .try_init();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    init_tracing();
+
     // Handle flags before touching the terminal, so `--version` works when
     // piped and `--upgrade` still runs even if the config file is broken.
     let mut upgrade = false;

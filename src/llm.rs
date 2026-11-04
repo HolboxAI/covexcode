@@ -502,6 +502,25 @@ fn http_client() -> Result<&'static reqwest::Client, String> {
         .map_err(|e| e.clone())
 }
 
+/// Emits total model-request latency when `COVEXCODE_TRACE` has installed a
+/// tracing subscriber. A guard rather than an end-of-function log, so retries,
+/// early errors, and every other return path produce exactly one record.
+struct RequestTimer {
+    started: std::time::Instant,
+    model: String,
+}
+
+impl Drop for RequestTimer {
+    fn drop(&mut self) {
+        tracing::debug!(
+            target: "perf",
+            model = %self.model,
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            "llm.request.complete"
+        );
+    }
+}
+
 pub async fn stream_chat(
     target: Target<'_>,
     messages: Vec<ChatMessage>,
@@ -585,6 +604,10 @@ async fn run(
         req
     };
     let mut req = build_request(&url);
+    let _request_timer = RequestTimer {
+        started: std::time::Instant::now(),
+        model: model.to_string(),
+    };
 
     // Retry the connection/status-check phase only -- never once a token has
     // reached the caller, since replaying a request that already streamed part
