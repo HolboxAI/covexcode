@@ -293,17 +293,49 @@ impl ApprovalHandle {
     }
 }
 
+/// Fan-out for one session's transport-agnostic events. Subscribers start at
+/// the next event; there is no replay, because a manager attaching to a live
+/// session needs the current state (snapshotted separately), not a re-run of
+/// its history.
+#[derive(Clone, Default)]
+pub struct EventHub {
+    subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<SessionEvent>>>>,
+}
+
+impl EventHub {
+    /// Subscribe for events emitted from now on.
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<SessionEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.add(tx);
+        rx
+    }
+
+    fn add(&self, tx: mpsc::UnboundedSender<SessionEvent>) {
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(tx);
+    }
+
+    fn send(&self, event: SessionEvent) {
+        let mut subscribers = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+        // A closed receiver is a detached client; drop it rather than letting
+        // closed subscribers accumulate for the life of the session.
+        subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+}
+
 /// Adapts the engine's ACP-shaped progress updates to the
 /// transport-agnostic event stream in one place.
 ///
 /// Every `SessionUpdate` still goes to the ACP channel unchanged; the same
-/// update is also mapped to a `SessionEvent` for a subscribed client, so the
+/// update is also mapped to a `SessionEvent` for every subscriber, so the
 /// two views cannot drift and adding an event never means editing the
 /// forty-odd tool sites. Holds clones, not a borrow of the session: the
 /// engine mutates itself while a sink is alive.
 struct UpdateSink<'a> {
     updates: &'a mpsc::Sender<SessionUpdate>,
-    events: Option<mpsc::UnboundedSender<SessionEvent>>,
+    events: EventHub,
     session_id: SessionId,
     turn: TurnId,
 }
@@ -311,17 +343,12 @@ struct UpdateSink<'a> {
 impl<'a> UpdateSink<'a> {
     async fn send(&self, update: SessionUpdate) {
         if let Some(event) = self.event_for(&update) {
-            if let Some(tx) = &self.events {
-                let _ = tx.send(event);
-            }
+            self.events.send(event);
         }
         let _ = self.updates.send(update).await;
     }
 
     fn event_for(&self, update: &SessionUpdate) -> Option<SessionEvent> {
-        if self.events.is_none() {
-            return None;
-        }
         let session_id = self.session_id.clone();
         match update {
             SessionUpdate::AgentMessageChunk {
@@ -512,10 +539,10 @@ pub struct HeadlessSession {
     /// `decide_and_run`/`ask_permission`'s own calls to `.record(...)`) --
     /// not a parallel reimplementation, the same mechanism reused.
     rollback: crate::rollback::Journal,
-    /// Optional transport-agnostic event stream. The ACP transport leaves this
-    /// unset and keeps using `SessionUpdate`; a TUI/daemon client can subscribe
-    /// without changing the ACP path.
-    events: Option<mpsc::UnboundedSender<SessionEvent>>,
+    /// Transport-agnostic event fan-out. The ACP transport keeps using
+    /// `SessionUpdate`; any number of TUI/daemon subscribers can observe the
+    /// same session without changing the ACP path.
+    events: EventHub,
     /// Cooperative cancellation for the currently running turn. Reset at the
     /// start of every prompt, so a stale cancel cannot kill the next turn.
     cancel: CancelHandle,
@@ -541,7 +568,7 @@ impl HeadlessSession {
             last_prompt_tokens: None,
             rollback: crate::rollback::Journal::default(),
             mcp: crate::mcp::McpRegistry::default(),
-            events: None,
+            events: EventHub::default(),
             cancel: CancelHandle::default(),
             approvals: ApprovalHandle::default(),
         }
@@ -571,13 +598,17 @@ impl HeadlessSession {
     /// Attach the transport-agnostic event sink. ACP does not use it; this is
     /// the seam the TUI/daemon client will consume instead of ACP types.
     pub fn set_event_sink(&mut self, tx: mpsc::UnboundedSender<SessionEvent>) {
-        self.events = Some(tx);
+        self.events.add(tx);
+    }
+
+    /// Subscribe to the transport-agnostic event stream from now on. This is
+    /// the seam a TUI or a session manager uses; the ACP path is unchanged.
+    pub fn subscribe_events(&self) -> mpsc::UnboundedReceiver<SessionEvent> {
+        self.events.subscribe()
     }
 
     fn emit(&self, event: SessionEvent) {
-        if let Some(tx) = &self.events {
-            let _ = tx.send(event);
-        }
+        self.events.send(event);
     }
 
     fn emit_status(&self, status: SessionStatus) {
@@ -2449,6 +2480,14 @@ mod tests {
         format!("http://{addr}")
     }
 
+    fn drain_events(rx: &mut mpsc::UnboundedReceiver<SessionEvent>) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
     fn config_for(endpoint: &str) -> Config {
         let mut config = Config::default();
         config.llm.endpoint = endpoint.to_string();
@@ -2578,6 +2617,46 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Multiple clients can watch the same session: every subscriber gets its
+    /// own copy of the stream, and a detached one is dropped without
+    /// affecting the rest. This is the foundation for a shared session
+    /// manager serving more than one connection.
+    #[tokio::test]
+    async fn every_event_subscriber_sees_the_same_stream() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![text_round("Hello!")]).await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let mut first = session.subscribe_events();
+        let mut second = session.subscribe_events();
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let first_events = drain_events(&mut first);
+        let second_events = drain_events(&mut second);
+        assert!(!first_events.is_empty());
+        assert_eq!(first_events, second_events);
+        assert!(first_events.iter().any(|event| matches!(
+            event,
+            SessionEvent::TextDelta { text, .. } if text == "Hello!"
+        )));
     }
 
     /// The event stream must cover the tool lifecycle too, not just text and
