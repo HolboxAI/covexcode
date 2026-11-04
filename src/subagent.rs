@@ -2,18 +2,94 @@
  *  Copyright (c) HolboxAI. Licensed under the MIT License.
  *--------------------------------------------------------------------------------------------*/
 
-//! The read-only `explore` subagent: a child agent loop whose "user" is the
-//! parent model.
+//! Read-only subagents: child agent loops whose "user" is the parent model.
 //!
-//! It lives in its own module rather than in `agent.rs` because `agent.rs`
-//! also owns the TUI loop and imports `App`; the ACP-only runtime deliberately
-//! omits the TUI, and it still needs subagents. Nothing here touches `App`.
+//! `explore` is built in. Users can add named read-only agents as TOML files
+//! under `<project>/.covexcode/agents/` or `~/.covexcode/agents/`; the project
+//! wins on a name collision, and `explore` itself cannot be redefined. The
+//! child always gets the same read-only tool slice, so a definition changes
+//! what the child is asked to do, never what it is able to do.
+//!
+//! This lives outside `agent.rs` because `agent.rs` also owns the TUI loop and
+//! imports `App`; the ACP-only runtime deliberately omits the TUI and still
+//! needs subagents. Nothing here touches `App`.
 
 use crate::config::Config;
 use crate::llm::{self, ChatMessage, StreamEvent, ToolCall};
 use crate::tools::{self, ToolOutcome};
 use crate::workspace::Workspace;
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::path::Path;
 use tokio::sync::mpsc;
+
+/// One user-defined read-only agent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentDefinition {
+    pub name: String,
+    pub description: String,
+    /// Appended to the built-in child system prompt, so the read-only rules
+    /// stay in force even for a hand-written definition.
+    pub prompt: String,
+}
+
+#[derive(Deserialize)]
+struct AgentFile {
+    name: String,
+    #[serde(default)]
+    description: String,
+    prompt: String,
+}
+
+/// Every usable definition, project over user, sorted by name. Invalid or
+/// unreadable files are skipped: a bad agent file is a convenience lost, not
+/// a session that should fail.
+pub fn definitions(workspace_root: &Path) -> Vec<AgentDefinition> {
+    let mut by_name: BTreeMap<String, AgentDefinition> = BTreeMap::new();
+    let user = crate::config::Config::config_dir().join("agents");
+    let project = workspace_root.join(".covexcode").join("agents");
+    // User first, project second: a project can override a personal agent of
+    // the same name.
+    for dir in [user, project] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        paths.sort();
+        for path in paths {
+            if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(file) = toml::from_str::<AgentFile>(&content) else {
+                continue;
+            };
+            let name = file.name.trim();
+            if !valid_agent_name(name) || name == "explore" || file.prompt.trim().is_empty() {
+                continue;
+            }
+            by_name.insert(
+                name.to_string(),
+                AgentDefinition {
+                    name: name.to_string(),
+                    description: file.description.trim().to_string(),
+                    prompt: file.prompt.trim().to_string(),
+                },
+            );
+        }
+    }
+    by_name.into_values().collect()
+}
+
+fn valid_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
 
 /// Run one read-only subagent to completion and return its report as the
 /// tool outcome. Phase 4 of `upgrade-plan.md`: a subagent is an agent loop
@@ -56,18 +132,32 @@ pub async fn run_subagent(
             rollback: None,
         };
     };
-    if agent_type != "explore" {
-        return ToolOutcome {
-            call_id: call.id.clone(),
-            display: format!("agent — no such type '{agent_type}'"),
-            content: format!(
-                "Error: there is no '{agent_type}' subagent. Only 'explore' (read-only \
-                 research) exists; omit agent_type to get it, and do any writing yourself."
-            ),
-            diff: None,
-            rollback: None,
-        };
-    }
+    let definition = if agent_type == "explore" {
+        None
+    } else {
+        let mut available = definitions(workspace.root());
+        match available
+            .iter()
+            .position(|definition| definition.name == agent_type)
+        {
+            Some(index) => Some(available.swap_remove(index)),
+            None => {
+                let mut names = vec!["explore".to_string()];
+                names.extend(available.into_iter().map(|definition| definition.name));
+                return ToolOutcome {
+                    call_id: call.id.clone(),
+                    display: format!("agent — no such type '{agent_type}'"),
+                    content: format!(
+                        "Error: there is no '{agent_type}' subagent. Available types: {}. \
+                         Omit agent_type for 'explore', and do any writing yourself.",
+                        names.join(", ")
+                    ),
+                    diff: None,
+                    rollback: None,
+                };
+            }
+        }
+    };
 
     let max_steps = config.tools.subagent_max_steps;
     let token_budget = config.tools.subagent_token_budget;
@@ -96,14 +186,18 @@ pub async fn run_subagent(
             (max_steps == 0 || steps < max_steps) && (token_budget == 0 || spent < token_budget);
         // Telling the prompt the budget is gone (whichever budget it was) is
         // what makes the last round an answer instead of another search.
-        history[0] = ChatMessage::text(
-            "system",
-            tools::subagent_system_prompt(
-                workspace,
-                if budget_left { steps } else { max_steps },
-                max_steps,
-            ),
+        let mut system = tools::subagent_system_prompt(
+            workspace,
+            if budget_left { steps } else { max_steps },
+            max_steps,
         );
+        // A definition extends the built-in prompt rather than replacing it:
+        // the read-only rules and the budget warning stay in force.
+        if let Some(definition) = &definition {
+            system.push_str("\n\n");
+            system.push_str(&definition.prompt);
+        }
+        history[0] = ChatMessage::text("system", system);
         let schemas = if budget_left {
             tools::subagent_schemas()
         } else {
@@ -318,5 +412,45 @@ fn brief(s: &str, max: usize) -> String {
     } else {
         let kept: String = s.chars().take(max).collect();
         format!("{kept}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definitions_merge_user_and_project_and_skip_bad_files() {
+        crate::config::test_support::with_isolated_home(|| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let user = crate::config::Config::config_dir().join("agents");
+            let project = workspace.path().join(".covexcode").join("agents");
+            std::fs::create_dir_all(&user).unwrap();
+            std::fs::create_dir_all(&project).unwrap();
+            let write = |dir: &Path, file: &str, name: &str, prompt: &str| {
+                std::fs::write(
+                    dir.join(file),
+                    format!("name = \"{name}\"\ndescription = \"desc\"\nprompt = \"{prompt}\"\n"),
+                )
+                .unwrap();
+            };
+            write(&user, "reviewer.toml", "reviewer", "user prompt");
+            // Project wins on a name collision.
+            write(&project, "reviewer.toml", "reviewer", "project prompt");
+            write(&project, "tests.toml", "tests", "test prompt");
+            // Built-in names cannot be redefined, and bad files are skipped.
+            write(&project, "explore.toml", "explore", "hijack");
+            write(&project, "bad-name.toml", "bad name", "nope");
+            std::fs::write(project.join("broken.toml"), "not toml").unwrap();
+
+            let definitions = definitions(workspace.path());
+            let names: Vec<&str> = definitions
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["reviewer", "tests"]);
+            assert_eq!(definitions[0].prompt, "project prompt");
+            assert_eq!(definitions[1].prompt, "test prompt");
+        });
     }
 }

@@ -515,6 +515,42 @@ mod tests {
         );
     }
 
+    /// A project-defined agent type is accepted, and its prompt is appended
+    /// to the built-in child prompt rather than replacing it.
+    #[tokio::test]
+    async fn a_custom_agent_type_gets_its_own_prompt() {
+        let (dir, ws) = workspace_with_hello();
+        let agents = dir.path().join(".covexcode").join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("reviewer.toml"),
+            "name = \"reviewer\"\ndescription = \"reviews code\"\nprompt = \"You are a reviewer.\"\n",
+        )
+        .unwrap();
+        let (endpoint, requests) = serve_rounds(vec![text_round("reviewed")]).await;
+        let config = config_for(&endpoint);
+
+        let outcome = run_subagent(
+            &agent_call(json!({ "task": "review hello.txt", "agent_type": "reviewer" })),
+            &ws,
+            &config,
+            None,
+        )
+        .await;
+
+        assert_eq!(outcome.content, "reviewed");
+        let requests = requests.await.expect("served");
+        assert!(
+            requests[0].contains("You are a reviewer."),
+            "the definition's prompt must reach the child: {}",
+            requests[0]
+        );
+        assert!(
+            requests[0].contains("read-only"),
+            "the built-in read-only rules must stay in force"
+        );
+    }
+
     /// A child that asks to write gets the refusal as that call's result and
     /// can still finish -- the read-only guarantee holds without anything
     /// reaching disk or a prompt.
