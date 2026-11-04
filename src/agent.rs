@@ -484,6 +484,37 @@ mod tests {
         );
     }
 
+    /// Research can be pointed at a faster model without changing the
+    /// parent's. The request carries the child model, and the usage ledger
+    /// attributes the spend to it.
+    #[tokio::test]
+    async fn a_subagent_can_use_its_own_model() {
+        let (_dir, ws) = workspace_with_hello();
+        let (endpoint, requests) = serve_rounds(vec![text_round("done")]).await;
+        let mut config = config_for(&endpoint);
+        config.tools.subagent_model = Some("fast-model".to_string());
+
+        let outcome = run_subagent(
+            &agent_call(json!({ "task": "look around" })),
+            &ws,
+            &config,
+            None,
+        )
+        .await;
+
+        assert_eq!(outcome.content, "done");
+        let requests = requests.await.expect("served");
+        assert!(
+            requests[0].contains("fast-model"),
+            "the child request must name the routed model: {}",
+            requests[0]
+        );
+        assert!(
+            !requests[0].contains("test-model"),
+            "the parent model must not leak into the child request"
+        );
+    }
+
     /// A child that asks to write gets the refusal as that call's result and
     /// can still finish -- the read-only guarantee holds without anything
     /// reaching disk or a prompt.

@@ -71,6 +71,12 @@ pub async fn run_subagent(
 
     let max_steps = config.tools.subagent_max_steps;
     let token_budget = config.tools.subagent_token_budget;
+    // The parent's model unless the user pointed research at a faster one.
+    let model = config
+        .tools
+        .subagent_model
+        .as_deref()
+        .unwrap_or(&config.llm.model);
     let mut history = vec![
         ChatMessage::text("system", String::new()), // rewritten every round
         ChatMessage::text("user", task.clone()),
@@ -120,7 +126,7 @@ pub async fn run_subagent(
         let stream = llm::stream_chat(
             llm::Target {
                 endpoint: &config.llm.endpoint,
-                model: &config.llm.model,
+                model,
                 api_key: &config.llm.api_key,
                 max_tokens: config.llm.max_tokens,
                 context_window: config.llm.effective_context_window(),
@@ -169,7 +175,7 @@ pub async fn run_subagent(
             }
         };
         if let Some(e) = error {
-            record_subagent_usage(spent, config);
+            record_subagent_usage(spent, model);
             return ToolOutcome {
                 call_id: call.id.clone(),
                 display: format!("agent \"{}\" — failed", brief(&task, 40)),
@@ -191,7 +197,7 @@ pub async fn run_subagent(
             .unwrap_or_else(|| (request_chars + text.len()) / 4);
 
         if calls.is_empty() {
-            record_subagent_usage(spent, config);
+            record_subagent_usage(spent, model);
             let report = text.trim().to_string();
             return ToolOutcome {
                 call_id: call.id.clone(),
@@ -223,7 +229,7 @@ pub async fn run_subagent(
             overtime += 1;
             if overtime > 1 {
                 // Refused once already and it asked again: stop paying.
-                record_subagent_usage(spent, config);
+                record_subagent_usage(spent, model);
                 return ToolOutcome {
                     call_id: call.id.clone(),
                     display: format!("agent \"{}\" — budget spent", brief(&task, 40)),
@@ -286,9 +292,10 @@ pub async fn run_subagent(
 }
 
 /// A child's spend goes in the same ledger as everyone else's, attributed to
-/// the same model, so `/usage` stays honest about what a session cost.
-/// Per-agent attribution is Phase 5.4; this is the part that cannot wait.
-fn record_subagent_usage(spent: usize, config: &Config) {
+/// the model that actually spent it, so `/usage` stays honest when research
+/// is routed to a different model. Per-agent attribution is Phase 5.4; this
+/// is the part that cannot wait.
+fn record_subagent_usage(spent: usize, model: &str) {
     // Tests run in one process with a process-global `$HOME`. The app's own
     // usage tests isolate it with a lock, but the agent tests do not, so a
     // child's ledger write can land inside another test's temporary home and
@@ -297,10 +304,10 @@ fn record_subagent_usage(spent: usize, config: &Config) {
     // without touching the production path.
     #[cfg(test)]
     {
-        let _ = (spent, config);
+        let _ = (spent, model);
     }
     #[cfg(not(test))]
-    crate::usage::record_turn(spent, &config.llm.model);
+    crate::usage::record_turn(spent, model);
 }
 
 /// First `max` characters with an ellipsis -- for one-line transcript labels,
