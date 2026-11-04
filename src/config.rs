@@ -1581,13 +1581,20 @@ mod tests {
         with_isolated_home(|| {
             let home = PathBuf::from(std::env::var("HOME").unwrap());
             let legacy = home.join(".tuisample-code");
-            std::fs::create_dir_all(&legacy).unwrap();
+            // Build the legacy directory somewhere adoption cannot see, then
+            // move it into place in one step. Other tests call
+            // `Config::config_dir` without this test's HOME_LOCK, and an
+            // adoption triggered between these writes would rename the
+            // half-built directory out from under the fixture.
+            let staging = home.join(".tuisample-code-staging");
+            std::fs::create_dir_all(&staging).unwrap();
             std::fs::write(
-                legacy.join("config.toml"),
+                staging.join("config.toml"),
                 "[llm]\nendpoint = \"https://api.deepseek.com\"\nmodel = \"kept\"\napi_key = \"sk-kept\"\n",
             )
             .unwrap();
-            std::fs::write(legacy.join("device_id"), "device-kept").unwrap();
+            std::fs::write(staging.join("device_id"), "device-kept").unwrap();
+            std::fs::rename(&staging, &legacy).unwrap();
 
             let dir = Config::config_dir();
             assert!(dir.ends_with(".covexcode"), "{dir:?}");
