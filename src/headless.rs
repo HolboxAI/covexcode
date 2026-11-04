@@ -1276,17 +1276,48 @@ impl HeadlessSession {
         };
         let mut contents = Vec::with_capacity(calls.len());
         for chunk in calls.chunks(cap.max(1)) {
+            // One progress channel per chunk. Children announce each tool
+            // call they make; forwarding that as an in-progress update on the
+            // parent `agent` row keeps the client from sitting blind through
+            // a long research turn.
+            let (progress_tx, mut progress_rx) = mpsc::channel(64);
+            let progress = &progress_tx;
             let futures = chunk.iter().map(|call| {
                 let call = call.clone();
                 let workspace = self.workspace.clone();
                 let config = self.config.clone();
                 async move {
-                    // No per-call activity stream in this engine yet; the
-                    // client sees the call start and the final report.
-                    crate::subagent::run_subagent(&call, &workspace, &config, None).await
+                    crate::subagent::run_subagent(&call, &workspace, &config, Some((0, progress)))
+                        .await
                 }
             });
-            for outcome in futures::future::join_all(futures).await {
+            let mut batch = Box::pin(futures::future::join_all(futures));
+            let outcomes = loop {
+                tokio::select! {
+                    outcomes = &mut batch => break outcomes,
+                    Some((_, event)) = progress_rx.recv() => {
+                        if let StreamEvent::AgentActivity {
+                            call_id,
+                            label,
+                            rounds,
+                        } = event
+                        {
+                            let _ = updates
+                                .send(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                                    tool_call_id: ToolCallId(call_id),
+                                    title: None,
+                                    kind: None,
+                                    status: Some(ToolCallStatus::InProgress),
+                                    content: Some(ToolCallContent::Text {
+                                        text: format!("{label} (round {rounds})"),
+                                    }),
+                                }))
+                                .await;
+                        }
+                    }
+                }
+            };
+            for outcome in outcomes {
                 let _ = updates
                     .send(SessionUpdate::ToolCallUpdate((&outcome).into()))
                     .await;
@@ -2334,6 +2365,61 @@ mod tests {
             !report.contains("not handled"),
             "the engine must run the subagent, not fall through to tools::execute: {report}"
         );
+    }
+
+    /// A long child turn must not look frozen: the engine forwards each child
+    /// tool call as an in-progress update on the parent `agent` row.
+    #[tokio::test]
+    async fn engine_streams_subagent_activity_to_the_client() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![
+            tool_call_round(
+                tools::AGENT,
+                r#"{"task":"read hello.txt","agent_type":"explore"}"#,
+            ),
+            tool_call_round(tools::READ_FILE, r#"{"path":"hello.txt"}"#),
+            text_round("The file says hi."),
+            text_round("done"),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "research this".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let mut saw_progress = false;
+        let mut saw_report = false;
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::ToolCallUpdate(update) = update {
+                if let Some(ToolCallContent::Text { text }) = update.content {
+                    if update.status == Some(ToolCallStatus::InProgress)
+                        && text.contains("(round 1)")
+                    {
+                        saw_progress = true;
+                    }
+                    if text.contains("The file says hi.") {
+                        saw_report = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_progress, "the client must see the child working");
+        assert!(saw_report, "and still receive the final report");
     }
 
     #[tokio::test]
