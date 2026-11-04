@@ -250,18 +250,63 @@ impl SessionActor {
     }
 }
 
+/// One live session on this connection: the queue its actor reads and the
+/// handle that can stop the turn it is currently awaiting.
+struct SessionHandle {
+    commands: mpsc::Sender<SessionMsg>,
+    cancel: CancelHandle,
+}
+
+/// The sessions one connection owns.
+///
+/// Ids are allocated here rather than derived from `len() + 1`: the old
+/// scheme would hand out a duplicate id as soon as a close/removal path
+/// exists, and a session id is the address every later request uses.
+struct SessionRegistry {
+    sessions: HashMap<SessionId, SessionHandle>,
+    next_id: u64,
+}
+
+impl SessionRegistry {
+    fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            next_id: 0,
+        }
+    }
+
+    fn allocate_id(&mut self) -> SessionId {
+        self.next_id += 1;
+        SessionId(format!("sess_{}", self.next_id))
+    }
+
+    fn insert(&mut self, id: SessionId, commands: mpsc::Sender<SessionMsg>, cancel: CancelHandle) {
+        self.sessions.insert(id, SessionHandle { commands, cancel });
+    }
+
+    fn get(&self, id: &SessionId) -> Option<&SessionHandle> {
+        self.sessions.get(id)
+    }
+
+    /// Signal the live turn directly; the actor is awaiting it, so a queued
+    /// message could not be read in time.
+    fn cancel(&self, id: &SessionId) {
+        if let Some(handle) = self.sessions.get(id) {
+            handle.cancel.cancel();
+        }
+    }
+}
+
 /// Owns everything the read loop needs across the life of the connection:
-/// active sessions, and the tables correlating a `session/request_permission`,
-/// `session/checkInBrowser` or `session/interactInBrowser` response back to
-/// the specific pending ask that's waiting for it. Three separate tables,
-/// not one keyed by a shared enum -- same reasoning as `headless.rs`'s own
+/// the active session registry, and the tables correlating a
+/// `session/request_permission`, `session/checkInBrowser` or
+/// `session/interactInBrowser` response back to the specific pending ask
+/// that's waiting for it. Three separate tables, not one keyed by a shared
+/// enum -- same reasoning as `headless.rs`'s own
 /// `PermissionAsk`/`BrowserCheckAsk`/`BrowserInteractAsk` split: a small,
 /// explicit type (and table) per real use.
 struct Router {
-    sessions: HashMap<SessionId, mpsc::Sender<SessionMsg>>,
-    /// Cancellation is signaled directly, not through the session actor: the
-    /// actor is busy awaiting the very prompt that needs to stop.
-    cancels: HashMap<SessionId, CancelHandle>,
+    sessions: SessionRegistry,
     pending_permission_responses: HashMap<RequestId, oneshot::Sender<RequestPermissionOutcome>>,
     pending_browser_responses: HashMap<RequestId, oneshot::Sender<BrowserCheckResult>>,
     pending_browser_interact_responses: HashMap<RequestId, oneshot::Sender<BrowserInteractResult>>,
@@ -285,8 +330,7 @@ impl Router {
         let (browser_relay_tx, browser_relay_in) = mpsc::channel(64);
         let (browser_interact_relay_tx, browser_interact_relay_in) = mpsc::channel(64);
         Self {
-            sessions: HashMap::new(),
-            cancels: HashMap::new(),
+            sessions: SessionRegistry::new(),
             pending_permission_responses: HashMap::new(),
             pending_browser_responses: HashMap::new(),
             pending_browser_interact_responses: HashMap::new(),
@@ -342,9 +386,7 @@ impl Router {
                     if let Ok(notification) =
                         serde_json::from_value::<crate::protocol::CancelNotification>(params)
                     {
-                        if let Some(cancel) = self.cancels.get(&notification.session_id) {
-                            cancel.cancel();
-                        }
+                        self.sessions.cancel(&notification.session_id);
                     }
                 }
                 None
@@ -440,7 +482,7 @@ impl Router {
                 let mcp_configs = crate::mcp::parse_server_configs(&req.mcp_servers)
                     .map_err(|e| (-32602, format!("invalid mcpServers: {e}")))?;
 
-                let session_id = SessionId(format!("sess_{}", self.sessions.len() + 1));
+                let session_id = self.sessions.allocate_id();
                 let session =
                     HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
                 let cancel = session.cancel_handle();
@@ -453,8 +495,7 @@ impl Router {
                     mcp_configs.clone(),
                     session_id.clone(),
                 );
-                self.sessions.insert(session_id.clone(), handle);
-                self.cancels.insert(session_id.clone(), cancel);
+                self.sessions.insert(session_id.clone(), handle, cancel);
 
                 // Configs are validated here; the handshake itself happens in
                 // SessionActor::spawn, which calls session.connect_mcp() off the
@@ -483,6 +524,7 @@ impl Router {
                     .sessions
                     .get(&req.session_id)
                     .ok_or_else(|| (-32001, "no such session".to_string()))?
+                    .commands
                     .clone();
                 let (respond, receive) = oneshot::channel();
                 handle
@@ -504,6 +546,7 @@ impl Router {
                     .sessions
                     .get(&req.session_id)
                     .ok_or_else(|| (-32001, "no such session".to_string()))?
+                    .commands
                     .clone();
                 let (respond, receive) = oneshot::channel();
                 handle
@@ -554,7 +597,11 @@ impl Router {
                 return;
             }
         };
-        let Some(handle) = self.sessions.get(&req.session_id).cloned() else {
+        let Some(commands) = self
+            .sessions
+            .get(&req.session_id)
+            .map(|handle| handle.commands.clone())
+        else {
             let line = error_line(id, -32001, "no such session".to_string());
             let _ = outgoing_tx.send(Outgoing::Line(line)).await;
             return;
@@ -575,7 +622,7 @@ impl Router {
         let text = text_parts.join("\n");
 
         let (respond, receive) = oneshot::channel();
-        if handle
+        if commands
             .send(SessionMsg::Prompt {
                 text,
                 images,
@@ -1395,5 +1442,31 @@ mod tests {
             .expect("the server must observe EOF promptly")
             .expect("server task")
             .expect("the stream loop ends cleanly on EOF");
+    }
+
+    /// The registry is the one place ids and cancellation are owned now:
+    /// allocation is monotonic, and a cancel reaches only the session named.
+    #[test]
+    fn the_session_registry_allocates_ids_and_targets_cancels() {
+        let mut registry = SessionRegistry::new();
+        let first = registry.allocate_id();
+        let second = registry.allocate_id();
+        assert_eq!(first.as_str(), "sess_1");
+        assert_eq!(second.as_str(), "sess_2");
+
+        let (commands_a, _rx_a) = mpsc::channel(1);
+        let (commands_b, _rx_b) = mpsc::channel(1);
+        let cancel_a = CancelHandle::default();
+        let cancel_b = CancelHandle::default();
+        registry.insert(first.clone(), commands_a, cancel_a.clone());
+        registry.insert(second.clone(), commands_b, cancel_b.clone());
+
+        registry.cancel(&first);
+        assert!(cancel_a.is_cancelled());
+        assert!(!cancel_b.is_cancelled(), "the other session is untouched");
+        assert!(registry.get(&first).is_some());
+        assert!(registry
+            .get(&SessionId("missing".to_string()))
+            .is_none());
     }
 }
