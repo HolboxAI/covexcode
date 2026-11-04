@@ -45,7 +45,7 @@ use crate::tools::{self, Action, BrowserInteraction, Mode};
 use crate::workspace::Workspace;
 use std::path::Path;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Drop image attachments for providers that cannot read them.
 ///
@@ -174,6 +174,47 @@ fn diff_hunks_for_review(before: &str, after: &str) -> Option<Vec<DiffHunk>> {
     )
 }
 
+/// A per-session, per-turn cancellation signal. `watch` stores the value, so a
+/// cancel that arrives before the turn's `select!` is polled is not lost (a
+/// bare `Notify` would drop that wakeup).
+#[derive(Clone)]
+pub struct CancelHandle {
+    tx: watch::Sender<bool>,
+}
+
+impl Default for CancelHandle {
+    fn default() -> Self {
+        let (tx, _) = watch::channel(false);
+        Self { tx }
+    }
+}
+
+impl CancelHandle {
+    pub fn cancel(&self) {
+        self.tx.send_replace(true);
+    }
+
+    pub fn reset(&self) {
+        self.tx.send_replace(false);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.tx.borrow()
+    }
+
+    pub async fn cancelled(&self) {
+        let mut rx = self.tx.subscribe();
+        if *rx.borrow() {
+            return;
+        }
+        while rx.changed().await.is_ok() {
+            if *rx.borrow() {
+                return;
+            }
+        }
+    }
+}
+
 /// One ACP session's worth of state -- deliberately independent of `App`,
 /// not extracted from it. See this module's own docs for the narrower
 /// scope (no plan mode, no deploy, no subagents, no compaction) that keeps
@@ -223,6 +264,9 @@ pub struct HeadlessSession {
     /// unset and keeps using `SessionUpdate`; a TUI/daemon client can subscribe
     /// without changing the ACP path.
     events: Option<mpsc::UnboundedSender<SessionEvent>>,
+    /// Cooperative cancellation for the currently running turn. Reset at the
+    /// start of every prompt, so a stale cancel cannot kill the next turn.
+    cancel: CancelHandle,
 }
 
 impl HeadlessSession {
@@ -242,7 +286,14 @@ impl HeadlessSession {
             rollback: crate::rollback::Journal::default(),
             mcp: crate::mcp::McpRegistry::default(),
             events: None,
+            cancel: CancelHandle::default(),
         }
+    }
+
+    /// A cloneable handle a transport can use to cancel the current turn
+    /// without waiting for the session actor to drain its prompt queue.
+    pub fn cancel_handle(&self) -> CancelHandle {
+        self.cancel.clone()
     }
 
     /// Attach the transport-agnostic event sink. ACP does not use it; this is
@@ -334,6 +385,7 @@ impl HeadlessSession {
         if let Some(mode) = mode {
             self.mode = mode;
         }
+        self.cancel.reset();
         // One `session/prompt` = one turn, numbered from 1 so a client's
         // first prompt maps to "turn 1". The rollback journal records files
         // against this value (see `record_turn` below).
@@ -407,6 +459,9 @@ impl HeadlessSession {
         // still hits the ceiling, the error is real and should surface.
         let mut compacted_this_turn = false;
         loop {
+            if self.cancel.is_cancelled() {
+                return self.finish_turn(StopReason::Cancelled);
+            }
             let budget_left =
                 self.config.tools.max_steps == 0 || self.tool_steps < self.config.tools.max_steps;
             if !budget_left {
@@ -479,11 +534,25 @@ impl HeadlessSession {
                         .await;
                     return self.finish_turn(StopReason::Refusal);
                 }
+                RoundOutcome::Cancelled => {
+                    return self.finish_turn(StopReason::Cancelled);
+                }
                 RoundOutcome::ToolCalls(calls) => {
                     self.tool_steps += 1;
-                    let outcomes = self
-                        .decide_and_run(calls, updates, permissions, browser, browser_interact)
-                        .await;
+                    let cancel = self.cancel.clone();
+                    let outcomes = tokio::select! {
+                        outcomes = self.decide_and_run(
+                            calls,
+                            updates,
+                            permissions,
+                            browser,
+                            browser_interact,
+                        ) => Some(outcomes),
+                        _ = cancel.cancelled() => None,
+                    };
+                    let Some(outcomes) = outcomes else {
+                        return self.finish_turn(StopReason::Cancelled);
+                    };
                     // An image attached below rides in `self.messages` for
                     // exactly one round: it needs to be there for the very
                     // next `run_one_round` call so the model can react to
@@ -737,9 +806,15 @@ impl HeadlessSession {
         let mut text = String::new();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut usage: Option<ApiUsage> = None;
+        let cancel = self.cancel.clone();
+        let mut cancelled = false;
         let outcome = loop {
             tokio::select! {
                 _ = &mut stream, if !stream_finished => stream_finished = true,
+                _ = cancel.cancelled() => {
+                    cancelled = true;
+                    break None;
+                }
                 received = rx.recv() => match received {
                     Some((_, StreamEvent::Token(t))) => {
                         text.push_str(&t);
@@ -781,6 +856,9 @@ impl HeadlessSession {
             }
         };
 
+        if cancelled {
+            return RoundOutcome::Cancelled;
+        }
         if let Some(error) = outcome {
             return RoundOutcome::Error(error);
         }
@@ -1722,6 +1800,7 @@ enum RoundOutcome {
     Answered,
     ToolCalls(Vec<ToolCall>),
     Error(String),
+    Cancelled,
 }
 
 #[cfg(test)]
@@ -1785,6 +1864,21 @@ mod tests {
                 let _ = socket.write_all(response.as_bytes()).await;
                 let _ = socket.shutdown().await;
             }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Accepts one request and deliberately holds the response back, so a
+    /// cancellation test has a real in-flight stream to stop.
+    async fn serve_delayed(delay: Duration, response: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let _ = read_request(&mut socket).await;
+            tokio::time::sleep(delay).await;
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
         });
         format!("http://{addr}")
     }
@@ -1904,6 +1998,61 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn cancel_handle_is_level_triggered_and_resettable() {
+        let handle = CancelHandle::default();
+        assert!(!handle.is_cancelled());
+        let waiter = {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                handle.cancelled().await;
+            })
+        };
+        handle.cancel();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("cancel must wake the waiter")
+            .expect("waiter task");
+        assert!(handle.is_cancelled());
+        handle.reset();
+        assert!(!handle.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_a_turn_before_the_response_arrives() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_delayed(Duration::from_secs(30), text_round("too late")).await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let cancel = session.cancel_handle();
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let prompt = tokio::spawn(async move {
+            session
+                .prompt(
+                    "hi".to_string(),
+                    Vec::new(),
+                    None,
+                    &updates_tx,
+                    &permissions_tx,
+                    &browser_tx,
+                    &browser_interact_tx,
+                )
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+        let stop = tokio::time::timeout(Duration::from_secs(2), prompt)
+            .await
+            .expect("cancel must not hang")
+            .expect("prompt task");
+        assert_eq!(stop, StopReason::Cancelled);
     }
 
     /// The truthfulness gap the cost meter closes: exact usage reported by the

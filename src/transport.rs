@@ -32,7 +32,7 @@
 
 use crate::config::Config;
 use crate::headless::{
-    BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult,
+    BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult, CancelHandle,
     HeadlessSession, PermissionAsk,
 };
 use crate::protocol::{
@@ -259,6 +259,9 @@ impl SessionActor {
 /// explicit type (and table) per real use.
 struct Router {
     sessions: HashMap<SessionId, mpsc::Sender<SessionMsg>>,
+    /// Cancellation is signaled directly, not through the session actor: the
+    /// actor is busy awaiting the very prompt that needs to stop.
+    cancels: HashMap<SessionId, CancelHandle>,
     pending_permission_responses: HashMap<RequestId, oneshot::Sender<RequestPermissionOutcome>>,
     pending_browser_responses: HashMap<RequestId, oneshot::Sender<BrowserCheckResult>>,
     pending_browser_interact_responses: HashMap<RequestId, oneshot::Sender<BrowserInteractResult>>,
@@ -283,6 +286,7 @@ impl Router {
         let (browser_interact_relay_tx, browser_interact_relay_in) = mpsc::channel(64);
         Self {
             sessions: HashMap::new(),
+            cancels: HashMap::new(),
             pending_permission_responses: HashMap::new(),
             pending_browser_responses: HashMap::new(),
             pending_browser_interact_responses: HashMap::new(),
@@ -332,12 +336,16 @@ impl Router {
             }
             Incoming::Notification { method, params } => {
                 if method == "session/cancel" {
-                    // v1 has no cancellation plumbing into HeadlessSession
-                    // yet (see headless.rs's own module docs: no
-                    // compaction, no plan mode -- cancellation is the same
-                    // class of not-yet-built as those). Accepted and
-                    // acknowledged as received, not silently unparsed.
-                    let _ = params;
+                    // Signal the live turn directly. The actor is awaiting
+                    // `prompt`, so a queued SessionMsg::Cancel would not be
+                    // seen until the work it needs to stop had finished.
+                    if let Ok(notification) =
+                        serde_json::from_value::<crate::protocol::CancelNotification>(params)
+                    {
+                        if let Some(cancel) = self.cancels.get(&notification.session_id) {
+                            cancel.cancel();
+                        }
+                    }
                 }
                 None
             }
@@ -435,6 +443,7 @@ impl Router {
                 let session_id = SessionId(format!("sess_{}", self.sessions.len() + 1));
                 let session =
                     HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
+                let cancel = session.cancel_handle();
                 let handle = SessionActor::spawn(
                     session,
                     self.outgoing_tx.clone(),
@@ -445,6 +454,7 @@ impl Router {
                     session_id.clone(),
                 );
                 self.sessions.insert(session_id.clone(), handle);
+                self.cancels.insert(session_id.clone(), cancel);
 
                 // Configs are validated here; the handshake itself happens in
                 // SessionActor::spawn, which calls session.connect_mcp() off the
