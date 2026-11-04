@@ -999,10 +999,8 @@ impl ApiUsage {
     }
 }
 
-/// Builds the two [`SessionUpdate`]s a resolved [`Verdict::Progress`] or
-/// [`Verdict::Todos`] becomes -- see [`Plan`]'s own docs for why only one
-/// of these should actually be wired into a live session today.
-#[allow(dead_code)] // the second of those two updates; kept ready, not yet wired
+/// The ACP checklist `update_todos` becomes: every item, in order, with its
+/// current status.
 pub fn plan_for_todos(items: &[crate::tools::TodoItem]) -> Plan {
     Plan {
         entries: items

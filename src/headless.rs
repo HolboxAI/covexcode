@@ -297,10 +297,34 @@ impl From<ToolCallStatus> for ToolStatus {
     }
 }
 
+/// The ACP checklist for an approved plan: completed steps ticked, the next
+/// pending one in progress, the rest pending. ACP has no blocked state, so a
+/// step recorded as blocked stays pending -- its note is in the tool result.
+fn plan_update(plan: &crate::plan::Plan) -> crate::protocol::Plan {
+    let next = plan.next_step().map(|(index, _)| index);
+    crate::protocol::Plan {
+        entries: plan
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| crate::protocol::PlanEntry {
+                content: step.description.clone(),
+                priority: crate::protocol::PlanEntryPriority::Medium,
+                status: if step.done {
+                    crate::protocol::PlanEntryStatus::Completed
+                } else if Some(index + 1) == next {
+                    crate::protocol::PlanEntryStatus::InProgress
+                } else {
+                    crate::protocol::PlanEntryStatus::Pending
+                },
+            })
+            .collect(),
+    }
+}
+
 /// One ACP session's worth of state -- deliberately independent of `App`,
 /// not extracted from it. See this module's own docs for the remaining
-/// narrower scope (no deploy, no streamed subagent activity) that keeps this
-/// from becoming a shadow `App`.
+/// narrower scope (no deploy) that keeps this from becoming a shadow `App`.
 pub struct HeadlessSession {
     session_id: SessionId,
     workspace: Workspace,
@@ -324,6 +348,10 @@ pub struct HeadlessSession {
     /// The approved plan, while one is being implemented. Set on approval,
     /// so `plan_progress` calls land against the file the user agreed to.
     active_plan: Option<crate::plan::Plan>,
+    /// The model's short-term checklist (`update_todos`), replaced whole on
+    /// every call. Session-scoped and never persisted; sent to the client as
+    /// an ACP `plan` update so the editor can render it.
+    todos: Vec<tools::TodoItem>,
     /// The `messages` index each turn's user message starts at, parallel to
     /// `turn` (entry 0 is turn 1's message, and so on). Lets a
     /// `restoreBeforeTurn` rollback also cut the conversation back to that
@@ -363,6 +391,7 @@ impl HeadlessSession {
             turn: 0,
             mode: Mode::Normal,
             active_plan: None,
+            todos: Vec::new(),
             turn_starts: Vec::new(),
             last_prompt_tokens: None,
             rollback: crate::rollback::Journal::default(),
@@ -1170,12 +1199,21 @@ impl HeadlessSession {
                     reason
                 }
                 Verdict::PlanRefused(reason) => reason,
-                Verdict::Progress { .. } | Verdict::Todos(_) => {
-                    // No plan/todo state kept in a headless session yet
-                    // (see module docs: no plan mode). Acknowledged, not
-                    // silently dropped -- the model still gets a real
-                    // answer so the transcript stays valid.
-                    "Noted (not tracked in this session).".to_string()
+                Verdict::Progress { step, done, note } => {
+                    self.record_plan_progress(call, step, done, note, updates)
+                        .await
+                }
+                Verdict::Todos(items) => {
+                    self.todos = items;
+                    // ACP has one checklist slot; todos are the engine's
+                    // short-term version of it. The client replaces the whole
+                    // list, matching `update_todos`' replace-whole semantics.
+                    let _ = updates
+                        .send(SessionUpdate::Plan(crate::protocol::plan_for_todos(
+                            &self.todos,
+                        )))
+                        .await;
+                    tools::todos_recorded(call, &self.todos).content
                 }
                 Verdict::AutoApprove => {
                     let action = tools::describe_action(call);
@@ -1325,6 +1363,41 @@ impl HeadlessSession {
             }
         }
         contents
+    }
+
+    /// `plan_progress`: tick a step on the approved plan, persist it, and
+    /// send the new checklist. Mirrors `App::record_progress`; the engine has
+    /// no separate dirty flag, so the plan file is written immediately.
+    async fn record_plan_progress(
+        &mut self,
+        call: &ToolCall,
+        step: usize,
+        done: bool,
+        note: Option<String>,
+        updates: &UpdateSink<'_>,
+    ) -> String {
+        let root = Path::new(self.workspace.root());
+        let Some(plan) = self.active_plan.as_mut() else {
+            return tools::progress_failed(
+                call,
+                "there is no plan being worked on, so there is no step to record. Just do the \
+                 work and tell the user what you did.",
+            )
+            .content;
+        };
+        match plan.mark(step, done, note) {
+            Ok(description) => {
+                let (finished, total) = plan.progress();
+                let shown = plan.display_path(root);
+                let outcome =
+                    tools::progress_recorded(call, &description, done, total - finished, &shown);
+                let checklist = plan_update(plan);
+                let _ = plan.save();
+                let _ = updates.send(SessionUpdate::Plan(checklist)).await;
+                outcome.content
+            }
+            Err(reason) => tools::progress_failed(call, &reason).content,
+        }
     }
 
     /// `write_file`/`edit_file` in inline-edit mode: compute the before/after
@@ -1644,12 +1717,16 @@ impl HeadlessSession {
             self.mode = Mode::Normal;
             match plan.save() {
                 Ok(()) => {
+                    let checklist = plan_update(&plan);
                     self.active_plan = Some(plan);
                     let approved = tools::plan_approved(call, &shown, steps);
                     let content = approved.content.clone();
                     let _ = updates
                         .send(SessionUpdate::ToolCallUpdate((&approved).into()))
                         .await;
+                    // ACP clients render the approved plan from this, not
+                    // from the tool-call prose.
+                    let _ = updates.send(SessionUpdate::Plan(checklist)).await;
                     (content, Vec::new())
                 }
                 Err(reason) => {
@@ -2420,6 +2497,124 @@ mod tests {
         }
         assert!(saw_progress, "the client must see the child working");
         assert!(saw_report, "and still receive the final report");
+    }
+
+    /// `update_todos` used to be acknowledged and dropped. It now becomes an
+    /// ACP `plan` update, which is the only checklist slot the protocol has.
+    #[tokio::test]
+    async fn update_todos_is_sent_as_a_plan_update() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![
+            tool_call_round(
+                tools::UPDATE_TODOS,
+                r#"{"todos":[{"content":"first","status":"completed"},{"content":"second","status":"in_progress"}]}"#,
+            ),
+            text_round("done"),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "track this".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let mut checklist = None;
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::Plan(plan) = update {
+                checklist = Some(plan);
+            }
+        }
+        let checklist = checklist.expect("todos must become a plan update");
+        assert_eq!(checklist.entries.len(), 2);
+        assert_eq!(checklist.entries[0].content, "first");
+        assert!(matches!(
+            checklist.entries[0].status,
+            crate::protocol::PlanEntryStatus::Completed
+        ));
+        assert!(matches!(
+            checklist.entries[1].status,
+            crate::protocol::PlanEntryStatus::InProgress
+        ));
+    }
+
+    /// `plan_progress` ticks a step on the approved plan and pushes the new
+    /// checklist; the old engine answered "Noted (not tracked)".
+    #[tokio::test]
+    async fn plan_progress_updates_the_checklist() {
+        let (dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![
+            tool_call_round(tools::PLAN_PROGRESS, r#"{"step":1,"status":"done"}"#),
+            text_round("done"),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        session.active_plan = Some(crate::plan::Plan {
+            title: "test plan".to_string(),
+            summary: "do two things".to_string(),
+            steps: vec![
+                crate::plan::Step::new("first step"),
+                crate::plan::Step::new("second step"),
+            ],
+            not_doing: Vec::new(),
+            created: "2026-01-01".to_string(),
+            updated: "2026-01-01".to_string(),
+            base_commit: None,
+            model: "test-model".to_string(),
+            path: dir.path().join("plan.md"),
+        });
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "carry on".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert!(
+            session.active_plan.as_ref().unwrap().steps[0].done,
+            "the plan itself must be ticked"
+        );
+        let mut checklist = None;
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::Plan(plan) = update {
+                checklist = Some(plan);
+            }
+        }
+        let checklist = checklist.expect("progress must push a plan update");
+        assert_eq!(checklist.entries.len(), 2);
+        assert!(matches!(
+            checklist.entries[0].status,
+            crate::protocol::PlanEntryStatus::Completed
+        ));
+        assert!(matches!(
+            checklist.entries[1].status,
+            crate::protocol::PlanEntryStatus::InProgress
+        ));
     }
 
     #[tokio::test]
