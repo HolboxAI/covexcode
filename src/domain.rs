@@ -200,11 +200,26 @@ pub enum ApprovalDetail {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalResolution {
     Selected { option_id: String },
-    /// The client accepted some hunks and returned the merged file text.
-    Partial,
+    /// The client accepted some hunks and returned the merged file text the
+    /// engine should write instead of executing the original call.
+    Partial { new_text: String },
     Cancelled,
     /// The client disconnected before answering.
     Unavailable,
+}
+
+/// A client-to-engine control command. These are the actions that must work
+/// while a turn is running; a prompt itself is still the turn's entry point.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionCommand {
+    /// Stop the current turn. Idempotent, and safe while idle.
+    Cancel,
+    /// Answer the approval request with this engine-local id.
+    RespondApproval {
+        request_id: u64,
+        resolution: ApprovalResolution,
+    },
 }
 
 /// Transport-agnostic output from a session engine.
@@ -421,6 +436,30 @@ mod tests {
         let json = serde_json::to_string(&resolved).unwrap();
         assert!(json.contains("\"type\":\"approval_resolved\""), "{json}");
         assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), resolved);
+    }
+
+    #[test]
+    fn session_commands_round_trip() {
+        let cancel = SessionCommand::Cancel;
+        let json = serde_json::to_string(&cancel).unwrap();
+        assert!(json.contains("\"type\":\"cancel\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<SessionCommand>(&json).unwrap(),
+            cancel
+        );
+
+        let answer = SessionCommand::RespondApproval {
+            request_id: 4,
+            resolution: ApprovalResolution::Selected {
+                option_id: "allow".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&answer).unwrap();
+        assert!(json.contains("\"type\":\"respond_approval\""), "{json}");
+        assert_eq!(
+            serde_json::from_str::<SessionCommand>(&json).unwrap(),
+            answer
+        );
     }
 
     #[test]

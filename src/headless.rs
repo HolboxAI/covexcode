@@ -34,8 +34,8 @@
 use crate::approval::{verdict_for, Decision, Verdict};
 use crate::config::Config;
 use crate::domain::{
-    ApprovalDetail, ApprovalOption, ApprovalOptionKind, ApprovalResolution, SessionEvent,
-    SessionStatus, ToolStatus, TurnId, TurnStopReason,
+    ApprovalDetail, ApprovalOption, ApprovalOptionKind, ApprovalResolution, SessionCommand,
+    SessionEvent, SessionStatus, ToolStatus, TurnId, TurnStopReason,
 };
 use crate::llm::{self, ApiUsage, ChatMessage, StreamEvent, Target, ToolCall};
 use crate::protocol::{
@@ -46,7 +46,9 @@ use crate::protocol::{
 };
 use crate::tools::{self, Action, BrowserInteraction, Mode};
 use crate::workspace::Workspace;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -69,25 +71,21 @@ fn images_for_model(
 }
 
 /// What a caller (the real stdio transport, or a test) gets sent for each
-/// `RequestPermissionRequest` a turn needs answered -- paired with a
-/// `oneshot` so `prompt()` can `await` the one reply it's asking for,
-/// without needing a request-id-keyed table the way a general JSON-RPC
-/// client would (a `HeadlessSession` only ever has one permission request
-/// outstanding at a time, since it blocks on each one before continuing).
+/// `RequestPermissionRequest` a turn needs answered. The answer comes back
+/// through the same `ApprovalHandle` a non-ACP client uses, keyed by the
+/// engine-local `request_id` -- so there is one answer path, not two.
 pub struct PermissionAsk {
     pub request: RequestPermissionRequest,
-    pub respond: oneshot::Sender<RequestPermissionOutcome>,
+    pub request_id: u64,
+    pub approvals: ApprovalHandle,
 }
 
-/// What a caller gets sent for each `check_in_browser` call -- same shape
-/// and same reasoning as `PermissionAsk`: paired with a `oneshot` rather
-/// than a request-id-keyed table, since a `HeadlessSession` only ever has
-/// one of these outstanding at a time (it blocks on the reply before
-/// continuing). A separate type and a separate channel from `PermissionAsk`
-/// rather than folding this into one generic "client request" concept --
-/// this codebase's own convention (see `transport.rs`'s docs) is a small,
-/// explicit type per real use, not a shared abstraction built for two data
-/// points.
+/// What a caller gets sent for each `check_in_browser` call. Paired with a
+/// `oneshot` because a `HeadlessSession` has only one outstanding at a time
+/// (it blocks on the reply before continuing). Permission asks are separate:
+/// they answer through `ApprovalHandle`, since a non-ACP client needs that
+/// path too. This codebase's own convention (see `transport.rs`'s docs) is a
+/// small, explicit type per real use, not a shared abstraction.
 pub struct BrowserCheckAsk {
     pub session_id: SessionId,
     pub url: String,
@@ -218,6 +216,83 @@ impl CancelHandle {
     }
 }
 
+/// Answers an outstanding approval without going through the ACP permission
+/// channel. Pending requests are keyed by the engine-local id carried in
+/// `SessionEvent::ApprovalRequested`.
+///
+/// The map holds only oneshot senders and is never held across an await, so a
+/// plain `std::sync::Mutex` is enough.
+#[derive(Clone, Default)]
+pub struct ApprovalHandle {
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ApprovalResolution>>>>,
+}
+
+/// A serializable control handle for one session. Mirrors what a daemon
+/// receives off the wire; applying a command never needs the session actor,
+/// which is usually awaiting the very turn the command targets.
+#[derive(Clone)]
+pub struct SessionCommandHandle {
+    cancel: CancelHandle,
+    approvals: ApprovalHandle,
+}
+
+impl SessionCommandHandle {
+    /// Apply one command. Returns false when it targeted an unknown approval
+    /// (already answered or never issued); cancel always succeeds.
+    pub fn apply(&self, command: SessionCommand) -> bool {
+        match command {
+            SessionCommand::Cancel => {
+                self.cancel.cancel();
+                true
+            }
+            SessionCommand::RespondApproval {
+                request_id,
+                resolution,
+            } => self.approvals.respond(request_id, resolution),
+        }
+    }
+}
+
+/// Removes a pending approval entry when the waiting code leaves its scope,
+/// including when the whole turn is cancelled and this future is dropped.
+struct PendingApproval<'a> {
+    approvals: &'a ApprovalHandle,
+    request_id: u64,
+}
+
+impl Drop for PendingApproval<'_> {
+    fn drop(&mut self) {
+        self.approvals.remove(self.request_id);
+    }
+}
+
+impl ApprovalHandle {
+    /// Answer one request. Returns false when the id is unknown (already
+    /// answered, wrong session, or never issued).
+    pub fn respond(&self, request_id: u64, resolution: ApprovalResolution) -> bool {
+        let pending = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.remove(&request_id)
+        };
+        match pending {
+            Some(sender) => sender.send(resolution).is_ok(),
+            None => false,
+        }
+    }
+
+    fn register(&self, request_id: u64) -> oneshot::Receiver<ApprovalResolution> {
+        let (sender, receiver) = oneshot::channel();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.insert(request_id, sender);
+        receiver
+    }
+
+    fn remove(&self, request_id: u64) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.remove(&request_id);
+    }
+}
+
 /// Adapts the engine's ACP-shaped progress updates to the
 /// transport-agnostic event stream in one place.
 ///
@@ -296,6 +371,34 @@ impl From<ToolCallStatus> for ToolStatus {
             ToolCallStatus::InProgress => Self::InProgress,
             ToolCallStatus::Completed => Self::Completed,
             ToolCallStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<RequestPermissionOutcome> for ApprovalResolution {
+    fn from(outcome: RequestPermissionOutcome) -> Self {
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => Self::Selected {
+                option_id: option_id.0,
+            },
+            RequestPermissionOutcome::Partial { new_text } => Self::Partial { new_text },
+            RequestPermissionOutcome::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Turn a direct command answer back into the engine's internal ACP-shaped
+/// outcome, so both answer paths feed the same downstream logic. A client
+/// that sends `Unavailable` is treated as having cancelled: there is nothing
+/// to execute.
+fn resolution_outcome(resolution: ApprovalResolution) -> RequestPermissionOutcome {
+    match resolution {
+        ApprovalResolution::Selected { option_id } => RequestPermissionOutcome::Selected {
+            option_id: PermissionOptionId(option_id),
+        },
+        ApprovalResolution::Partial { new_text } => RequestPermissionOutcome::Partial { new_text },
+        ApprovalResolution::Cancelled | ApprovalResolution::Unavailable => {
+            RequestPermissionOutcome::Cancelled
         }
     }
 }
@@ -416,6 +519,8 @@ pub struct HeadlessSession {
     /// Cooperative cancellation for the currently running turn. Reset at the
     /// start of every prompt, so a stale cancel cannot kill the next turn.
     cancel: CancelHandle,
+    /// Direct answers to outstanding approval requests, from a non-ACP client.
+    approvals: ApprovalHandle,
 }
 
 impl HeadlessSession {
@@ -438,6 +543,22 @@ impl HeadlessSession {
             mcp: crate::mcp::McpRegistry::default(),
             events: None,
             cancel: CancelHandle::default(),
+            approvals: ApprovalHandle::default(),
+        }
+    }
+
+    /// A cloneable handle a client can use to answer approval requests by the
+    /// engine-local id from `SessionEvent::ApprovalRequested`.
+    pub fn approval_handle(&self) -> ApprovalHandle {
+        self.approvals.clone()
+    }
+
+    /// A cloneable handle that applies serializable [`SessionCommand`]s --
+    /// cancel and approval answers today, the surface a daemon exposes.
+    pub fn command_handle(&self) -> SessionCommandHandle {
+        SessionCommandHandle {
+            cancel: self.cancel.clone(),
+            approvals: self.approvals.clone(),
         }
     }
 
@@ -466,12 +587,15 @@ impl HeadlessSession {
         });
     }
 
-    /// Announce an approval request on the transport-agnostic stream and
-    /// return its engine-issued id. The ACP request still carries its own
-    /// JSON-RPC id; this one is what a non-ACP client answers with.
-    fn emit_approval_requested(&mut self, request: &RequestPermissionRequest) -> u64 {
+    fn next_approval_id(&mut self) -> u64 {
         self.approval_seq += 1;
-        let request_id = self.approval_seq;
+        self.approval_seq
+    }
+
+    /// Announce an approval request on the transport-agnostic stream. The ACP
+    /// request still carries its own JSON-RPC id; `request_id` is the
+    /// engine-local id a non-ACP client answers with.
+    fn emit_approval_requested(&self, request_id: u64, request: &RequestPermissionRequest) {
         self.emit(SessionEvent::ApprovalRequested {
             session_id: self.session_id.clone(),
             turn: TurnId::new(self.turn),
@@ -498,21 +622,24 @@ impl HeadlessSession {
                 })
                 .collect(),
         });
-        request_id
     }
 
     fn emit_approval_resolved(
         &self,
         request_id: u64,
-        outcome: &Result<RequestPermissionOutcome, oneshot::error::RecvError>,
+        outcome: Option<&RequestPermissionOutcome>,
     ) {
         let resolution = match outcome {
-            Ok(RequestPermissionOutcome::Selected { option_id }) => ApprovalResolution::Selected {
-                option_id: option_id.0.clone(),
+            Some(RequestPermissionOutcome::Selected { option_id }) => {
+                ApprovalResolution::Selected {
+                    option_id: option_id.0.clone(),
+                }
+            }
+            Some(RequestPermissionOutcome::Partial { new_text }) => ApprovalResolution::Partial {
+                new_text: new_text.clone(),
             },
-            Ok(RequestPermissionOutcome::Partial { .. }) => ApprovalResolution::Partial,
-            Ok(RequestPermissionOutcome::Cancelled) => ApprovalResolution::Cancelled,
-            Err(_) => ApprovalResolution::Unavailable,
+            Some(RequestPermissionOutcome::Cancelled) => ApprovalResolution::Cancelled,
+            None => ApprovalResolution::Unavailable,
         };
         self.emit_approval_resolution(request_id, resolution);
     }
@@ -1623,14 +1750,22 @@ impl HeadlessSession {
                 },
             ],
         };
-        let (respond, receive) = oneshot::channel();
         self.emit_status(SessionStatus::WaitingForApproval);
-        let approval_request_id = self.emit_approval_requested(&request);
-        if permissions
-            .send(PermissionAsk { request, respond })
-            .await
-            .is_err()
-        {
+        let approval_request_id = self.next_approval_id();
+        // Register before announcing: a client that answers the instant it
+        // sees the event must find the slot already there.
+        let direct = self.approvals.register(approval_request_id);
+        let pending = PendingApproval {
+            approvals: &self.approvals,
+            request_id: approval_request_id,
+        };
+        self.emit_approval_requested(approval_request_id, &request);
+        let ask = PermissionAsk {
+            request,
+            request_id: approval_request_id,
+            approvals: self.approvals.clone(),
+        };
+        if permissions.send(ask).await.is_err() {
             self.emit_status(SessionStatus::Running);
             self.emit_approval_resolution(approval_request_id, ApprovalResolution::Unavailable);
             return (
@@ -1638,9 +1773,10 @@ impl HeadlessSession {
                 Vec::new(),
             );
         }
-        let outcome = receive.await;
+        let outcome = direct.await.ok().map(resolution_outcome);
         self.emit_status(SessionStatus::Running);
-        self.emit_approval_resolved(approval_request_id, &outcome);
+        self.emit_approval_resolved(approval_request_id, outcome.as_ref());
+        drop(pending);
 
         // Per-hunk review: the client accepted some hunks and returned the
         // merged file text. `Partial` never reaches the `Decision` mapping
@@ -1650,7 +1786,7 @@ impl HeadlessSession {
         // just edited). Without a `partial_path` (the call previewed no file
         // diff) the client sent a shape it has no business sending, so fall
         // through to the binary decision instead of writing to nowhere.
-        if let (Ok(RequestPermissionOutcome::Partial { new_text }), Some(path)) =
+        if let (Some(RequestPermissionOutcome::Partial { new_text }), Some(path)) =
             (&outcome, partial_path.as_ref())
         {
             let synthetic = ToolCall {
@@ -1674,8 +1810,8 @@ impl HeadlessSession {
         }
 
         let decision: Decision = match outcome {
-            Ok(o) => o.into(),
-            Err(_) => Decision::Refused,
+            Some(o) => o.into(),
+            None => Decision::Refused,
         };
 
         if decision.is_allowed() {
@@ -1798,14 +1934,22 @@ impl HeadlessSession {
                 },
             ],
         };
-        let (respond, receive) = oneshot::channel();
         self.emit_status(SessionStatus::WaitingForApproval);
-        let approval_request_id = self.emit_approval_requested(&request);
-        if permissions
-            .send(PermissionAsk { request, respond })
-            .await
-            .is_err()
-        {
+        let approval_request_id = self.next_approval_id();
+        // Register before announcing: a client that answers the instant it
+        // sees the event must find the slot already there.
+        let direct = self.approvals.register(approval_request_id);
+        let pending = PendingApproval {
+            approvals: &self.approvals,
+            request_id: approval_request_id,
+        };
+        self.emit_approval_requested(approval_request_id, &request);
+        let ask = PermissionAsk {
+            request,
+            request_id: approval_request_id,
+            approvals: self.approvals.clone(),
+        };
+        if permissions.send(ask).await.is_err() {
             self.emit_status(SessionStatus::Running);
             self.emit_approval_resolution(approval_request_id, ApprovalResolution::Unavailable);
             return (
@@ -1813,12 +1957,13 @@ impl HeadlessSession {
                 Vec::new(),
             );
         }
-        let outcome = receive.await;
+        let outcome = direct.await.ok().map(resolution_outcome);
         self.emit_status(SessionStatus::Running);
-        self.emit_approval_resolved(approval_request_id, &outcome);
+        self.emit_approval_resolved(approval_request_id, outcome.as_ref());
+        drop(pending);
         let decision: Decision = match outcome {
-            Ok(o) => o.into(),
-            Err(_) => Decision::Refused,
+            Some(o) => o.into(),
+            None => Decision::Refused,
         };
 
         if decision.is_allowed() {
@@ -3505,9 +3650,13 @@ mod tests {
 
         let ask = permissions_rx.recv().await.expect("a permission ask");
         assert_eq!(ask.request.session_id, SessionId("s1".to_string()));
-        let _ = ask.respond.send(RequestPermissionOutcome::Selected {
-            option_id: PermissionOptionId("reject".to_string()),
-        });
+        let _ = ask.approvals.respond(
+            ask.request_id,
+            RequestPermissionOutcome::Selected {
+                option_id: PermissionOptionId("reject".to_string()),
+            }
+            .into(),
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -3564,6 +3713,76 @@ mod tests {
         // queued response would never have been consumed and this task
         // would hang instead of returning `EndTurn`.
         let _ = dir; // kept for the tempdir's own lifetime, not asserted on
+    }
+
+    /// An approval can be answered through `ApprovalHandle` without anyone
+    /// touching the ACP permission channel -- the command-side seam a TUI or
+    /// daemon will use.
+    #[tokio::test]
+    async fn an_approval_can_be_answered_directly() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![
+            tool_call_round(tools::RUN_COMMAND, r#"{"command":"rm -rf build"}"#),
+            text_round("stopped"),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let commands = session.command_handle();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        session.set_event_sink(events_tx);
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let prompt = tokio::spawn(async move {
+            session
+                .prompt(
+                    "clean the build dir".to_string(),
+                    Vec::new(),
+                    None,
+                    &updates_tx,
+                    &permissions_tx,
+                    &browser_tx,
+                    &browser_interact_tx,
+                )
+                .await
+        });
+
+        let request_id = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = events_rx.recv().await {
+                if let SessionEvent::ApprovalRequested { request_id, .. } = event {
+                    return request_id;
+                }
+            }
+            panic!("the event stream closed before an approval request");
+        })
+        .await
+        .expect("the approval request must arrive promptly");
+
+        assert!(commands.apply(SessionCommand::RespondApproval {
+            request_id,
+            resolution: ApprovalResolution::Cancelled,
+        }));
+        assert!(
+            !commands.apply(SessionCommand::RespondApproval {
+                request_id,
+                resolution: ApprovalResolution::Cancelled,
+            }),
+            "an id is answered once"
+        );
+
+        let stop = prompt.await.expect("task joins");
+        assert_eq!(stop, StopReason::EndTurn);
+
+        let mut resolution = None;
+        while let Ok(event) = events_rx.try_recv() {
+            if let SessionEvent::ApprovalResolved { resolution: r, .. } = event {
+                resolution = Some(r);
+            }
+        }
+        assert_eq!(resolution, Some(ApprovalResolution::Cancelled));
     }
 
     /// The actual point of wiring `tools::preview_change_text` into
@@ -3625,9 +3844,13 @@ mod tests {
             }
             other => panic!("expected a Diff, got {other:?}"),
         }
-        let _ = ask.respond.send(RequestPermissionOutcome::Selected {
-            option_id: PermissionOptionId("allow".to_string()),
-        });
+        let _ = ask.approvals.respond(
+            ask.request_id,
+            RequestPermissionOutcome::Selected {
+                option_id: PermissionOptionId("allow".to_string()),
+            }
+            .into(),
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -3835,11 +4058,13 @@ mod tests {
             browser_interact_rx.try_recv().is_err(),
             "must not act before the user answers the permission ask"
         );
-        let _ = permission_ask
-            .respond
-            .send(RequestPermissionOutcome::Selected {
+        let _ = permission_ask.approvals.respond(
+            permission_ask.request_id,
+            RequestPermissionOutcome::Selected {
                 option_id: PermissionOptionId("allow".to_string()),
-            });
+            }
+            .into(),
+        );
 
         let interact_ask = browser_interact_rx
             .recv()
@@ -3919,11 +4144,13 @@ mod tests {
         });
 
         let permission_ask = permissions_rx.recv().await.expect("a permission ask");
-        let _ = permission_ask
-            .respond
-            .send(RequestPermissionOutcome::Selected {
+        let _ = permission_ask.approvals.respond(
+            permission_ask.request_id,
+            RequestPermissionOutcome::Selected {
                 option_id: PermissionOptionId("reject".to_string()),
-            });
+            }
+            .into(),
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -4471,9 +4698,13 @@ mod tests {
             }
             other => panic!("expected a Plan, got {other:?}"),
         }
-        let _ = ask.respond.send(RequestPermissionOutcome::Selected {
-            option_id: PermissionOptionId("allow".to_string()),
-        });
+        let _ = ask.approvals.respond(
+            ask.request_id,
+            RequestPermissionOutcome::Selected {
+                option_id: PermissionOptionId("allow".to_string()),
+            }
+            .into(),
+        );
 
         let (stop, session) = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -4535,9 +4766,13 @@ mod tests {
             ),
             "the proposal must ride the plan wire shape, not a diff"
         );
-        let _ = ask.respond.send(RequestPermissionOutcome::Selected {
-            option_id: PermissionOptionId("reject".to_string()),
-        });
+        let _ = ask.approvals.respond(
+            ask.request_id,
+            RequestPermissionOutcome::Selected {
+                option_id: PermissionOptionId("reject".to_string()),
+            }
+            .into(),
+        );
 
         let (stop, session) = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);

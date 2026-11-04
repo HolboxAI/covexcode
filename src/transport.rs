@@ -31,15 +31,16 @@
 //! isn't unit tested for the same reason `main`'s own top-level loop isn't.
 
 use crate::config::Config;
+use crate::domain::ApprovalResolution;
 use crate::headless::{
-    BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult, CancelHandle,
-    HeadlessSession, PermissionAsk,
+    ApprovalHandle, BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult,
+    CancelHandle, HeadlessSession, PermissionAsk,
 };
 use crate::protocol::{
     CheckInBrowserOutcome, CheckInBrowserRequest, Implementation, InitializeRequest,
     InitializeResponse, InteractInBrowserOutcome, InteractInBrowserRequest, JsonRpcVersion,
     ListChangesRequest, ListChangesResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse, RequestId, RequestPermissionOutcome, RequestPermissionRequest, RollbackRequest,
+    PromptResponse, RequestId, RequestPermissionOutcome, RollbackRequest,
     RollbackResponse, RpcError, RpcErrorObject, RpcRequest, RpcResponse, SessionId,
     SessionNotification, PROTOCOL_VERSION,
 };
@@ -307,7 +308,10 @@ impl SessionRegistry {
 /// explicit type (and table) per real use.
 struct Router {
     sessions: SessionRegistry,
-    pending_permission_responses: HashMap<RequestId, oneshot::Sender<RequestPermissionOutcome>>,
+    /// ACP request id -> the engine-local id and handle that answer it. The
+    /// engine waits on the handle, so the transport never owns a oneshot for
+    /// a permission ask.
+    pending_permission_responses: HashMap<RequestId, (u64, ApprovalHandle)>,
     pending_browser_responses: HashMap<RequestId, oneshot::Sender<BrowserCheckResult>>,
     pending_browser_interact_responses: HashMap<RequestId, oneshot::Sender<BrowserInteractResult>>,
     next_outgoing_id: i64,
@@ -392,10 +396,11 @@ impl Router {
                 None
             }
             Incoming::Response { id, result } => {
-                if let Some(respond) = self.pending_permission_responses.remove(&id) {
+                if let Some((request_id, approvals)) = self.pending_permission_responses.remove(&id)
+                {
                     if let Ok(outcome) = serde_json::from_value::<RequestPermissionOutcome>(result)
                     {
-                        let _ = respond.send(outcome);
+                        approvals.respond(request_id, outcome.into());
                     }
                 } else if let Some(respond) = self.pending_browser_responses.remove(&id) {
                     if let Ok(outcome) = serde_json::from_value::<CheckInBrowserOutcome>(result) {
@@ -410,8 +415,9 @@ impl Router {
                 None
             }
             Incoming::Error { id, .. } => {
-                if let Some(respond) = self.pending_permission_responses.remove(&id) {
-                    let _ = respond.send(RequestPermissionOutcome::Cancelled);
+                if let Some((request_id, approvals)) = self.pending_permission_responses.remove(&id)
+                {
+                    approvals.respond(request_id, ApprovalResolution::Cancelled);
                 } else if let Some(respond) = self.pending_browser_responses.remove(&id) {
                     let _ = respond.send(BrowserCheckResult::Failed(
                         "the client returned an error instead of a result".to_string(),
@@ -687,19 +693,12 @@ impl Router {
         let request = match ready {
             Ready::Permission(ask) => {
                 self.pending_permission_responses
-                    .insert(id.clone(), ask.respond);
+                    .insert(id.clone(), (ask.request_id, ask.approvals));
                 RpcRequest {
                     jsonrpc: JsonRpcVersion,
                     id,
                     method: "session/request_permission".to_string(),
-                    params: Some(
-                        serde_json::to_value(RequestPermissionRequest {
-                            session_id: ask.request.session_id,
-                            tool_call: ask.request.tool_call,
-                            options: ask.request.options,
-                        })
-                        .expect("serializes"),
-                    ),
+                    params: Some(serde_json::to_value(ask.request).expect("serializes")),
                 }
             }
             Ready::Browser(ask) => {
