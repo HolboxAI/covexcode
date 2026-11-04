@@ -1,8 +1,30 @@
 # Multi-agent CLI architecture
 
-Status: proposed; Phase 0 and Phase 1 in progress  
+Status: Phase 0 complete; Phase 1 in progress; Phase 2 started  
 Date: 2026-11-04  
 Scope: `HolboxAI/covexcode` (the Rust CLI and agent runtime)
+
+## Implementation status
+
+Landed on `main`:
+
+- **Phase 0**: one pooled HTTP client for model requests; opt-in
+  `COVEXCODE_TRACE` request timing.
+- **Phase 1**: domain identities (`SessionId`, `AgentId`, `TurnId`, `TaskId`,
+  statuses); a transport-agnostic `SessionEvent` stream covering text, tool
+  lifecycle and usage; cooperative ACP `session/cancel`.
+- **Phase 2 (early)**: `covexcode-agent --listen` serves ACP over loopback TCP;
+  `/sessions` resumes a recorded conversation from a picker.
+- **Phase 4 (partial)**: the read-only `explore` subagent is shared by the TUI
+  and the ACP engine; sibling `agent` calls run concurrently (default 4); the
+  engine forwards each child tool call as live activity on the parent call.
+
+In review at the time of writing: `tools.subagent_model` routing and plan/todo
+checklist updates in the engine. Project-defined read-only agent types are
+implemented on a branch, not yet a PR.
+
+The bullets in section 1 describe the tree before this work; they are kept as
+the baseline the plan was written against.
 
 ## 1. Why change
 
