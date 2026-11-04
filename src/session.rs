@@ -18,6 +18,7 @@
 //! resumed-from file is never appended to either: resuming copies the loaded
 //! messages into a new file and continues there.
 
+use crate::llm::ChatMessage;
 use crate::message::{Message, Role};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -132,6 +133,90 @@ impl SessionLog {
         self.path = Some(path.clone());
         Some(path)
     }
+}
+
+/// The headless engine's writer, over the same files `SessionLog` writes.
+///
+/// `HeadlessSession` keeps wire-shaped `ChatMessage`s; the on-disk format is
+/// the TUI's `Message`. Storing in that shape means an ACP conversation shows
+/// up in `/sessions` next to TUI ones, and one reader (`load`) serves both.
+/// Images are deliberately not stored: `Message` skips them itself (base64
+/// blobs that can never be replayed would just bloat the file), and the engine
+/// evicts a screenshot after the round that consumed it anyway.
+pub struct ChatLog {
+    log: SessionLog,
+}
+
+impl ChatLog {
+    pub fn new(workspace: &str) -> Self {
+        Self {
+            log: SessionLog::new(workspace),
+        }
+    }
+
+    /// The conversation was replaced wholesale (compaction): start a fresh
+    /// file, leaving the old one intact to be resumed, exactly like `/new` in
+    /// the TUI.
+    pub fn reset(&mut self) {
+        self.log.reset();
+    }
+
+    /// Bring the file up to date with the engine's wire history. Appending is
+    /// incremental, so calling this at every round boundary is a length
+    /// comparison in the common case.
+    pub fn append(&mut self, messages: &[ChatMessage]) {
+        let stored: Vec<Message> = messages.iter().map(stored_message).collect();
+        self.log.append(&stored);
+    }
+}
+
+/// The stored (TUI) shape of one engine message. Roles are the only
+/// translation: the engine only ever produces `user`, `assistant`, `tool`,
+/// and `system`, and `system` is context that must survive a resume (a
+/// compaction summary, a browser screenshot note) -- `Summary` is the stored
+/// role that goes back on the wire, unlike `System`.
+fn stored_message(message: &ChatMessage) -> Message {
+    let role = match message.role.as_str() {
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        "tool" => Role::Tool,
+        _ => Role::Summary,
+    };
+    Message {
+        role,
+        content: message.content.clone().unwrap_or_default(),
+        display: None,
+        tool_calls: message.tool_calls.clone(),
+        tool_call_id: message.tool_call_id.clone(),
+        diff: None,
+        images: Vec::new(),
+    }
+}
+
+/// The engine messages recorded in one session file, in order. The inverse of
+/// `stored_message`; `load` already skips the header and unparseable lines.
+pub fn load_chat(path: &Path) -> Vec<ChatMessage> {
+    load(path).into_iter().filter_map(chat_message).collect()
+}
+
+fn chat_message(message: Message) -> Option<ChatMessage> {
+    let role = match message.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+        Role::Summary | Role::Context => "system",
+        // TUI-only roles: neither is part of the model's history.
+        Role::System | Role::Error => return None,
+    };
+    Some(ChatMessage {
+        role: role.to_string(),
+        // An assistant message that only asked for tools has no prose; `None`
+        // is what the wire expects there, not `""`.
+        content: (!message.content.is_empty()).then_some(message.content),
+        tool_calls: message.tool_calls,
+        tool_call_id: message.tool_call_id,
+        images: Vec::new(),
+    })
 }
 
 /// The newest session file recorded for this workspace, if any.
@@ -447,6 +532,106 @@ mod tests {
             assert_eq!(listed[0].preview.chars().count(), 73);
             assert!(listed[0].preview.ends_with('…'));
             assert!(!listed[0].preview.contains('\n'));
+        });
+    }
+
+    fn tool_call() -> crate::llm::ToolCall {
+        crate::llm::ToolCall {
+            id: "call_1".to_string(),
+            kind: "function".to_string(),
+            function: crate::llm::FunctionCall {
+                name: "read_file".to_string(),
+                arguments: "{\"path\":\"a.rs\"}".to_string(),
+            },
+        }
+    }
+
+    /// The engine's wire history survives a round trip in the same file the
+    /// TUI picker reads, including a tool-only assistant message (`content`
+    /// null on the wire) and the `system` context the engine must keep.
+    #[test]
+    fn a_chat_log_round_trips_engine_history_into_the_same_session_file() {
+        crate::config::test_support::with_isolated_home(|| {
+            let mut log = ChatLog::new("/tmp/proj");
+            let messages = vec![
+                ChatMessage::text("user", "fix the build"),
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: vec![tool_call()],
+                    tool_call_id: None,
+                    images: Vec::new(),
+                },
+                ChatMessage {
+                    role: "tool".to_string(),
+                    content: Some("ok".to_string()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("call_1".to_string()),
+                    images: Vec::new(),
+                },
+                ChatMessage::text("system", "Summary of the conversation so far: health check"),
+            ];
+            log.append(&messages);
+            // Appending the same list twice must not duplicate lines.
+            log.append(&messages);
+
+            let path = latest_for("/tmp/proj").expect("the engine conversation was recorded");
+            let listed = list_for("/tmp/proj");
+            assert_eq!(listed.len(), 1, "the TUI picker sees the ACP session");
+            assert_eq!(listed[0].preview, "fix the build");
+
+            let restored = load_chat(&path);
+            assert_eq!(restored.len(), 4);
+            assert_eq!(restored[0].role, "user");
+            assert_eq!(restored[0].content.as_deref(), Some("fix the build"));
+            assert_eq!(restored[1].role, "assistant");
+            assert_eq!(
+                restored[1].content, None,
+                "a tool-only assistant message keeps null content"
+            );
+            assert_eq!(restored[1].tool_calls.len(), 1);
+            assert_eq!(restored[1].tool_calls[0].id, "call_1");
+            assert_eq!(restored[2].role, "tool");
+            assert_eq!(restored[2].tool_call_id.as_deref(), Some("call_1"));
+            assert_eq!(restored[3].role, "system");
+            assert!(restored[3]
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .contains("health check"));
+        });
+    }
+
+    /// Compaction replaces the conversation; the engine's log rotates like the
+    /// TUI's, leaving the pre-compaction file resumable.
+    #[test]
+    fn a_chat_log_rotates_after_compaction() {
+        crate::config::test_support::with_isolated_home(|| {
+            let mut log = ChatLog::new("/tmp/proj");
+            log.append(&[ChatMessage::text("user", "the original conversation")]);
+            let first = latest_for("/tmp/proj").expect("first session");
+
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            log.reset();
+            log.append(&[ChatMessage::text(
+                "system",
+                "Summary of the conversation so far: it was about health checks",
+            )]);
+
+            let second = latest_for("/tmp/proj").expect("second session");
+            assert_ne!(first, second, "the summary went to a fresh file");
+            assert_eq!(load_chat(&first).len(), 1, "the original is untouched");
+            assert_eq!(load_chat(&second).len(), 1);
+        });
+    }
+
+    /// No messages, no file -- a session that never prompted leaves nothing.
+    #[test]
+    fn an_empty_chat_log_writes_nothing() {
+        crate::config::test_support::with_isolated_home(|| {
+            let mut log = ChatLog::new("/tmp/proj");
+            log.append(&[]);
+            assert!(latest_for("/tmp/proj").is_none());
         });
     }
 }
