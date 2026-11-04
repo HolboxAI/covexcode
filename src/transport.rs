@@ -42,7 +42,7 @@ use crate::protocol::{
     ListChangesRequest, ListChangesResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
     PromptResponse, RequestId, RequestPermissionOutcome, RollbackRequest,
     RollbackResponse, RpcError, RpcErrorObject, RpcRequest, RpcResponse, SessionId,
-    SessionNotification, PROTOCOL_VERSION,
+    SessionNotification, SessionUpdate, PROTOCOL_VERSION,
 };
 use crate::workspace::Workspace;
 use serde_json::json;
