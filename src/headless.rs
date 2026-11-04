@@ -19,14 +19,14 @@
 //!   (`deploy: false` in `tools::schemas_for`), so the model never sees the
 //!   tool at all -- refusing a call that was never offered, rather than
 //!   offering one and always refusing it.
-//! - No subagents. `Action::Agent` calls are refused with an explanation,
-//!   same reasoning: `ACP` has no nested-session concept (`protocol.rs`'s
-//!   own docs), so there's nowhere on the wire for a subagent's progress to
-//!   go yet.
+//! - Subagents are supported through the shared read-only `explore` child in
+//!   `subagent.rs`. Its per-call activity is not streamed yet; the client
+//!   sees the `agent` call start and the child's final report, which is the
+//!   same report the parent model receives.
 //! - No compaction. `App::finish_compaction`'s logic isn't replicated here;
 //!   a long headless session just keeps growing its own history for now.
 //!
-//! One round of `stream_chat` is consumed the same way `agent::run_subagent`
+//! One round of `stream_chat` is consumed the same way `subagent::run_subagent`
 //! already does (`tokio::select!` over the pinned stream future and its
 //! event channel) -- a proven pattern in this codebase, not a new one
 //! invented for this module.
@@ -298,9 +298,9 @@ impl From<ToolCallStatus> for ToolStatus {
 }
 
 /// One ACP session's worth of state -- deliberately independent of `App`,
-/// not extracted from it. See this module's own docs for the narrower
-/// scope (no plan mode, no deploy, no subagents, no compaction) that keeps
-/// this a small, honestly-scoped first version rather than a shadow `App`.
+/// not extracted from it. See this module's own docs for the remaining
+/// narrower scope (no deploy, no streamed subagent activity) that keeps this
+/// from becoming a shadow `App`.
 pub struct HeadlessSession {
     session_id: SessionId,
     workspace: Workspace,
@@ -855,7 +855,7 @@ impl HeadlessSession {
         }
     }
 
-    /// One `stream_chat` round, consumed the same way `agent::run_subagent`
+    /// One `stream_chat` round, consumed the same way `subagent::run_subagent`
     /// already does -- see that function's own comments for why
     /// `tokio::select!` over the pinned future is the right shape here
     /// (this was not reinvented for this module).
@@ -1149,17 +1149,18 @@ impl HeadlessSession {
                 }
                 Verdict::AutoApprove => {
                     let action = tools::describe_action(call);
-                    // `check_in_browser` is the one auto-approved action
-                    // `tools::execute` cannot fulfill at all -- covexcode has
-                    // no browser tab, only an ACP client does. Intercepted
-                    // here, before ever reaching the local dispatcher, the
-                    // same way `Action::Agent` is intercepted below rather
-                    // than offered to `tools::execute`.
+                    // Two auto-approved actions cannot go through
+                    // `tools::execute`: `check_in_browser` needs an ACP
+                    // client's browser tab, and `agent` needs the LLM config
+                    // the tool runner deliberately never sees. Both are
+                    // intercepted here, before dispatch.
                     if let Some(Action::CheckInBrowser { url }) = &action {
                         let (text, screenshot_images) =
                             self.check_browser(call, url, updates, browser).await;
                         images = screenshot_images;
                         text
+                    } else if matches!(&action, Some(Action::Agent { .. })) {
+                        self.run_agent_call(call, updates).await
                     } else {
                         let _ = updates
                             .send(SessionUpdate::ToolCall(AcpToolCall {
@@ -1187,11 +1188,11 @@ impl HeadlessSession {
                     }
                 }
                 Verdict::Ask(action) => {
-                    if action.label() == "agent"
-                        || matches!(action, crate::tools::Action::Agent { .. })
-                    {
-                        // No subagents in v1 -- see module docs.
-                        "Subagents aren't supported in this session yet.".to_string()
+                    // Defensive only: `agent` is read-only, so the shipped
+                    // approval modes never ask for it. Run it rather than
+                    // refusing if a future policy does.
+                    if matches!(&action, crate::tools::Action::Agent { .. }) {
+                        self.run_agent_call(call, updates).await
                     } else {
                         let (text, interact_images) = self
                             .ask_permission(call, &action, updates, permissions, browser_interact)
@@ -1205,6 +1206,42 @@ impl HeadlessSession {
             results.push((call.id.clone(), content, images));
         }
         results
+    }
+
+    /// Run one read-only `agent` call. `tools::execute` cannot: the child loop
+    /// takes the LLM config, which the tool runner deliberately never sees.
+    /// The engine therefore intercepts the call exactly as `App` does, and
+    /// gets the same `explore` guarantees: the child is offered only
+    /// `subagent_schemas()`, every call is re-checked against
+    /// `subagent_call_allowed`, and only its final report comes back.
+    async fn run_agent_call(&mut self, call: &ToolCall, updates: &UpdateSink<'_>) -> String {
+        let title = tools::describe_action(call)
+            .map(|a| a.label())
+            .unwrap_or_else(|| call.function.name.clone());
+        let _ = updates
+            .send(SessionUpdate::ToolCall(AcpToolCall {
+                tool_call_id: ToolCallId(call.id.clone()),
+                title,
+                kind: ToolKind::Other,
+                status: ToolCallStatus::InProgress,
+            }))
+            .await;
+        let mut outcome = crate::subagent::run_subagent(
+            call,
+            &self.workspace,
+            &self.config,
+            // No per-call activity stream in this engine yet; the client sees
+            // the call start and the final report.
+            None,
+        )
+        .await;
+        if let Some(record) = outcome.rollback.take() {
+            self.rollback.record_turn(record, self.turn);
+        }
+        let _ = updates
+            .send(SessionUpdate::ToolCallUpdate((&outcome).into()))
+            .await;
+        outcome.content
     }
 
     /// `write_file`/`edit_file` in inline-edit mode: compute the before/after
@@ -2125,6 +2162,58 @@ mod tests {
                 ..
             } if tool_call_id == "call_1"
         )));
+    }
+
+    /// The ACP engine used to answer an `agent` call with "not supported".
+    /// It now runs the same read-only `explore` child loop the TUI does and
+    /// hands the parent model the child's report as the tool result.
+    #[tokio::test]
+    async fn an_agent_call_runs_the_read_only_subagent() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![
+            tool_call_round(
+                tools::AGENT,
+                r#"{"task":"read hello.txt","agent_type":"explore"}"#,
+            ),
+            text_round("The file says hi."),
+            text_round("done"),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "research this".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let mut report = None;
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::ToolCallUpdate(update) = update {
+                if let Some(ToolCallContent::Text { text }) = update.content {
+                    if text.contains("The file says hi.") {
+                        report = Some(text);
+                    }
+                }
+            }
+        }
+        let report = report.expect("the parent must receive the child's report");
+        assert!(
+            !report.contains("not handled"),
+            "the engine must run the subagent, not fall through to tools::execute: {report}"
+        );
     }
 
     #[tokio::test]
