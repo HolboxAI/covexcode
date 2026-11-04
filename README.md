@@ -241,6 +241,25 @@ exact rules. Nothing here is a sandbox: these prompts are the only thing
 limiting what the model can do with your own permissions, and a looser default
 means the destructive tier is now carrying more of that weight on its own.
 
+### Subagents
+
+`agent` delegates one focused research question to a read-only child and
+returns only its final report. The built-in type is `explore`. A project can
+add named read-only agents under `.covexcode/agents/`, and you can add them
+under `~/.covexcode/agents/`; the project wins on a name collision.
+
+```toml
+# .covexcode/agents/reviewer.toml
+name = "reviewer"
+description = "reviews a change for correctness"
+prompt = "You are a meticulous reviewer. Look for..."
+```
+
+The definition's prompt is appended to the built-in read-only prompt, so a
+definition changes what the child is asked to do, not what it is able to do.
+Sibling `agent` calls run concurrently (default 4, `tools.subagent_concurrency`),
+and `tools.subagent_model` can route research to a faster model.
+
 ## Privacy
 
 No login, no way to attribute usage to a person. Two anonymous pings only

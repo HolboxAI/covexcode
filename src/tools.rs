@@ -1037,9 +1037,10 @@ pub fn schemas_for(
                     },
                     "agent_type": {
                         "type": "string",
-                        "enum": ["explore"],
-                        "description": "What kind of subagent. Only 'explore' (read-only \
-                                        research) exists today; omit it."
+                        "description": "What kind of subagent. Defaults to 'explore' \
+                                        (read-only research). A project can define more \
+                                        under .covexcode/agents; the system prompt lists \
+                                        them when it does."
                     }
                 },
                 "required": ["task"]
@@ -1712,6 +1713,27 @@ pub fn system_prompt(
                decides, so write it for them, not as a note to yourself.\n\
              - If they decline, you are still in plan mode. Read what they said, revise, and \
                propose again -- do not repeat the same plan."
+        ));
+    }
+
+    // Discovered on every prompt build, like the workspace notes above. The
+    // list is stable unless someone edits .covexcode/agents mid-turn, which is
+    // the same assumption the file-count schema gate makes.
+    let custom_agents: Vec<String> = crate::subagent::definitions(workspace.root())
+        .into_iter()
+        .map(|definition| {
+            if definition.description.is_empty() {
+                definition.name
+            } else {
+                format!("{} ({})", definition.name, definition.description)
+            }
+        })
+        .collect();
+    if !custom_agents.is_empty() {
+        prompt.push_str(&format!(
+            "\n\nAdditional read-only subagent types are defined for this project: {}. \
+             Pass one as agent_type to {AGENT}; omit it for the built-in explore agent.",
+            custom_agents.join(", ")
         ));
     }
 
