@@ -33,7 +33,7 @@
 
 use crate::approval::{verdict_for, Decision, Verdict};
 use crate::config::Config;
-use crate::domain::{SessionEvent, ToolStatus, TurnId, TurnStopReason};
+use crate::domain::{SessionEvent, SessionStatus, ToolStatus, TurnId, TurnStopReason};
 use crate::llm::{self, ApiUsage, ChatMessage, StreamEvent, Target, ToolCall};
 use crate::protocol::{
     AcpToolCall, ChangeEntry, ContentBlock, DiffHunk, DiffHunkLine, DiffLineChange,
@@ -419,6 +419,13 @@ impl HeadlessSession {
         }
     }
 
+    fn emit_status(&self, status: SessionStatus) {
+        self.emit(SessionEvent::StatusChanged {
+            session_id: self.session_id.clone(),
+            status,
+        });
+    }
+
     fn finish_turn(&self, reason: StopReason) -> StopReason {
         self.emit(SessionEvent::TurnFinished {
             session_id: self.session_id.clone(),
@@ -430,6 +437,13 @@ impl HeadlessSession {
                 StopReason::Refusal => TurnStopReason::Refusal,
                 StopReason::Cancelled => TurnStopReason::Cancelled,
             },
+        });
+        // A cancelled turn is not idle in the same sense as a finished one:
+        // the client may want to show the stop state rather than a normal
+        // prompt. The next prompt emits `Running` again either way.
+        self.emit_status(match reason {
+            StopReason::Cancelled => SessionStatus::Cancelled,
+            _ => SessionStatus::Idle,
         });
         reason
     }
@@ -495,6 +509,7 @@ impl HeadlessSession {
             session_id: self.session_id.clone(),
             turn: TurnId::new(self.turn),
         });
+        self.emit_status(SessionStatus::Running);
         // Everything below reports progress through the sink, which keeps the
         // ACP update stream and the transport-agnostic event stream in sync.
         let updates = UpdateSink {
@@ -1509,17 +1524,20 @@ impl HeadlessSession {
             ],
         };
         let (respond, receive) = oneshot::channel();
+        self.emit_status(SessionStatus::WaitingForApproval);
         if permissions
             .send(PermissionAsk { request, respond })
             .await
             .is_err()
         {
+            self.emit_status(SessionStatus::Running);
             return (
                 "The client disconnected before answering.".to_string(),
                 Vec::new(),
             );
         }
         let outcome = receive.await;
+        self.emit_status(SessionStatus::Running);
 
         // Per-hunk review: the client accepted some hunks and returned the
         // merged file text. `Partial` never reaches the `Decision` mapping
@@ -1678,17 +1696,20 @@ impl HeadlessSession {
             ],
         };
         let (respond, receive) = oneshot::channel();
+        self.emit_status(SessionStatus::WaitingForApproval);
         if permissions
             .send(PermissionAsk { request, respond })
             .await
             .is_err()
         {
+            self.emit_status(SessionStatus::Running);
             return (
                 "The client disconnected before answering.".to_string(),
                 Vec::new(),
             );
         }
         let outcome = receive.await;
+        self.emit_status(SessionStatus::Running);
         let decision: Decision = match outcome {
             Ok(o) => o.into(),
             Err(_) => Decision::Refused,
@@ -1793,7 +1814,9 @@ impl HeadlessSession {
             url: url.to_string(),
             respond,
         };
+        self.emit_status(SessionStatus::WaitingForApproval);
         if browser.send(ask).await.is_err() {
+            self.emit_status(SessionStatus::Running);
             return (
                 "The client disconnected before taking the screenshot.".to_string(),
                 Vec::new(),
@@ -1820,6 +1843,7 @@ impl HeadlessSession {
                 "Timed out waiting for the client to respond.".to_string(),
             ),
         };
+        self.emit_status(SessionStatus::Running);
 
         match result {
             BrowserCheckResult::Screenshot {
@@ -1906,7 +1930,9 @@ impl HeadlessSession {
             interaction: interaction.clone(),
             respond,
         };
+        self.emit_status(SessionStatus::WaitingForApproval);
         if browser_interact.send(ask).await.is_err() {
+            self.emit_status(SessionStatus::Running);
             return (
                 "The client disconnected before performing the interaction.".to_string(),
                 Vec::new(),
@@ -1924,6 +1950,7 @@ impl HeadlessSession {
                 "Timed out waiting for the client to respond.".to_string(),
             ),
         };
+        self.emit_status(SessionStatus::Running);
 
         match result {
             BrowserInteractResult::Screenshot {
@@ -2275,14 +2302,28 @@ mod tests {
             events.first(),
             Some(crate::domain::SessionEvent::TurnStarted { turn, .. }) if turn.get() == 1
         ));
+        assert!(matches!(
+            events.get(1),
+            Some(crate::domain::SessionEvent::StatusChanged {
+                status: SessionStatus::Running,
+                ..
+            })
+        ));
         assert!(events.iter().any(|event| matches!(
             event,
             crate::domain::SessionEvent::TextDelta { text, .. } if text == "Hello!"
         )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            crate::domain::SessionEvent::TurnFinished {
+                reason: crate::domain::TurnStopReason::EndTurn,
+                ..
+            }
+        )));
         assert!(matches!(
             events.last(),
-            Some(crate::domain::SessionEvent::TurnFinished {
-                reason: crate::domain::TurnStopReason::EndTurn,
+            Some(crate::domain::SessionEvent::StatusChanged {
+                status: SessionStatus::Idle,
                 ..
             })
         ));
@@ -3339,6 +3380,8 @@ mod tests {
         let (permissions_tx, mut permissions_rx) = mpsc::channel(16);
         let (browser_tx, _browser_rx) = mpsc::channel(16);
         let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        session.set_event_sink(events_tx);
 
         let prompt = tokio::spawn(async move {
             session
@@ -3362,6 +3405,22 @@ mod tests {
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
+        let mut statuses = Vec::new();
+        while let Ok(event) = events_rx.try_recv() {
+            if let SessionEvent::StatusChanged { status, .. } = event {
+                statuses.push(status);
+            }
+        }
+        assert_eq!(
+            statuses,
+            vec![
+                SessionStatus::Running,
+                SessionStatus::WaitingForApproval,
+                SessionStatus::Running,
+                SessionStatus::Idle,
+            ],
+            "the client must see why the turn is paused and when it resumes"
+        );
         // rm -rf on a directory that never existed is a no-op either way,
         // so the real proof this was refused (not just answered oddly) is
         // that the model's second round ran at all: refusing must feed a
