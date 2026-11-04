@@ -19,6 +19,7 @@
 
 use crate::llm::ToolCall;
 use crate::tools::Action;
+#[cfg(feature = "cli")]
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// One thing the model wants to do, waiting for the user's answer.
@@ -143,6 +144,7 @@ impl Feedback {
     /// character is swallowed here rather than falling through to the rest of
     /// the app -- while this prompt is open, nothing else may act on a
     /// keystroke.
+    #[cfg(feature = "cli")]
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Decision> {
         match code {
             // Esc skips the offer. Identical to an empty Enter, and identical
@@ -324,6 +326,7 @@ fn is_read_only_action(action: &crate::tools::Action) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "cli")]
     fn typed(text: &str) -> Feedback {
         let mut feedback = Feedback::new();
         for c in text.chars() {
@@ -334,6 +337,7 @@ mod tests {
 
     /// The core contract: what the user typed is what the model is told,
     /// character for character.
+    #[cfg(feature = "cli")]
     #[test]
     fn a_typed_reason_becomes_deny_with_feedback_verbatim() {
         let mut feedback = typed("use the existing helper instead");
@@ -347,6 +351,7 @@ mod tests {
 
     /// Pressing `n` and immediately Enter has to be a plain refusal -- feedback
     /// is offered, never required.
+    #[cfg(feature = "cli")]
     #[test]
     fn an_empty_enter_is_a_plain_deny() {
         let mut feedback = Feedback::new();
@@ -356,6 +361,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn esc_is_a_plain_deny() {
         let mut feedback = Feedback::new();
@@ -366,6 +372,7 @@ mod tests {
     }
 
     /// Esc means "forget it", not "send what I had half-typed".
+    #[cfg(feature = "cli")]
     #[test]
     fn esc_after_typing_still_sends_nothing() {
         let mut feedback = typed("half a thou");
@@ -377,6 +384,7 @@ mod tests {
 
     /// Whitespace is not a reason: the model would otherwise be handed an empty
     /// string and told it was feedback.
+    #[cfg(feature = "cli")]
     #[test]
     fn a_blank_reason_is_a_plain_deny_not_an_empty_feedback() {
         let mut feedback = typed("   ");
@@ -388,6 +396,7 @@ mod tests {
     }
 
     /// A reason is trimmed at the edges but never rewritten inside.
+    #[cfg(feature = "cli")]
     #[test]
     fn a_reason_keeps_its_inner_punctuation_and_is_only_trimmed() {
         let mut feedback = typed("  don't touch app.rs: it's mid-edit  ");
@@ -400,6 +409,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn backspace_edits_the_reason() {
         let mut feedback = typed("wrong");
@@ -410,6 +420,7 @@ mod tests {
     /// While this prompt is open, `y` and `n` are letters like any other. If
     /// they were still the approval keys, a reason containing either would
     /// answer the prompt by accident.
+    #[cfg(feature = "cli")]
     #[test]
     fn y_and_n_are_ordinary_characters_inside_the_prompt() {
         let mut feedback = typed("ny");
@@ -421,6 +432,7 @@ mod tests {
 
     /// A control chord is not text: Ctrl-C has to stay the interrupt/exit it is,
     /// and must not land a literal character in the reason.
+    #[cfg(feature = "cli")]
     #[test]
     fn control_chords_are_swallowed_rather_than_typed() {
         let mut feedback = Feedback::new();
