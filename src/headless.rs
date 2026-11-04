@@ -33,7 +33,7 @@
 
 use crate::approval::{verdict_for, Decision, Verdict};
 use crate::config::Config;
-use crate::domain::{SessionEvent, TurnId, TurnStopReason};
+use crate::domain::{SessionEvent, ToolStatus, TurnId, TurnStopReason};
 use crate::llm::{self, ApiUsage, ChatMessage, StreamEvent, Target, ToolCall};
 use crate::protocol::{
     AcpToolCall, ChangeEntry, ContentBlock, DiffHunk, DiffHunkLine, DiffLineChange,
@@ -215,6 +215,88 @@ impl CancelHandle {
     }
 }
 
+/// Adapts the engine's ACP-shaped progress updates to the
+/// transport-agnostic event stream in one place.
+///
+/// Every `SessionUpdate` still goes to the ACP channel unchanged; the same
+/// update is also mapped to a `SessionEvent` for a subscribed client, so the
+/// two views cannot drift and adding an event never means editing the
+/// forty-odd tool sites. Holds clones, not a borrow of the session: the
+/// engine mutates itself while a sink is alive.
+struct UpdateSink<'a> {
+    updates: &'a mpsc::Sender<SessionUpdate>,
+    events: Option<mpsc::UnboundedSender<SessionEvent>>,
+    session_id: SessionId,
+    turn: TurnId,
+}
+
+impl<'a> UpdateSink<'a> {
+    async fn send(&self, update: SessionUpdate) {
+        if let Some(event) = self.event_for(&update) {
+            if let Some(tx) = &self.events {
+                let _ = tx.send(event);
+            }
+        }
+        let _ = self.updates.send(update).await;
+    }
+
+    fn event_for(&self, update: &SessionUpdate) -> Option<SessionEvent> {
+        if self.events.is_none() {
+            return None;
+        }
+        let session_id = self.session_id.clone();
+        match update {
+            SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text },
+                ..
+            } => Some(SessionEvent::TextDelta {
+                session_id,
+                turn: self.turn,
+                text: text.clone(),
+            }),
+            SessionUpdate::ToolCall(call) => Some(SessionEvent::ToolCallStarted {
+                session_id,
+                turn: self.turn,
+                tool_call_id: call.tool_call_id.0.clone(),
+                title: call.title.clone(),
+            }),
+            SessionUpdate::ToolCallUpdate(update) => Some(SessionEvent::ToolCallUpdated {
+                session_id,
+                turn: self.turn,
+                tool_call_id: update.tool_call_id.0.clone(),
+                status: update.status.map(ToolStatus::from),
+                text: match &update.content {
+                    Some(ToolCallContent::Text { text }) => Some(text.clone()),
+                    _ => None,
+                },
+            }),
+            SessionUpdate::UsageUpdate {
+                used,
+                size,
+                prompt_tokens,
+            } => Some(SessionEvent::UsageUpdated {
+                session_id,
+                turn: self.turn,
+                used: *used,
+                size: *size,
+                prompt_tokens: *prompt_tokens,
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl From<ToolCallStatus> for ToolStatus {
+    fn from(status: ToolCallStatus) -> Self {
+        match status {
+            ToolCallStatus::Pending => Self::Pending,
+            ToolCallStatus::InProgress => Self::InProgress,
+            ToolCallStatus::Completed => Self::Completed,
+            ToolCallStatus::Failed => Self::Failed,
+        }
+    }
+}
+
 /// One ACP session's worth of state -- deliberately independent of `App`,
 /// not extracted from it. See this module's own docs for the narrower
 /// scope (no plan mode, no deploy, no subagents, no compaction) that keeps
@@ -308,16 +390,6 @@ impl HeadlessSession {
         }
     }
 
-    fn emit_text(&self, turn: TurnId, text: &str) {
-        if let Some(tx) = &self.events {
-            let _ = tx.send(SessionEvent::TextDelta {
-                session_id: self.session_id.clone(),
-                turn,
-                text: text.to_string(),
-            });
-        }
-    }
-
     fn finish_turn(&self, reason: StopReason) -> StopReason {
         self.emit(SessionEvent::TurnFinished {
             session_id: self.session_id.clone(),
@@ -394,6 +466,14 @@ impl HeadlessSession {
             session_id: self.session_id.clone(),
             turn: TurnId::new(self.turn),
         });
+        // Everything below reports progress through the sink, which keeps the
+        // ACP update stream and the transport-agnostic event stream in sync.
+        let updates = UpdateSink {
+            updates,
+            events: self.events.clone(),
+            session_id: self.session_id.clone(),
+            turn: TurnId::new(self.turn),
+        };
         // The step budget is *per turn*, not per session: without this reset a
         // long-lived ACP session would accumulate tool rounds across turns and
         // eventually withhold the schemas on every later turn, permanently
@@ -499,13 +579,13 @@ impl HeadlessSession {
             }
 
             self.request_id += 1;
-            let round = self.run_one_round(history, schemas, updates).await;
+            let round = self.run_one_round(history, schemas, &updates).await;
 
             match round {
                 RoundOutcome::Answered => {
                     // Same moment as the TUI: only after an ordinary completed
                     // turn, never after a failure or a compaction itself.
-                    self.maybe_auto_compact(updates).await;
+                    self.maybe_auto_compact(&updates).await;
                     return self.finish_turn(StopReason::EndTurn);
                 }
                 RoundOutcome::Error(message) => {
@@ -518,7 +598,7 @@ impl HeadlessSession {
                     // only escape the message offered was a new chat.
                     if !compacted_this_turn
                         && crate::notice::classify(&message) == crate::notice::Kind::ContextFull
-                        && self.maybe_auto_compact(updates).await
+                        && self.maybe_auto_compact(&updates).await
                     {
                         compacted_this_turn = true;
                         self.messages.push(retry_message.clone());
@@ -543,7 +623,7 @@ impl HeadlessSession {
                     let outcomes = tokio::select! {
                         outcomes = self.decide_and_run(
                             calls,
-                            updates,
+                            &updates,
                             permissions,
                             browser,
                             browser_interact,
@@ -634,7 +714,7 @@ impl HeadlessSession {
     ///
     /// Returns true when the history was actually replaced by a summary, so a
     /// failed round can use it to decide whether a retry is worth attempting.
-    async fn maybe_auto_compact(&mut self, updates: &mpsc::Sender<SessionUpdate>) -> bool {
+    async fn maybe_auto_compact(&mut self, updates: &UpdateSink<'_>) -> bool {
         if !self.config.compact.auto || self.messages.len() < 2 {
             return false;
         }
@@ -715,10 +795,7 @@ impl HeadlessSession {
     /// Ask the model to summarize the current conversation. This request has
     /// no tools and no workspace system prompt: its only job is to read what is
     /// already in history and write a replacement for it.
-    async fn request_summary(
-        &mut self,
-        updates: &mpsc::Sender<SessionUpdate>,
-    ) -> Result<String, String> {
+    async fn request_summary(&mut self, updates: &UpdateSink<'_>) -> Result<String, String> {
         let mut history = self.messages.clone();
         history.push(ChatMessage::text(
             "user",
@@ -786,9 +863,8 @@ impl HeadlessSession {
         &mut self,
         history: Vec<ChatMessage>,
         schemas: Vec<serde_json::Value>,
-        updates: &mpsc::Sender<SessionUpdate>,
+        updates: &UpdateSink<'_>,
     ) -> RoundOutcome {
-        let turn = TurnId::new(self.turn);
         let (tx, mut rx) = mpsc::channel(64);
         let target = Target {
             endpoint: &self.config.llm.endpoint,
@@ -818,7 +894,6 @@ impl HeadlessSession {
                 received = rx.recv() => match received {
                     Some((_, StreamEvent::Token(t))) => {
                         text.push_str(&t);
-                        self.emit_text(turn, &t);
                         let _ = updates
                             .send(SessionUpdate::AgentMessageChunk {
                                 content: ContentBlock::Text { text: t },
@@ -915,7 +990,7 @@ impl HeadlessSession {
     async fn decide_and_run(
         &mut self,
         calls: Vec<ToolCall>,
-        updates: &mpsc::Sender<SessionUpdate>,
+        updates: &UpdateSink<'_>,
         permissions: &mpsc::Sender<PermissionAsk>,
         browser: &mpsc::Sender<BrowserCheckAsk>,
         browser_interact: &mpsc::Sender<BrowserInteractAsk>,
@@ -1143,7 +1218,7 @@ impl HeadlessSession {
         &mut self,
         call: &ToolCall,
         action: &crate::tools::Action,
-        updates: &mpsc::Sender<SessionUpdate>,
+        updates: &UpdateSink<'_>,
     ) -> (String, String, Vec<llm::ImageAttachment>) {
         let preview = tools::preview_change_text(action, Path::new(self.workspace.root()));
 
@@ -1185,7 +1260,7 @@ impl HeadlessSession {
         &mut self,
         call: &ToolCall,
         action: &crate::tools::Action,
-        updates: &mpsc::Sender<SessionUpdate>,
+        updates: &UpdateSink<'_>,
         permissions: &mpsc::Sender<PermissionAsk>,
         browser_interact: &mpsc::Sender<BrowserInteractAsk>,
     ) -> (String, Vec<llm::ImageAttachment>) {
@@ -1378,7 +1453,7 @@ impl HeadlessSession {
         &mut self,
         call: &ToolCall,
         proposal: &tools::Proposal,
-        updates: &mpsc::Sender<SessionUpdate>,
+        updates: &UpdateSink<'_>,
         permissions: &mpsc::Sender<PermissionAsk>,
     ) -> (String, Vec<llm::ImageAttachment>) {
         let tool_call_update = ToolCallUpdate {
@@ -1503,7 +1578,7 @@ impl HeadlessSession {
         &self,
         call: &ToolCall,
         url: &str,
-        updates: &mpsc::Sender<SessionUpdate>,
+        updates: &UpdateSink<'_>,
         browser: &mpsc::Sender<BrowserCheckAsk>,
     ) -> (String, Vec<llm::ImageAttachment>) {
         let _ = updates
@@ -1615,7 +1690,7 @@ impl HeadlessSession {
         call: &ToolCall,
         url: &str,
         interaction: &BrowserInteraction,
-        updates: &mpsc::Sender<SessionUpdate>,
+        updates: &UpdateSink<'_>,
         browser_interact: &mpsc::Sender<BrowserInteractAsk>,
     ) -> (String, Vec<llm::ImageAttachment>) {
         let _ = updates
@@ -1998,6 +2073,58 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// The event stream must cover the tool lifecycle too, not just text and
+    /// the turn envelope: a TUI client needs to show a call start and finish
+    /// without speaking ACP.
+    #[tokio::test]
+    async fn tool_lifecycle_reaches_the_event_stream() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![
+            tool_call_round(tools::READ_FILE, r#"{"path":"hello.txt"}"#),
+            text_round("done"),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        session.set_event_sink(events_tx);
+
+        let stop = session
+            .prompt(
+                "read the file".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let mut events = Vec::new();
+        while let Ok(event) = events_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SessionEvent::ToolCallStarted { tool_call_id, title, .. }
+                if tool_call_id == "call_1" && !title.is_empty()
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SessionEvent::ToolCallUpdated {
+                tool_call_id,
+                status: Some(ToolStatus::Completed),
+                ..
+            } if tool_call_id == "call_1"
+        )));
     }
 
     #[tokio::test]
