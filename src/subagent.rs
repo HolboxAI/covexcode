@@ -289,6 +289,17 @@ pub async fn run_subagent(
 /// the same model, so `/usage` stays honest about what a session cost.
 /// Per-agent attribution is Phase 5.4; this is the part that cannot wait.
 fn record_subagent_usage(spent: usize, config: &Config) {
+    // Tests run in one process with a process-global `$HOME`. The app's own
+    // usage tests isolate it with a lock, but the agent tests do not, so a
+    // child's ledger write can land inside another test's temporary home and
+    // change its totals. `usage::record_turn` already has its own round-trip
+    // test; skipping the write here keeps parallel tests deterministic
+    // without touching the production path.
+    #[cfg(test)]
+    {
+        let _ = (spent, config);
+    }
+    #[cfg(not(test))]
     crate::usage::record_turn(spent, &config.llm.model);
 }
 
