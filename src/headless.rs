@@ -34,8 +34,8 @@
 use crate::approval::{verdict_for, Decision, Verdict};
 use crate::config::Config;
 use crate::domain::{
-    ApprovalDetail, ApprovalOption, ApprovalOptionKind, ApprovalResolution, SessionEvent,
-    SessionStatus, ToolStatus, TurnId, TurnStopReason,
+    ApprovalDetail, ApprovalOption, ApprovalOptionKind, ApprovalResolution, SessionCommand,
+    SessionEvent, SessionStatus, ToolStatus, TurnId, TurnStopReason,
 };
 use crate::llm::{self, ApiUsage, ChatMessage, StreamEvent, Target, ToolCall};
 use crate::protocol::{
@@ -229,6 +229,32 @@ impl CancelHandle {
 #[derive(Clone, Default)]
 pub struct ApprovalHandle {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ApprovalResolution>>>>,
+}
+
+/// A serializable control handle for one session. Mirrors what a daemon
+/// receives off the wire; applying a command never needs the session actor,
+/// which is usually awaiting the very turn the command targets.
+#[derive(Clone)]
+pub struct SessionCommandHandle {
+    cancel: CancelHandle,
+    approvals: ApprovalHandle,
+}
+
+impl SessionCommandHandle {
+    /// Apply one command. Returns false when it targeted an unknown approval
+    /// (already answered or never issued); cancel always succeeds.
+    pub fn apply(&self, command: SessionCommand) -> bool {
+        match command {
+            SessionCommand::Cancel => {
+                self.cancel.cancel();
+                true
+            }
+            SessionCommand::RespondApproval {
+                request_id,
+                resolution,
+            } => self.approvals.respond(request_id, resolution),
+        }
+    }
 }
 
 /// Removes a pending approval entry when the waiting code leaves its scope,
@@ -517,6 +543,15 @@ impl HeadlessSession {
     /// engine-local id from `SessionEvent::ApprovalRequested`.
     pub fn approval_handle(&self) -> ApprovalHandle {
         self.approvals.clone()
+    }
+
+    /// A cloneable handle that applies serializable [`SessionCommand`]s --
+    /// cancel and approval answers today, the surface a daemon exposes.
+    pub fn command_handle(&self) -> SessionCommandHandle {
+        SessionCommandHandle {
+            cancel: self.cancel.clone(),
+            approvals: self.approvals.clone(),
+        }
     }
 
     /// A cloneable handle a transport can use to cancel the current turn
@@ -3691,7 +3726,7 @@ mod tests {
         .await;
         let config = config_for(&endpoint);
         let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
-        let approvals = session.approval_handle();
+        let commands = session.command_handle();
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         session.set_event_sink(events_tx);
         let (updates_tx, _updates_rx) = mpsc::channel(16);
@@ -3724,9 +3759,15 @@ mod tests {
         .await
         .expect("the approval request must arrive promptly");
 
-        assert!(approvals.respond(request_id, ApprovalResolution::Cancelled));
+        assert!(commands.apply(SessionCommand::RespondApproval {
+            request_id,
+            resolution: ApprovalResolution::Cancelled,
+        }));
         assert!(
-            !approvals.respond(request_id, ApprovalResolution::Cancelled),
+            !commands.apply(SessionCommand::RespondApproval {
+                request_id,
+                resolution: ApprovalResolution::Cancelled,
+            }),
             "an id is answered once"
         );
 
