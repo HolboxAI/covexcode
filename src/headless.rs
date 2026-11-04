@@ -48,6 +48,7 @@ use crate::tools::{self, Action, BrowserInteraction, Mode};
 use crate::workspace::Workspace;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -81,16 +82,15 @@ pub struct PermissionAsk {
     pub approvals: ApprovalHandle,
 }
 
-/// What a caller gets sent for each `check_in_browser` call. Paired with a
-/// `oneshot` because a `HeadlessSession` has only one outstanding at a time
-/// (it blocks on the reply before continuing). Permission asks are separate:
-/// they answer through `ApprovalHandle`, since a non-ACP client needs that
-/// path too. This codebase's own convention (see `transport.rs`'s docs) is a
-/// small, explicit type per real use, not a shared abstraction.
+/// What a caller gets sent for each `check_in_browser` call. The answer comes
+/// back through `AskHandle`, keyed by `request_id`, so every attached
+/// connection can receive the ask and the first answer wins.
+#[derive(Clone)]
 pub struct BrowserCheckAsk {
     pub session_id: SessionId,
+    pub request_id: u64,
     pub url: String,
-    pub respond: oneshot::Sender<BrowserCheckResult>,
+    pub answers: AskHandle<BrowserCheckResult>,
 }
 
 /// What the client reports back for one `BrowserCheckAsk`. `Failed` covers
@@ -108,15 +108,16 @@ pub enum BrowserCheckResult {
     Failed(String),
 }
 
-/// One `interact_in_browser` call awaiting the client's answer -- same
-/// shape and reasoning as `BrowserCheckAsk` immediately above (a small,
-/// explicit type per real use, not a shared abstraction), except this one
-/// also carries the interaction to perform before the client screenshots.
+/// One `interact_in_browser` call awaiting a client answer -- same shape and
+/// reasoning as `BrowserCheckAsk`, plus the interaction to perform before the
+/// screenshot.
+#[derive(Clone)]
 pub struct BrowserInteractAsk {
     pub session_id: SessionId,
+    pub request_id: u64,
     pub url: String,
     pub interaction: BrowserInteraction,
-    pub respond: oneshot::Sender<BrowserInteractResult>,
+    pub answers: AskHandle<BrowserInteractResult>,
 }
 
 /// What the client reports back for one `BrowserInteractAsk`. Same
@@ -217,16 +218,63 @@ impl CancelHandle {
     }
 }
 
-/// Answers an outstanding approval without going through the ACP permission
-/// channel. Pending requests are keyed by the engine-local id carried in
-/// `SessionEvent::ApprovalRequested`.
+/// Answers one engine-to-client ask, keyed by an engine-local request id.
+/// The first answer consumes the entry; a later one returns false.
 ///
 /// The map holds only oneshot senders and is never held across an await, so a
 /// plain `std::sync::Mutex` is enough.
-#[derive(Clone, Default)]
-pub struct ApprovalHandle {
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ApprovalResolution>>>>,
+pub struct AskHandle<T> {
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<T>>>>,
 }
+
+// Manual, not `derive(Clone)`: cloning the handle only clones the Arc and must
+// not require the answer type itself to be `Clone`.
+impl<T> Clone for AskHandle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            pending: self.pending.clone(),
+        }
+    }
+}
+
+impl<T> Default for AskHandle<T> {
+    fn default() -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<T> AskHandle<T> {
+    /// Answer one request. Returns false when the id is unknown (already
+    /// answered, wrong session, or never issued).
+    pub fn respond(&self, request_id: u64, result: T) -> bool {
+        let pending = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.remove(&request_id)
+        };
+        match pending {
+            Some(sender) => sender.send(result).is_ok(),
+            None => false,
+        }
+    }
+
+    fn register(&self, request_id: u64) -> oneshot::Receiver<T> {
+        let (sender, receiver) = oneshot::channel();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.insert(request_id, sender);
+        receiver
+    }
+
+    fn remove(&self, request_id: u64) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.remove(&request_id);
+    }
+}
+
+/// Approval answers, as seen by a client. The id comes from
+/// `SessionEvent::ApprovalRequested`.
+pub type ApprovalHandle = AskHandle<ApprovalResolution>;
 
 /// A serializable control handle for one session. Mirrors what a daemon
 /// receives off the wire; applying a command never needs the session actor,
@@ -254,43 +302,16 @@ impl SessionCommandHandle {
     }
 }
 
-/// Removes a pending approval entry when the waiting code leaves its scope,
+/// Removes a pending ask entry when the waiting code leaves its scope,
 /// including when the whole turn is cancelled and this future is dropped.
-struct PendingApproval<'a> {
-    approvals: &'a ApprovalHandle,
+struct PendingAsk<'a, T> {
+    answers: &'a AskHandle<T>,
     request_id: u64,
 }
 
-impl Drop for PendingApproval<'_> {
+impl<T> Drop for PendingAsk<'_, T> {
     fn drop(&mut self) {
-        self.approvals.remove(self.request_id);
-    }
-}
-
-impl ApprovalHandle {
-    /// Answer one request. Returns false when the id is unknown (already
-    /// answered, wrong session, or never issued).
-    pub fn respond(&self, request_id: u64, resolution: ApprovalResolution) -> bool {
-        let pending = {
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            pending.remove(&request_id)
-        };
-        match pending {
-            Some(sender) => sender.send(resolution).is_ok(),
-            None => false,
-        }
-    }
-
-    fn register(&self, request_id: u64) -> oneshot::Receiver<ApprovalResolution> {
-        let (sender, receiver) = oneshot::channel();
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.insert(request_id, sender);
-        receiver
-    }
-
-    fn remove(&self, request_id: u64) {
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.remove(&request_id);
+        self.answers.remove(self.request_id);
     }
 }
 
@@ -549,6 +570,12 @@ pub struct HeadlessSession {
     cancel: CancelHandle,
     /// Direct answers to outstanding approval requests, from a non-ACP client.
     approvals: ApprovalHandle,
+    /// Monotonic id for browser asks. Separate from approval ids because the
+    /// transport correlates each ask kind independently. Atomic because
+    /// concurrent browser calls may register asks from `&self`.
+    browser_seq: AtomicU64,
+    browser_checks: AskHandle<BrowserCheckResult>,
+    browser_interactions: AskHandle<BrowserInteractResult>,
 }
 
 impl HeadlessSession {
@@ -572,6 +599,9 @@ impl HeadlessSession {
             events: EventHub::default(),
             cancel: CancelHandle::default(),
             approvals: ApprovalHandle::default(),
+            browser_seq: AtomicU64::new(0),
+            browser_checks: AskHandle::default(),
+            browser_interactions: AskHandle::default(),
         }
     }
 
@@ -1787,8 +1817,8 @@ impl HeadlessSession {
         // Register before announcing: a client that answers the instant it
         // sees the event must find the slot already there.
         let direct = self.approvals.register(approval_request_id);
-        let pending = PendingApproval {
-            approvals: &self.approvals,
+        let pending = PendingAsk {
+            answers: &self.approvals,
             request_id: approval_request_id,
         };
         self.emit_approval_requested(approval_request_id, &request);
@@ -1971,8 +2001,8 @@ impl HeadlessSession {
         // Register before announcing: a client that answers the instant it
         // sees the event must find the slot already there.
         let direct = self.approvals.register(approval_request_id);
-        let pending = PendingApproval {
-            approvals: &self.approvals,
+        let pending = PendingAsk {
+            answers: &self.approvals,
             request_id: approval_request_id,
         };
         self.emit_approval_requested(approval_request_id, &request);
@@ -2091,11 +2121,17 @@ impl HeadlessSession {
             }))
             .await;
 
-        let (respond, receive) = oneshot::channel();
+        let request_id = self.browser_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut answers = self.browser_checks.register(request_id);
+        let pending = PendingAsk {
+            answers: &self.browser_checks,
+            request_id,
+        };
         let ask = BrowserCheckAsk {
             session_id: self.session_id.clone(),
+            request_id,
             url: url.to_string(),
-            respond,
+            answers: self.browser_checks.clone(),
         };
         self.emit_status(SessionStatus::WaitingForApproval);
         if browser.send(ask).await.is_err() {
@@ -2117,7 +2153,7 @@ impl HeadlessSession {
         // `session/prompt` is a blocking ACP call, so that hang reaches
         // all the way out to whatever's waiting on the turn to finish.
         const BROWSER_CHECK_TIMEOUT: Duration = Duration::from_secs(90);
-        let result = match tokio::time::timeout(BROWSER_CHECK_TIMEOUT, receive).await {
+        let result = match tokio::time::timeout(BROWSER_CHECK_TIMEOUT, &mut answers).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
                 BrowserCheckResult::Failed("The client disconnected before responding.".to_string())
@@ -2127,6 +2163,7 @@ impl HeadlessSession {
             ),
         };
         self.emit_status(SessionStatus::Running);
+        drop(pending);
 
         match result {
             BrowserCheckResult::Screenshot {
@@ -2206,12 +2243,18 @@ impl HeadlessSession {
             }))
             .await;
 
-        let (respond, receive) = oneshot::channel();
+        let request_id = self.browser_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut answers = self.browser_interactions.register(request_id);
+        let pending = PendingAsk {
+            answers: &self.browser_interactions,
+            request_id,
+        };
         let ask = BrowserInteractAsk {
             session_id: self.session_id.clone(),
+            request_id,
             url: url.to_string(),
             interaction: interaction.clone(),
-            respond,
+            answers: self.browser_interactions.clone(),
         };
         self.emit_status(SessionStatus::WaitingForApproval);
         if browser_interact.send(ask).await.is_err() {
@@ -2224,7 +2267,7 @@ impl HeadlessSession {
         // Same 90s bound as `check_browser`, same reasoning -- see that
         // method's own doc comment.
         const BROWSER_INTERACT_TIMEOUT: Duration = Duration::from_secs(90);
-        let result = match tokio::time::timeout(BROWSER_INTERACT_TIMEOUT, receive).await {
+        let result = match tokio::time::timeout(BROWSER_INTERACT_TIMEOUT, &mut answers).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => BrowserInteractResult::Failed(
                 "The client disconnected before responding.".to_string(),
@@ -2234,6 +2277,7 @@ impl HeadlessSession {
             ),
         };
         self.emit_status(SessionStatus::Running);
+        drop(pending);
 
         match result {
             BrowserInteractResult::Screenshot {
@@ -3984,11 +4028,14 @@ mod tests {
             permissions_rx.try_recv().is_err(),
             "check_in_browser must never ask permission -- it's read-only, like a read"
         );
-        let _ = ask.respond.send(BrowserCheckResult::Screenshot {
-            mime_type: "image/png".to_string(),
-            data: "aGVsbG8=".to_string(),
-            ax_tree: None,
-        });
+        let _ = ask.answers.respond(
+            ask.request_id,
+            BrowserCheckResult::Screenshot {
+                mime_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+                ax_tree: None,
+            },
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -4070,11 +4117,14 @@ mod tests {
         });
 
         let ask = browser_rx.recv().await.expect("a browser check ask");
-        let _ = ask.respond.send(BrowserCheckResult::Screenshot {
-            mime_type: "image/png".to_string(),
-            data: "aGVsbG8=".to_string(),
-            ax_tree: Some("rootwebarea MyApp\n  button Submit".to_string()),
-        });
+        let _ = ask.answers.respond(
+            ask.request_id,
+            BrowserCheckResult::Screenshot {
+                mime_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+                ax_tree: Some("rootwebarea MyApp\n  button Submit".to_string()),
+            },
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -4160,13 +4210,14 @@ mod tests {
             browser_rx.try_recv().is_err(),
             "an interaction must go out over browser_interact, not the plain check_in_browser relay"
         );
-        let _ = interact_ask
-            .respond
-            .send(BrowserInteractResult::Screenshot {
+        let _ = interact_ask.answers.respond(
+            interact_ask.request_id,
+            BrowserInteractResult::Screenshot {
                 mime_type: "image/png".to_string(),
                 data: "aGVsbG8=".to_string(),
                 ax_tree: None,
-            });
+            },
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);

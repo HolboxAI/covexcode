@@ -33,8 +33,8 @@
 use crate::config::Config;
 use crate::domain::{ApprovalResolution, SessionEvent, SessionStatus};
 use crate::headless::{
-    ApprovalHandle, BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult,
-    CancelHandle, HeadlessSession, PermissionAsk,
+    ApprovalHandle, AskHandle, BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk,
+    BrowserInteractResult, CancelHandle, HeadlessSession, PermissionAsk,
 };
 use crate::protocol::{
     CheckInBrowserOutcome, CheckInBrowserRequest, Implementation, InitializeRequest,
@@ -211,34 +211,59 @@ impl UpdateHub {
     }
 }
 
-/// Broadcasts one session's approval asks to every attached connection.
-/// Each connection sends its own ACP request; the engine's `ApprovalHandle`
-/// makes the first answer win and the rest no-ops.
+/// Broadcasts one kind of engine ask to every attached connection. Each
+/// connection sends its own ACP request; the ask's handle makes the first
+/// answer win and the rest no-ops.
 #[derive(Clone)]
-struct ApprovalHub {
-    subscribers: Arc<tokio::sync::Mutex<Vec<mpsc::Sender<PermissionAsk>>>>,
+struct RelayHub<T> {
+    subscribers: Arc<tokio::sync::Mutex<Vec<mpsc::Sender<T>>>>,
 }
 
-impl ApprovalHub {
+impl<T: Clone + Send> RelayHub<T> {
     fn new() -> Self {
         Self {
             subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
-    async fn subscribe(&self, relay: mpsc::Sender<PermissionAsk>) {
+    async fn subscribe(&self, relay: mpsc::Sender<T>) {
         self.subscribers.lock().await.push(relay);
     }
 
-    async fn send(&self, ask: PermissionAsk) {
+    async fn send(&self, item: T) {
         let mut subscribers = self.subscribers.lock().await;
         let mut index = 0;
         while index < subscribers.len() {
-            if subscribers[index].send(ask.clone()).await.is_err() {
+            if subscribers[index].send(item.clone()).await.is_err() {
                 subscribers.remove(index);
             } else {
                 index += 1;
             }
+        }
+    }
+}
+
+type ApprovalHub = RelayHub<PermissionAsk>;
+type BrowserCheckHub = RelayHub<BrowserCheckAsk>;
+type BrowserInteractHub = RelayHub<BrowserInteractAsk>;
+
+/// Everything a session fans out to the connections attached to it. Grouped
+/// so the registry carries one field, not four parallel ones.
+#[derive(Clone)]
+struct SessionChannels {
+    updates: UpdateHub,
+    approvals: ApprovalHub,
+    browser_checks: BrowserCheckHub,
+    browser_interactions: BrowserInteractHub,
+}
+
+impl SessionChannels {
+    fn new(session_id: SessionId) -> Self {
+        Self {
+            updates: UpdateHub::new(session_id),
+            approvals: ApprovalHub::new(),
+            browser_checks: BrowserCheckHub::new(),
+            browser_interactions: BrowserInteractHub::new(),
         }
     }
 }
@@ -251,10 +276,7 @@ struct SessionActor;
 impl SessionActor {
     fn spawn(
         mut session: HeadlessSession,
-        updates: UpdateHub,
-        approvals: ApprovalHub,
-        browser_relay: mpsc::Sender<BrowserCheckAsk>,
-        browser_interact_relay: mpsc::Sender<BrowserInteractAsk>,
+        channels: SessionChannels,
         mcp_configs: Vec<crate::mcp::McpServerConfig>,
     ) -> mpsc::Sender<SessionMsg> {
         let (tx, mut rx) = mpsc::channel::<SessionMsg>(8);
@@ -291,20 +313,34 @@ impl SessionActor {
                         // connection. HeadlessSession itself does not know
                         // about the wire, only about SessionUpdate values (see
                         // headless.rs's own module docs).
-                        let hub = updates.clone();
-                        let drain = tokio::spawn(async move {
+                        let hub = channels.updates.clone();
+                        let update_drain = tokio::spawn(async move {
                             while let Some(update) = updates_rx.recv().await {
                                 hub.send(update).await;
                             }
                         });
-                        // Approval asks follow the same pattern: a fresh
-                        // channel per prompt, drained into the session's
-                        // ApprovalHub so every attached connection can answer.
+                        // The three ask kinds follow the same pattern: a fresh
+                        // channel per prompt, drained into its hub so every
+                        // attached connection sees the ask.
                         let (permissions_tx, mut permissions_rx) = mpsc::channel(16);
-                        let approval_hub = approvals.clone();
-                        let permission_drain = tokio::spawn(async move {
+                        let approval_hub = channels.approvals.clone();
+                        let approval_drain = tokio::spawn(async move {
                             while let Some(ask) = permissions_rx.recv().await {
                                 approval_hub.send(ask).await;
+                            }
+                        });
+                        let (browser_tx, mut browser_rx) = mpsc::channel(16);
+                        let browser_hub = channels.browser_checks.clone();
+                        let browser_drain = tokio::spawn(async move {
+                            while let Some(ask) = browser_rx.recv().await {
+                                browser_hub.send(ask).await;
+                            }
+                        });
+                        let (browser_interact_tx, mut browser_interact_rx) = mpsc::channel(16);
+                        let browser_interact_hub = channels.browser_interactions.clone();
+                        let browser_interact_drain = tokio::spawn(async move {
+                            while let Some(ask) = browser_interact_rx.recv().await {
+                                browser_interact_hub.send(ask).await;
                             }
                         });
                         let stop_reason = session
@@ -314,14 +350,18 @@ impl SessionActor {
                                 mode,
                                 &updates_tx,
                                 &permissions_tx,
-                                &browser_relay,
-                                &browser_interact_relay,
+                                &browser_tx,
+                                &browser_interact_tx,
                             )
                             .await;
                         drop(updates_tx); // let the drain task see the channel close
-                        let _ = drain.await;
+                        let _ = update_drain.await;
                         drop(permissions_tx);
-                        let _ = permission_drain.await;
+                        let _ = approval_drain.await;
+                        drop(browser_tx);
+                        let _ = browser_drain.await;
+                        drop(browser_interact_tx);
+                        let _ = browser_interact_drain.await;
                         let _ = respond.send(PromptResponse {
                             stop_reason,
                             turn: session.current_turn(),
@@ -347,8 +387,7 @@ struct SessionHandle {
     commands: mpsc::Sender<SessionMsg>,
     cancel: CancelHandle,
     /// Where another connection subscribes when it attaches to this session.
-    updates: UpdateHub,
-    approvals: ApprovalHub,
+    channels: SessionChannels,
     /// Last status the engine reported. Starts `Idle`; a tracker task keeps
     /// it current from `SessionEvent::StatusChanged`.
     status: SessionStatus,
@@ -382,16 +421,14 @@ impl SessionRegistry {
         id: SessionId,
         commands: mpsc::Sender<SessionMsg>,
         cancel: CancelHandle,
-        updates: UpdateHub,
-        approvals: ApprovalHub,
+        channels: SessionChannels,
     ) {
         self.sessions.insert(
             id,
             SessionHandle {
                 commands,
                 cancel,
-                updates,
-                approvals,
+                channels,
                 status: SessionStatus::Idle,
             },
         );
@@ -470,8 +507,10 @@ struct Router {
     /// engine waits on the handle, so the transport never owns a oneshot for
     /// a permission ask.
     pending_permission_responses: HashMap<RequestId, (u64, ApprovalHandle)>,
-    pending_browser_responses: HashMap<RequestId, oneshot::Sender<BrowserCheckResult>>,
-    pending_browser_interact_responses: HashMap<RequestId, oneshot::Sender<BrowserInteractResult>>,
+    /// Same shape as the permission table: the engine id and the cloneable
+    /// answer handle for that ask.
+    pending_browser_responses: HashMap<RequestId, (u64, AskHandle<BrowserCheckResult>)>,
+    pending_browser_interact_responses: HashMap<RequestId, (u64, AskHandle<BrowserInteractResult>)>,
     next_outgoing_id: i64,
     outgoing_tx: mpsc::Sender<Outgoing>,
     permission_relay_in: mpsc::Receiver<PermissionAsk>,
@@ -575,14 +614,18 @@ impl Router {
                     {
                         approvals.respond(request_id, outcome.into());
                     }
-                } else if let Some(respond) = self.pending_browser_responses.remove(&id) {
+                } else if let Some((request_id, answers)) =
+                    self.pending_browser_responses.remove(&id)
+                {
                     if let Ok(outcome) = serde_json::from_value::<CheckInBrowserOutcome>(result) {
-                        let _ = respond.send(outcome.into());
+                        answers.respond(request_id, outcome.into());
                     }
-                } else if let Some(respond) = self.pending_browser_interact_responses.remove(&id) {
+                } else if let Some((request_id, answers)) =
+                    self.pending_browser_interact_responses.remove(&id)
+                {
                     if let Ok(outcome) = serde_json::from_value::<InteractInBrowserOutcome>(result)
                     {
-                        let _ = respond.send(outcome.into());
+                        answers.respond(request_id, outcome.into());
                     }
                 }
                 None
@@ -591,14 +634,24 @@ impl Router {
                 if let Some((request_id, approvals)) = self.pending_permission_responses.remove(&id)
                 {
                     approvals.respond(request_id, ApprovalResolution::Cancelled);
-                } else if let Some(respond) = self.pending_browser_responses.remove(&id) {
-                    let _ = respond.send(BrowserCheckResult::Failed(
-                        "the client returned an error instead of a result".to_string(),
-                    ));
-                } else if let Some(respond) = self.pending_browser_interact_responses.remove(&id) {
-                    let _ = respond.send(BrowserInteractResult::Failed(
-                        "the client returned an error instead of a result".to_string(),
-                    ));
+                } else if let Some((request_id, answers)) =
+                    self.pending_browser_responses.remove(&id)
+                {
+                    answers.respond(
+                        request_id,
+                        BrowserCheckResult::Failed(
+                            "the client returned an error instead of a result".to_string(),
+                        ),
+                    );
+                } else if let Some((request_id, answers)) =
+                    self.pending_browser_interact_responses.remove(&id)
+                {
+                    answers.respond(
+                        request_id,
+                        BrowserInteractResult::Failed(
+                            "the client returned an error instead of a result".to_string(),
+                        ),
+                    );
                 }
                 None
             }
@@ -662,31 +715,34 @@ impl Router {
                     .map_err(|e| (-32602, format!("invalid mcpServers: {e}")))?;
 
                 let session_id = self.sessions.lock().await.allocate_id();
-                let updates = UpdateHub::new(session_id.clone());
-                let approvals = ApprovalHub::new();
-                // The creating connection is the first subscriber to both
-                // hubs; attach adds another.
-                updates.subscribe(self.outgoing_tx.clone()).await;
-                approvals.subscribe(self.permission_relay_tx.clone()).await;
+                let channels = SessionChannels::new(session_id.clone());
+                // The creating connection is the first subscriber to every
+                // hub; attach adds another.
+                channels
+                    .updates
+                    .subscribe(self.outgoing_tx.clone())
+                    .await;
+                channels
+                    .approvals
+                    .subscribe(self.permission_relay_tx.clone())
+                    .await;
+                channels
+                    .browser_checks
+                    .subscribe(self.browser_relay_tx.clone())
+                    .await;
+                channels
+                    .browser_interactions
+                    .subscribe(self.browser_interact_relay_tx.clone())
+                    .await;
                 let session =
                     HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
                 let events = session.subscribe_events();
                 let cancel = session.cancel_handle();
-                let handle = SessionActor::spawn(
-                    session,
-                    updates.clone(),
-                    approvals.clone(),
-                    self.browser_relay_tx.clone(),
-                    self.browser_interact_relay_tx.clone(),
-                    mcp_configs.clone(),
-                );
-                self.sessions.lock().await.insert(
-                    session_id.clone(),
-                    handle,
-                    cancel,
-                    updates,
-                    approvals,
-                );
+                let handle = SessionActor::spawn(session, channels.clone(), mcp_configs.clone());
+                self.sessions
+                    .lock()
+                    .await
+                    .insert(session_id.clone(), handle, cancel, channels);
                 spawn_status_tracker(self.sessions.clone(), session_id.clone(), events);
 
                 // Configs are validated here; the handshake itself happens in
@@ -739,17 +795,31 @@ impl Router {
             "session/attach" => {
                 let req: SessionIdRequest = serde_json::from_value(params)
                     .map_err(|e| (-32602, format!("invalid params: {e}")))?;
-                let hubs = {
+                let channels = {
                     let sessions = self.sessions.lock().await;
                     sessions
                         .get(&req.session_id)
-                        .map(|handle| (handle.updates.clone(), handle.approvals.clone()))
+                        .map(|handle| handle.channels.clone())
                 };
-                let Some((updates, approvals)) = hubs else {
+                let Some(channels) = channels else {
                     return Err((-32001, "no such session".to_string()));
                 };
-                updates.subscribe(self.outgoing_tx.clone()).await;
-                approvals.subscribe(self.permission_relay_tx.clone()).await;
+                channels
+                    .updates
+                    .subscribe(self.outgoing_tx.clone())
+                    .await;
+                channels
+                    .approvals
+                    .subscribe(self.permission_relay_tx.clone())
+                    .await;
+                channels
+                    .browser_checks
+                    .subscribe(self.browser_relay_tx.clone())
+                    .await;
+                channels
+                    .browser_interactions
+                    .subscribe(self.browser_interact_relay_tx.clone())
+                    .await;
                 Ok(serde_json::json!({}))
             }
             "session/rollback" => {
@@ -938,7 +1008,7 @@ impl Router {
             }
             Ready::Browser(ask) => {
                 self.pending_browser_responses
-                    .insert(id.clone(), ask.respond);
+                    .insert(id.clone(), (ask.request_id, ask.answers));
                 RpcRequest {
                     jsonrpc: JsonRpcVersion,
                     id,
@@ -954,7 +1024,7 @@ impl Router {
             }
             Ready::BrowserInteract(ask) => {
                 self.pending_browser_interact_responses
-                    .insert(id.clone(), ask.respond);
+                    .insert(id.clone(), (ask.request_id, ask.answers));
                 RpcRequest {
                     jsonrpc: JsonRpcVersion,
                     id,
@@ -1859,8 +1929,7 @@ mod tests {
                 id.clone(),
                 commands,
                 CancelHandle::default(),
-                UpdateHub::new(id.clone()),
-                ApprovalHub::new(),
+                SessionChannels::new(id.clone()),
             );
             id
         };
@@ -1920,6 +1989,53 @@ mod tests {
         assert_eq!(second.request_id, 1);
     }
 
+    /// Same fan-out as approvals, for both browser ask kinds: every attached
+    /// connection sees the ask (each carrying a clone of the one answer
+    /// handle). Answering through a clone is covered in `headless`'s own
+    /// tests, where the engine registers the waiter.
+    #[tokio::test]
+    async fn browser_asks_reach_every_attached_connection() {
+        let checks = BrowserCheckHub::new();
+        let interactions = BrowserInteractHub::new();
+        let (check_tx_a, mut check_rx_a) = mpsc::channel(4);
+        let (check_tx_b, mut check_rx_b) = mpsc::channel(4);
+        let (interact_tx, mut interact_rx) = mpsc::channel(4);
+        checks.subscribe(check_tx_a).await;
+        checks.subscribe(check_tx_b).await;
+        interactions.subscribe(interact_tx).await;
+
+        let check = BrowserCheckAsk {
+            session_id: SessionId("sess_1".to_string()),
+            request_id: 7,
+            url: "http://localhost:3000".to_string(),
+            answers: AskHandle::<BrowserCheckResult>::default(),
+        };
+        checks.send(check.clone()).await;
+
+        let first = check_rx_a.recv().await.expect("first attachment");
+        let second = check_rx_b.recv().await.expect("second attachment");
+        assert_eq!(first.request_id, 7);
+        assert_eq!(second.request_id, 7);
+        assert_eq!(first.url, "http://localhost:3000");
+        assert_eq!(second.url, "http://localhost:3000");
+
+        interactions
+            .send(BrowserInteractAsk {
+                session_id: SessionId("sess_1".to_string()),
+                request_id: 8,
+                url: "http://localhost:3000".to_string(),
+                interaction: crate::tools::BrowserInteraction::Click { x: 1.0, y: 2.0 },
+                answers: AskHandle::<BrowserInteractResult>::default(),
+            })
+            .await;
+        let seen = interact_rx.recv().await.expect("interaction ask");
+        assert_eq!(seen.request_id, 8);
+        assert!(matches!(
+            seen.interaction,
+            crate::tools::BrowserInteraction::Click { .. }
+        ));
+    }
+
     /// The registry is the one place ids and cancellation are owned now:
     /// allocation is monotonic, and a cancel reaches only the session named.
     #[test]
@@ -1938,15 +2054,13 @@ mod tests {
             first.clone(),
             commands_a,
             cancel_a.clone(),
-            UpdateHub::new(first.clone()),
-            ApprovalHub::new(),
+            SessionChannels::new(first.clone()),
         );
         registry.insert(
             second.clone(),
             commands_b,
             cancel_b.clone(),
-            UpdateHub::new(second.clone()),
-            ApprovalHub::new(),
+            SessionChannels::new(second.clone()),
         );
 
         registry.cancel(&first);
