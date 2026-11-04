@@ -1746,60 +1746,82 @@ mod tests {
     /// free-tier device token: losing it re-enrols the machine as brand new,
     /// which reads to the gateway as someone farming fresh daily budgets rather
     /// than as the same machine after an upgrade.
+    ///
+    /// Driven through `adopt_legacy_dir` with an explicit home, not through a
+    /// redirected `$HOME`. `$HOME` is process-global and adoption *renames* a
+    /// directory, so any test that reaches `Config::config_dir()` for its own
+    /// reason -- `tools`' change-request tests, `db`'s token tests -- adopts
+    /// and steals this test's `.tuisample-code` between the writes below. That
+    /// only bites where no real `~/.covexcode` exists to hit the early return:
+    /// a developer machine has one, a clean CI runner does not, which is why
+    /// it surfaced there as `Os { code: 2, NotFound }` on the `device_id`
+    /// write. Paths we own make the test independent of both.
     #[test]
     fn the_pre_rename_directory_is_adopted_on_first_run() {
-        with_isolated_home(|| {
-            let home = PathBuf::from(std::env::var("HOME").unwrap());
-            let legacy = home.join(".tuisample-code");
-            std::fs::create_dir_all(&legacy).unwrap();
-            std::fs::write(
-                legacy.join("config.toml"),
-                "[llm]\nendpoint = \"https://api.deepseek.com\"\nmodel = \"kept\"\napi_key = \"sk-kept\"\n",
-            )
-            .unwrap();
-            std::fs::write(legacy.join("device_id"), "device-kept").unwrap();
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path();
+        let legacy = home.join(".tuisample-code");
+        let dir = home.join(".covexcode");
 
-            let dir = Config::config_dir();
-            assert!(dir.ends_with(".covexcode"), "{dir:?}");
-            assert!(
-                !legacy.exists(),
-                "the old directory should have been moved, not copied"
-            );
-            assert_eq!(
-                std::fs::read_to_string(dir.join("device_id")).unwrap(),
-                "device-kept",
-                "the free-tier identity must survive the rename"
-            );
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("config.toml"),
+            "[llm]\nendpoint = \"https://api.deepseek.com\"\nmodel = \"kept\"\napi_key = \"sk-kept\"\n",
+        )
+        .unwrap();
+        std::fs::write(legacy.join("device_id"), "device-kept").unwrap();
 
-            for key in ["COVEXCODE_ENDPOINT", "COVEXCODE_MODEL", "COVEXCODE_API_KEY"] {
-                std::env::remove_var(key);
-            }
-            let loaded = Config::load().expect("the adopted config still loads");
-            assert_eq!(loaded.llm.model, "kept");
-            assert_eq!(loaded.llm.api_key, "sk-kept");
-        });
+        adopt_legacy_dir(home, &dir);
+
+        assert!(dir.exists(), "the old directory becomes the new one");
+        assert!(
+            !legacy.exists(),
+            "the old directory should have been moved, not copied"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("device_id")).unwrap(),
+            "device-kept",
+            "the free-tier identity must survive the rename"
+        );
+
+        // ...and the settings have to survive *readable*: a rename that left
+        // the file intact but unparseable would be as bad as losing it.
+        let adopted: Config = toml::from_str(
+            &std::fs::read_to_string(dir.join("config.toml")).expect("config.toml came across"),
+        )
+        .expect("the adopted config still loads");
+        assert_eq!(adopted.llm.model, "kept");
+        assert_eq!(adopted.llm.api_key, "sk-kept");
     }
 
     /// Adopting must never clobber a directory this install already has.
+    ///
+    /// Explicit paths for the same reason as the test above: a home handed out
+    /// through `$HOME` is visible to every other test in the process, and the
+    /// ones that reach `Config::config_dir()` move directories around.
     #[test]
     fn an_existing_directory_is_never_overwritten_by_the_old_one() {
-        with_isolated_home(|| {
-            let home = PathBuf::from(std::env::var("HOME").unwrap());
-            std::fs::create_dir_all(home.join(".covexcode")).unwrap();
-            std::fs::write(home.join(".covexcode/device_id"), "current").unwrap();
-            std::fs::create_dir_all(home.join(".tuisample-code")).unwrap();
-            std::fs::write(home.join(".tuisample-code/device_id"), "stale").unwrap();
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path();
+        let current = home.join(".covexcode");
+        let legacy = home.join(".tuisample-code");
 
-            let dir = Config::config_dir();
-            assert_eq!(
-                std::fs::read_to_string(dir.join("device_id")).unwrap(),
-                "current"
-            );
-            assert!(
-                home.join(".tuisample-code").exists(),
-                "the old directory is left alone once there is a current one"
-            );
-        });
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join("device_id"), "current").unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("device_id"), "stale").unwrap();
+
+        adopt_legacy_dir(home, &current);
+
+        assert_eq!(
+            std::fs::read_to_string(current.join("device_id")).unwrap(),
+            "current",
+            "the current directory must win"
+        );
+        assert!(
+            legacy.exists(),
+            "the old directory is left alone once there is a current one"
+        );
     }
 
     /// A shell profile, a CI job or an intern's half-remembered setup should
