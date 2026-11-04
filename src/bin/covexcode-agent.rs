@@ -98,7 +98,7 @@ fn print_help() {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut listen: Option<String> = None;
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-V" | "--version" => {
@@ -120,10 +120,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             "--acp" => {}
             "--listen" => {
-                let addr = args
-                    .next()
-                    .filter(|next| !next.starts_with('-'))
-                    .unwrap_or_else(|| "127.0.0.1:7422".to_string());
+                // Peek rather than consume: `--listen --providers-json` must
+                // keep its second flag, not swallow it as an address.
+                let addr = match args.peek() {
+                    Some(next) if !next.starts_with('-') => args.next().unwrap(),
+                    _ => "127.0.0.1:7422".to_string(),
+                };
                 listen = Some(addr);
             }
             other => {
