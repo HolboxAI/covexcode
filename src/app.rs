@@ -106,6 +106,13 @@ pub enum Overlay {
         filter: String,
         selected: usize,
     },
+    /// `/sessions`: this directory's recorded conversations, newest first.
+    /// Enter resumes the selected one through the same path `/resume` uses;
+    /// like `/resume`, it only picks up into a fresh conversation.
+    SessionsPicker {
+        items: Vec<crate::session::SavedSession>,
+        selected: usize,
+    },
     /// `/rollback`: query picker when multiple queries exist.
     QueryRollbackPicker {
         queries: Vec<(u64, String)>,
@@ -145,6 +152,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "write a COVEXCODE.md the model reads every session",
     ),
     ("/resume", "pick up this directory's last session"),
+    ("/sessions", "choose an earlier session in this directory"),
     ("/pull", "switch to a different local project"),
     ("/projects", "reopen a recent or top project"),
     ("/history", "browse and restore previous prompts"),
@@ -1016,6 +1024,7 @@ impl App {
             "/logout" => self.run_logout(),
             "/init" => self.start_init(),
             "/resume" => self.resume_latest(),
+            "/sessions" => self.open_sessions_picker(),
             "/pull" => self.open_pull_picker(),
             "/projects" | "/recent" => self.open_projects_picker(),
             "/history" => self.open_history_picker(),
@@ -2455,11 +2464,20 @@ impl App {
             ));
             return;
         };
-        let loaded = crate::session::load(&path);
+        self.resume_path(&path, "the last session in this directory");
+    }
+
+    /// Load `path` as the current conversation. Shared by `/resume` and the
+    /// `/sessions` picker so both go through the same checks and bookkeeping;
+    /// callers own the "only from a fresh conversation" rule.
+    fn resume_path(&mut self, path: &Path, label: &str) {
+        self.greeted = true;
+        self.follow_tail = true;
+        let loaded = crate::session::load(path);
         if loaded.is_empty() {
             self.messages.push(Message::new(
                 Role::System,
-                "The last recorded session is empty or unreadable, so there is nothing to resume.",
+                "That recorded session is empty or unreadable, so there is nothing to resume.",
             ));
             return;
         }
@@ -2487,8 +2505,7 @@ impl App {
         self.messages.push(Message::new(
             Role::System,
             format!(
-                "Resumed the last session in this directory — {count} message{} restored. \
-                 Carry on where it left off.",
+                "Resumed {label} — {count} message{} restored. Carry on where it left off.",
                 if count == 1 { "" } else { "s" }
             ),
         ));
@@ -4687,6 +4704,78 @@ impl App {
         });
     }
 
+    /// `/sessions`: pick one of this directory's recorded conversations.
+    /// Same fresh-start rule as `/resume` -- the picker is a chooser, not a
+    /// way to splice a second history under a live one.
+    pub fn open_sessions_picker(&mut self) {
+        if self.is_busy() {
+            return;
+        }
+        if self.context_size().messages > 0 {
+            self.messages.push(Message::new(
+                Role::System,
+                "There is already a conversation here. /sessions picks a past session up only \
+                 from a fresh start -- /new first if you mean to switch.",
+            ));
+            return;
+        }
+        let items = crate::session::list_for(&self.workspace_root);
+        if items.is_empty() {
+            self.messages.push(Message::new(
+                Role::System,
+                "No recorded sessions for this directory yet. Sessions are saved as you work, \
+                 under ~/.covexcode/sessions/.",
+            ));
+            return;
+        }
+        self.overlay = Some(Overlay::SessionsPicker { items, selected: 0 });
+    }
+
+    fn handle_sessions_picker_key(
+        &mut self,
+        key: KeyEvent,
+        items: Vec<crate::session::SavedSession>,
+        selected: usize,
+    ) {
+        let count = items.len();
+        match key.code {
+            KeyCode::Esc => { /* closed by the caller */ }
+            KeyCode::Up => {
+                let next = if count == 0 {
+                    0
+                } else if selected == 0 {
+                    count - 1
+                } else {
+                    selected - 1
+                };
+                self.overlay = Some(Overlay::SessionsPicker {
+                    items,
+                    selected: next,
+                });
+            }
+            KeyCode::Down => {
+                let next = if count == 0 || selected + 1 >= count {
+                    0
+                } else {
+                    selected + 1
+                };
+                self.overlay = Some(Overlay::SessionsPicker {
+                    items,
+                    selected: next,
+                });
+            }
+            KeyCode::Enter => {
+                if let Some(item) = items.get(selected) {
+                    let path = item.path.clone();
+                    self.resume_path(&path, "the selected session");
+                }
+            }
+            // Every other key leaves the picker standing, like the other
+            // list overlays: a stray keystroke must not dismiss it.
+            _ => self.overlay = Some(Overlay::SessionsPicker { items, selected }),
+        }
+    }
+
     fn handle_prompt_picker_key(
         &mut self,
         key: KeyEvent,
@@ -5168,6 +5257,9 @@ impl App {
                 filter,
                 selected,
             } => self.handle_prompt_picker_key(key, items, filter, selected),
+            Overlay::SessionsPicker { items, selected } => {
+                self.handle_sessions_picker_key(key, items, selected)
+            }
             Overlay::QueryRollbackPicker { queries, selected } => {
                 self.handle_query_rollback_picker_key(key, queries, selected)
             }
@@ -11812,6 +11904,52 @@ mod tests {
         assert_eq!(a.cursor, multiline.chars().count());
         assert_eq!(a.messages.len(), msg_count_before, "prompt not executed");
         assert_eq!(a.turn, 0);
+    }
+
+    #[test]
+    fn sessions_picker_resumes_the_selected_conversation() {
+        crate::config::test_support::with_isolated_home(|| {
+            let mut log = crate::session::SessionLog::new("/tmp/proj");
+            log.append(&[Message::new(Role::User, "first session")]);
+
+            let mut a = app();
+            a.workspace_root = "/tmp/proj".to_string();
+            a.open_sessions_picker();
+            match &a.overlay {
+                Some(Overlay::SessionsPicker { items, selected }) => {
+                    assert_eq!(items.len(), 1);
+                    assert_eq!(*selected, 0);
+                    assert_eq!(items[0].preview, "first session");
+                }
+                other => panic!("expected SessionsPicker, got {other:?}"),
+            }
+
+            a.handle_key(key(KeyCode::Enter));
+            assert!(a.overlay.is_none());
+            assert_eq!(a.messages[0].content, "first session");
+            assert!(a
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Resumed the selected session"));
+        });
+    }
+
+    #[test]
+    fn sessions_picker_needs_a_fresh_conversation() {
+        crate::config::test_support::with_isolated_home(|| {
+            let mut log = crate::session::SessionLog::new("/tmp/proj");
+            log.append(&[Message::new(Role::User, "old session")]);
+
+            let mut a = app();
+            a.workspace_root = "/tmp/proj".to_string();
+            a.messages.push(Message::new(Role::User, "current"));
+            a.open_sessions_picker();
+
+            assert!(a.overlay.is_none(), "no picker over a live conversation");
+            assert!(a.messages.last().unwrap().content.contains("fresh start"));
+        });
     }
 
     #[test]
