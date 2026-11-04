@@ -516,6 +516,13 @@ pub struct ToolsConfig {
     /// removes the limit.
     #[serde(default = "default_subagent_token_budget")]
     pub subagent_token_budget: usize,
+    /// How many read-only subagents may run at once when one model response
+    /// asks for several. They are independent research tasks, so the wall
+    /// time should be about the slowest one, not the sum. `0` removes the
+    /// limit; the default is deliberately small, because every child spends
+    /// its own tokens.
+    #[serde(default = "default_subagent_concurrency")]
+    pub subagent_concurrency: usize,
     /// Attach `check_in_browser`'s screenshot to the model's own next
     /// request as real image input, not just show it to the human. Off by
     /// default: this costs real image tokens on every check, and only
@@ -624,6 +631,12 @@ fn default_subagent_token_budget() -> usize {
     0
 }
 
+fn default_subagent_concurrency() -> usize {
+    // Four concurrent children is enough to hide the latency of independent
+    // research without turning one prompt into an unbounded token bill.
+    4
+}
+
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
@@ -645,6 +658,7 @@ impl Default for ToolsConfig {
             errors_endpoint: default_errors_endpoint(),
             subagent_max_steps: default_subagent_max_steps(),
             subagent_token_budget: default_subagent_token_budget(),
+            subagent_concurrency: default_subagent_concurrency(),
             attach_browser_screenshots: false,
         }
     }

@@ -248,17 +248,18 @@ const MAX_CONCURRENT_READS: usize = 16;
 ///
 /// The batch is walked once, splitting it into maximal runs: a contiguous
 /// stretch of [`is_pure_read_call`] calls is dispatched concurrently (capped
-/// at [`MAX_CONCURRENT_READS`] in flight), everything else -- writes, edits,
-/// non-read-only commands, `agent` calls -- still runs one at a time exactly
-/// as before. The two kinds of run are stitched back together in the order
-/// they occurred, so a `read, read, write, read` turn becomes "two reads
-/// concurrently, then the write, then the last read" rather than reordering
-/// anything the model or the transcript would notice.
+/// at [`MAX_CONCURRENT_READS`] in flight), a contiguous stretch of `agent`
+/// calls is dispatched concurrently up to
+/// `config.tools.subagent_concurrency`, and everything else -- writes, edits and
+/// other commands -- still runs one at a time exactly as before. The runs are
+/// stitched back together in the order they occurred, so a
+/// `read, read, write, read` turn becomes "two reads concurrently, then the
+/// write, then the last read" rather than reordering anything the model or
+/// the transcript would notice.
 ///
-/// Order within a concurrent run is preserved by `buffered` (not
-/// `buffer_unordered`): it polls up to the cap at once but still *yields*
-/// results in the order its futures were submitted in, i.e. the order the
-/// model asked for them -- so no explicit re-sorting is needed here.
+/// Order within a concurrent run is preserved by `join_all`: each chunk is
+/// polled together but its results are yielded in submission order, i.e. the
+/// order the model asked for them -- so no explicit re-sorting is needed.
 async fn run_calls(
     calls: &[ToolCall],
     ws: &Workspace,
@@ -304,17 +305,38 @@ async fn run_calls(
                     });
                 outcomes.extend(futures::future::join_all(futures).await);
             }
+        } else if calls[i].function.name == tools::AGENT {
+            // Independent research tasks: run a contiguous run of `agent`
+            // calls concurrently instead of paying their latencies one after
+            // another. They are read-only and isolated from each other, so
+            // the only coupling is the shared token bill -- which is exactly
+            // what `subagent_concurrency` bounds.
+            let start = i;
+            while i < calls.len() && calls[i].function.name == tools::AGENT {
+                i += 1;
+            }
+            let run = &calls[start..i];
+            let cap = if config.tools.subagent_concurrency == 0 {
+                run.len()
+            } else {
+                config.tools.subagent_concurrency
+            };
+            // Chunked exactly like the read fan-out above: a chunk's futures
+            // are polled together, so this is the hard cap on how many
+            // children are ever in flight. `join_all` still yields results in
+            // submission order, so the transcript order is unchanged.
+            for chunk in run.chunks(cap.max(1)) {
+                let futures = chunk.iter().map(|call| {
+                    let call = call.clone();
+                    let ws = ws.clone();
+                    let config = config.clone();
+                    async move { run_subagent(&call, &ws, &config, progress).await }
+                });
+                outcomes.extend(futures::future::join_all(futures).await);
+            }
         } else {
             let call = &calls[i];
-            // Resolved here rather than in `tools::execute` because a
-            // subagent is made of the pieces this module owns -- a
-            // conversation, a stream, a tool runner -- and because the
-            // runner deliberately never sees the LLM config.
-            outcomes.push(if call.function.name == tools::AGENT {
-                run_subagent(call, ws, config, progress).await
-            } else {
-                tools::execute_truncated(call, ws, &config.tools, truncated).await
-            });
+            outcomes.push(tools::execute_truncated(call, ws, &config.tools, truncated).await);
             i += 1;
         }
     }
@@ -785,5 +807,57 @@ mod tests {
             "second",
             "sequential writes still apply in call order, exactly as before Phase 1"
         );
+    }
+
+    /// Two independent `agent` calls in one response must overlap, not add
+    /// their latencies. The mock endpoint holds each child request until the
+    /// other has arrived, so a sequential implementation deadlocks here and
+    /// trips the timeout.
+    #[tokio::test]
+    async fn sibling_subagents_run_concurrently() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (_dir, ws) = workspace_with_hello();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let answer = text_round("report");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        tokio::spawn(async move {
+            let mut handlers = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let barrier = barrier.clone();
+                let answer = answer.clone();
+                handlers.push(tokio::spawn(async move {
+                    let _ = read_request(&mut socket).await;
+                    // Both children must be in flight for either to finish.
+                    barrier.wait().await;
+                    let _ = socket.write_all(answer.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                }));
+            }
+            for handler in handlers {
+                let _ = handler.await;
+            }
+        });
+
+        let config = config_for(&format!("http://{addr}"));
+        let calls = vec![
+            call_with("a1", tools::AGENT, json!({ "task": "research one" })),
+            call_with("a2", tools::AGENT, json!({ "task": "research two" })),
+        ];
+
+        let outcomes = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_calls(&calls, &ws, &config, false, None),
+        )
+        .await
+        .expect("the two subagents must be in flight at the same time");
+
+        let ids: Vec<&str> = outcomes.iter().map(|o| o.call_id.as_str()).collect();
+        assert_eq!(ids, vec!["a1", "a2"], "call order is preserved");
+        assert_eq!(outcomes[0].content, "report");
+        assert_eq!(outcomes[1].content, "report");
     }
 }
