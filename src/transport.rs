@@ -42,11 +42,12 @@ use crate::protocol::{
     ListChangesRequest, ListChangesResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
     PromptResponse, RequestId, RequestPermissionOutcome, RollbackRequest,
     RollbackResponse, RpcError, RpcErrorObject, RpcRequest, RpcResponse, SessionId,
-    SessionNotification, PROTOCOL_VERSION,
+    SessionNotification, SessionUpdate, PROTOCOL_VERSION,
 };
 use crate::workspace::Workspace;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -151,12 +152,56 @@ enum SessionMsg {
 /// asynchronously, outside of `Router::handle`'s own synchronous return
 /// value -- see this module's own docs for why `session/prompt`'s response
 /// has to travel this way rather than being returned directly.
+#[derive(Clone)]
 enum Outgoing {
     /// A `session/update` notification, still needing its envelope built.
     Update(SessionNotification),
     /// An already-serialized JSON-RPC line (a deferred request's response),
     /// ready to write as-is.
     Line(String),
+}
+
+/// Broadcasts one session's ACP updates to every connection attached to it.
+///
+/// Backpressure is deliberate: `send` awaits each connection's bounded
+/// outgoing queue, and the actor answers `session/prompt` only after its
+/// per-turn drain has pushed every update, so no client sees the response
+/// before the updates that belong to it.
+#[derive(Clone)]
+struct UpdateHub {
+    session_id: SessionId,
+    subscribers: Arc<tokio::sync::Mutex<Vec<mpsc::Sender<Outgoing>>>>,
+}
+
+impl UpdateHub {
+    fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn subscribe(&self, outgoing: mpsc::Sender<Outgoing>) {
+        self.subscribers.lock().await.push(outgoing);
+    }
+
+    async fn send(&self, update: SessionUpdate) {
+        let message = Outgoing::Update(SessionNotification {
+            session_id: self.session_id.clone(),
+            update,
+        });
+        let mut subscribers = self.subscribers.lock().await;
+        let mut index = 0;
+        while index < subscribers.len() {
+            if subscribers[index].send(message.clone()).await.is_err() {
+                // A closed connection: drop it rather than failing the turn
+                // for every other subscriber.
+                subscribers.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
 }
 
 /// Owns one [`HeadlessSession`] and processes its `session/prompt` calls
@@ -167,12 +212,11 @@ struct SessionActor;
 impl SessionActor {
     fn spawn(
         mut session: HeadlessSession,
-        outgoing_tx: mpsc::Sender<Outgoing>,
+        updates: UpdateHub,
         permission_relay: mpsc::Sender<PermissionAsk>,
         browser_relay: mpsc::Sender<BrowserCheckAsk>,
         browser_interact_relay: mpsc::Sender<BrowserInteractAsk>,
         mcp_configs: Vec<crate::mcp::McpServerConfig>,
-        session_id: SessionId,
     ) -> mpsc::Sender<SessionMsg> {
         let (tx, mut rx) = mpsc::channel::<SessionMsg>(8);
         tokio::spawn(async move {
@@ -204,20 +248,14 @@ impl SessionActor {
                         // one from three turns ago.
                         let (updates_tx, mut updates_rx) = mpsc::channel(64);
                         // Drain this prompt's own update channel into the
-                        // shared outgoing one, tagged with this session's
-                        // id -- HeadlessSession itself doesn't know about
-                        // the wire, only about SessionUpdate values (see
+                        // session's hub, which fans it out to every attached
+                        // connection. HeadlessSession itself does not know
+                        // about the wire, only about SessionUpdate values (see
                         // headless.rs's own module docs).
-                        let session_id = session_id.clone();
-                        let outgoing_tx = outgoing_tx.clone();
+                        let hub = updates.clone();
                         let drain = tokio::spawn(async move {
                             while let Some(update) = updates_rx.recv().await {
-                                let _ = outgoing_tx
-                                    .send(Outgoing::Update(SessionNotification {
-                                        session_id: session_id.clone(),
-                                        update,
-                                    }))
-                                    .await;
+                                hub.send(update).await;
                             }
                         });
                         let stop_reason = session
@@ -256,6 +294,9 @@ impl SessionActor {
 struct SessionHandle {
     commands: mpsc::Sender<SessionMsg>,
     cancel: CancelHandle,
+    /// Where another connection subscribes when it attaches to this session.
+    #[allow(dead_code)] // read by the cross-connection attach path, next PR
+    updates: UpdateHub,
 }
 
 /// The sessions one connection owns.
@@ -281,8 +322,21 @@ impl SessionRegistry {
         SessionId(format!("sess_{}", self.next_id))
     }
 
-    fn insert(&mut self, id: SessionId, commands: mpsc::Sender<SessionMsg>, cancel: CancelHandle) {
-        self.sessions.insert(id, SessionHandle { commands, cancel });
+    fn insert(
+        &mut self,
+        id: SessionId,
+        commands: mpsc::Sender<SessionMsg>,
+        cancel: CancelHandle,
+        updates: UpdateHub,
+    ) {
+        self.sessions.insert(
+            id,
+            SessionHandle {
+                commands,
+                cancel,
+                updates,
+            },
+        );
     }
 
     fn get(&self, id: &SessionId) -> Option<&SessionHandle> {
@@ -489,19 +543,23 @@ impl Router {
                     .map_err(|e| (-32602, format!("invalid mcpServers: {e}")))?;
 
                 let session_id = self.sessions.allocate_id();
+                let updates = UpdateHub::new(session_id.clone());
+                // The creating connection is the first subscriber; an attach
+                // path later just adds another sender.
+                updates.subscribe(self.outgoing_tx.clone()).await;
                 let session =
                     HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
                 let cancel = session.cancel_handle();
                 let handle = SessionActor::spawn(
                     session,
-                    self.outgoing_tx.clone(),
+                    updates.clone(),
                     self.permission_relay_tx.clone(),
                     self.browser_relay_tx.clone(),
                     self.browser_interact_relay_tx.clone(),
                     mcp_configs.clone(),
-                    session_id.clone(),
                 );
-                self.sessions.insert(session_id.clone(), handle, cancel);
+                self.sessions
+                    .insert(session_id.clone(), handle, cancel, updates);
 
                 // Configs are validated here; the handshake itself happens in
                 // SessionActor::spawn, which calls session.connect_mcp() off the
@@ -1457,8 +1515,18 @@ mod tests {
         let (commands_b, _rx_b) = mpsc::channel(1);
         let cancel_a = CancelHandle::default();
         let cancel_b = CancelHandle::default();
-        registry.insert(first.clone(), commands_a, cancel_a.clone());
-        registry.insert(second.clone(), commands_b, cancel_b.clone());
+        registry.insert(
+            first.clone(),
+            commands_a,
+            cancel_a.clone(),
+            UpdateHub::new(first.clone()),
+        );
+        registry.insert(
+            second.clone(),
+            commands_b,
+            cancel_b.clone(),
+            UpdateHub::new(second.clone()),
+        );
 
         registry.cancel(&first);
         assert!(cancel_a.is_cancelled());
