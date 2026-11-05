@@ -561,6 +561,10 @@ pub struct HeadlessSession {
     /// `decide_and_run`/`ask_permission`'s own calls to `.record(...)`) --
     /// not a parallel reimplementation, the same mechanism reused.
     rollback: crate::rollback::Journal,
+    /// The same per-workspace session record the TUI keeps. Written at round
+    /// boundaries so a completed turn survives a restart even though ACP
+    /// clients have no other persistence of their own.
+    log: crate::session::ChatLog,
     /// Transport-agnostic event fan-out. The ACP transport keeps using
     /// `SessionUpdate`; any number of TUI/daemon subscribers can observe the
     /// same session without changing the ACP path.
@@ -580,6 +584,7 @@ pub struct HeadlessSession {
 
 impl HeadlessSession {
     pub fn new(session_id: SessionId, workspace: Workspace, config: Config) -> Self {
+        let log = crate::session::ChatLog::new(&workspace.root().to_string_lossy());
         Self {
             session_id,
             workspace,
@@ -595,6 +600,7 @@ impl HeadlessSession {
             turn_starts: Vec::new(),
             last_prompt_tokens: None,
             rollback: crate::rollback::Journal::default(),
+            log,
             mcp: crate::mcp::McpRegistry::default(),
             events: EventHub::default(),
             cancel: CancelHandle::default(),
@@ -713,6 +719,13 @@ impl HeadlessSession {
             request_id,
             resolution,
         });
+    }
+
+    /// Bring the session file up to date with the engine's history. Called at
+    /// round boundaries, so a crash leaves at most the in-flight round
+    /// unwritten, and a completed turn is always on disk.
+    fn persist(&mut self) {
+        self.log.append(&self.messages);
     }
 
     fn finish_turn(&self, reason: StopReason) -> StopReason {
@@ -872,6 +885,10 @@ impl HeadlessSession {
         // still hits the ceiling, the error is real and should surface.
         let mut compacted_this_turn = false;
         loop {
+            // Everything pushed since the previous round (the user message,
+            // tool results, a retry after compaction) is on disk before the
+            // next model request goes out.
+            self.persist();
             if self.cancel.is_cancelled() {
                 return self.finish_turn(StopReason::Cancelled);
             }
@@ -919,6 +936,10 @@ impl HeadlessSession {
                     // Same moment as the TUI: only after an ordinary completed
                     // turn, never after a failure or a compaction itself.
                     self.maybe_auto_compact(&updates).await;
+                    // The final assistant message was pushed inside the round;
+                    // the next loop iteration it would have been saved at
+                    // never comes.
+                    self.persist();
                     return self.finish_turn(StopReason::EndTurn);
                 }
                 RoundOutcome::Error(message) => {
@@ -1023,6 +1044,7 @@ impl HeadlessSession {
                         }
                     }
                     if !budget_left {
+                        self.persist();
                         return self.finish_turn(StopReason::MaxTurnRequests);
                     }
                     // Loop again: the model gets to react to what just ran.
@@ -1078,9 +1100,12 @@ impl HeadlessSession {
                 self.messages = vec![crate::compact::summary_message(&summary)];
                 // The old turn boundaries index a conversation that no longer
                 // exists. Keep the rollback journal (its file before-states are
-                // still valid), but start the conversation afresh.
+                // still valid), but start the conversation afresh -- including
+                // on disk, so the pre-compaction file stays resumable.
                 self.turn_starts.clear();
                 self.last_prompt_tokens = None;
+                self.log.reset();
+                self.persist();
                 let _ = updates
                     .send(SessionUpdate::AgentMessageChunk {
                         content: ContentBlock::Text {
@@ -2662,6 +2687,55 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A completed headless turn is recorded where `/sessions` and a restart
+    /// can find it -- the same file the TUI writes.
+    #[tokio::test]
+    async fn a_completed_turn_is_recorded_in_the_session_store() {
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fake_home = tempfile::tempdir().expect("temp home");
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home.path());
+
+        let (_dir, ws) = workspace();
+        let root = ws.root().to_string_lossy().into_owned();
+        let endpoint = serve_rounds(vec![text_round("Hello!")]).await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        let recorded = crate::session::latest_for(&root)
+            .map(|path| crate::session::load_chat(&path))
+            .unwrap_or_default();
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(recorded.len(), 2, "the whole turn reached the session file");
+        assert_eq!(recorded[0].role, "user");
+        assert_eq!(recorded[0].content.as_deref(), Some("hi"));
+        assert_eq!(recorded[1].role, "assistant");
+        assert_eq!(recorded[1].content.as_deref(), Some("Hello!"));
     }
 
     /// Multiple clients can watch the same session: every subscriber gets its
