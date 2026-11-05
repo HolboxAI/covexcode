@@ -42,7 +42,9 @@ enum ClientMsg {
 
 /// A frontend's handle to one running engine. Dropping it ends the actor
 /// after the current turn, the same way dropping a transport's command
-/// sender does.
+/// sender does. Cloneable so a UI can hand one copy to a prompt task while
+/// keeping its own for cancel and approval answers.
+#[derive(Clone)]
 pub struct EngineClient {
     session_id: SessionId,
     commands: mpsc::Sender<ClientMsg>,
