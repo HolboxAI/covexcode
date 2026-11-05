@@ -31,6 +31,7 @@ mod read_policy;
 mod requests;
 mod rollback;
 mod session;
+mod session_client;
 mod subagent;
 mod telemetry;
 mod theme;
