@@ -396,12 +396,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut core = if core_tui::CoreTui::enabled() {
         workspace.as_ref().map(|ws| {
             app.startup_notices.push(
-                "Core-session mode (experimental): the engine owns the turn and its approval \
-                 prompts; /new, /compact, /rollback and --resume still act on the TUI history \
-                 only."
+                "Core-session mode (experimental): the engine owns the turn, approvals, /new and \
+                 startup --resume; /compact, /rollback and /sessions still act on the TUI \
+                 history only."
                     .to_string(),
             );
-            core_tui::CoreTui::start(ws.clone(), app.config.clone())
+            // The engine gets the same recording App just loaded, so a
+            // resumed conversation is not one-sided.
+            let history = if resume {
+                session::latest_for(&app.workspace_root)
+                    .map(|path| session::load_chat(&path))
+                    .filter(|messages| !messages.is_empty())
+            } else {
+                None
+            };
+            core_tui::CoreTui::start_with_history(ws.clone(), app.config.clone(), history)
         })
     } else {
         None
@@ -865,14 +874,23 @@ async fn run_app<B: ratatui::backend::Backend>(
         //
         // In core mode the engine records its own conversation (see
         // `HeadlessSession::persist`), so writing App's transcript too would
-        // leave two session files for one conversation.
+        // leave two session files for one conversation. `/new` still has to
+        // reach the engine, though, or the next prompt would carry the
+        // conversation the user just cleared.
         let reset_log = app.session_reset;
         app.session_reset = false;
-        if core.is_none() {
-            if reset_log {
-                session_log.reset();
+        match core.as_mut() {
+            Some(core) => {
+                if reset_log {
+                    core.reset(app);
+                }
             }
-            session_log.append(&app.messages);
+            None => {
+                if reset_log {
+                    session_log.reset();
+                }
+                session_log.append(&app.messages);
+            }
         }
         // Same reasoning again: `App` marks the plan dirty, this loop writes
         // it. A failed write is reported rather than swallowed -- the whole

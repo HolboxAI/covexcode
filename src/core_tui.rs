@@ -3,12 +3,14 @@
 //!
 //! Enabled by `COVEXCODE_CORE_SESSION=1`. Deliberately partial in this first
 //! slice: the engine owns the turn, so text, tool results, usage and approval
-//! prompts are real and stream in normally, but the TUI's own surfaces that
+//! prompts are real and stream in normally, and `/new` and startup
+//! `--resume` are mirrored into the engine, but the TUI's own surfaces that
 //! assume it owns the agent have not all moved yet:
 //!
-//! - `/new`, `/compact` and `/rollback` still operate on `App`'s local
-//!   history, not the engine's;
-//! - `--resume` loads App's history only, so the engine starts empty.
+//! - `/compact` and `/rollback` still operate on `App`'s local history, not
+//!   the engine's;
+//! - picking a recording from `/sessions` after launch loads App's transcript
+//!   only, so the engine keeps the conversation it already had.
 //!
 //! The old path stays the default and is untouched; with the variable unset
 //! nothing in this module runs.
@@ -79,7 +81,21 @@ impl CoreTui {
     }
 
     pub fn start(workspace: Workspace, config: crate::config::Config) -> Self {
+        Self::start_with_history(workspace, config, None)
+    }
+
+    /// Same as [`CoreTui::start`], but seeds the engine with a recorded
+    /// conversation (`--resume`). The TUI transcript is loaded by App from
+    /// the same file; this is the engine's copy.
+    pub fn start_with_history(
+        workspace: Workspace,
+        config: crate::config::Config,
+        history: Option<Vec<crate::llm::ChatMessage>>,
+    ) -> Self {
         let SpawnedSession { client, events } = EngineClient::spawn(workspace, config);
+        if let Some(messages) = history {
+            let _ = client.restore(messages);
+        }
         tracing::info!(
             session = %client.session_id(),
             "driving the TUI through the session engine"
@@ -91,6 +107,14 @@ impl CoreTui {
             pending_approvals: HashMap::new(),
             active: false,
         }
+    }
+
+    /// `/new` for an engine-driven TUI: stop anything in flight (its events
+    /// would otherwise paint into the transcript App just cleared), then ask
+    /// the actor to forget the conversation and rotate its session file.
+    pub fn reset(&mut self, app: &mut App) {
+        self.cancel(app);
+        let _ = self.client.reset();
     }
 
     /// Start the turn `App::submit` queued. A no-op unless the app is in
@@ -681,5 +705,21 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.role == Role::Assistant && m.content == "stopped"));
+    }
+
+    #[tokio::test]
+    async fn new_clears_the_turn_and_pending_approval_state() {
+        let (_dir, mut core, mut app) = core_with_workspace();
+        core.active = true;
+        core.pending_approvals.insert(3, ApprovalChoice::default());
+        app.core_approval = Some(3);
+        app.core_decision = Some((3, true));
+
+        core.reset(&mut app);
+
+        assert!(!core.active, "an in-flight turn is stopped");
+        assert_eq!(app.core_approval, None);
+        assert_eq!(app.core_decision, None);
+        assert!(core.pending_approvals.is_empty());
     }
 }
