@@ -613,6 +613,15 @@ pub struct App {
     /// every new prompt starts back on "yes" to match bare-Enter's long-
     /// standing meaning.
     pub approval_selected: bool,
+    /// The engine-issued approval id currently on screen in core-session
+    /// mode, if any. `None` on the default path, where `pending_tools` owns
+    /// the question instead.
+    pub core_approval: Option<u64>,
+    /// The answer to `core_approval`, filled by [`App::decide`] and drained
+    /// by `main.rs` into `SessionCommand::RespondApproval`. `App` never talks
+    /// to the engine itself -- same mark-and-let-main-act pattern as
+    /// `plan_dirty`.
+    pub core_decision: Option<(u64, bool)>,
     /// How many of `messages` have already been printed into the terminal's own
     /// scrollback. Everything below this index is the terminal's to keep and
     /// must never be drawn again; everything at or above it still belongs to
@@ -881,6 +890,8 @@ impl App {
             scroll: 0,
             follow_tail: true,
             approval_selected: true,
+            core_approval: None,
+            core_decision: None,
             flushed: 0,
             welcome_flushed: false,
             stream_printed: 0,
@@ -3477,6 +3488,18 @@ impl App {
         self.state = AppState::AwaitingApproval;
     }
 
+    /// Put one engine approval request on screen. Called by the core-session
+    /// bridge; [`App::decide`] answers it through `core_decision` instead of
+    /// running the tool here, because the engine owns the call.
+    pub fn show_core_approval(
+        &mut self,
+        request_id: u64,
+        request: crate::approval::ApprovalRequest,
+    ) {
+        self.core_approval = Some(request_id);
+        self.show_approval(request);
+    }
+
     fn handle_command_approval_key(&mut self, key: KeyEvent) {
         if matches!(key.code, KeyCode::Up | KeyCode::Down) {
             self.approval_selected = !self.approval_selected;
@@ -3519,6 +3542,15 @@ impl App {
     /// Keys arrive here today; a channel's responses will arrive here when
     /// the agent loop runs behind one.
     pub fn decide(&mut self, decision: crate::approval::Decision) {
+        // In core-session mode the engine owns the call, not this struct:
+        // record the answer for `main.rs` to send and let the engine continue
+        // the turn. `pending_tools` is empty here by construction.
+        if let Some(request_id) = self.core_approval.take() {
+            self.core_decision = Some((request_id, decision.is_allowed()));
+            self.overlay = None;
+            self.state = AppState::Streaming;
+            return;
+        }
         let allowed = decision.is_allowed();
         let Some(call) = self.pending_tools.pop_front() else {
             return;
