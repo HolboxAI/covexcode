@@ -21,7 +21,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most a message may contain, in Unicode scalar values. Enforced at the
 /// input box in `app.rs`; the counter in `ui.rs` reads the same number so the
 /// cap and the display cannot drift.
-pub const MAX_CHARS: usize = 2000;
+pub const MAX_CHARS: usize = 10000;
 
 /// The `os` field's value, chosen at compile time so the field stays exactly
 /// `macos` / `linux` / `windows` on each of the three platforms this CLI ships
@@ -69,34 +69,33 @@ fn opted_out_given(env_override: Option<&str>) -> bool {
 }
 
 fn feedback_log_path() -> std::path::PathBuf {
-    // `$HOME`-based, matching `login.rs::covexcode_dir`, not the
-    // override-aware `Config::config_dir()`: the transcript names the file as
-    // `~/.covexcode/feedback.log`, and a `COVEXCODE_CONFIG_DIR` override (set by
-    // the IDE) must not move it to a directory that string no longer describes.
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".covexcode").join("feedback.log")
+    // The same state directory the rest of the app already uses (`config`,
+    // sessions, usage), so the log lands in the right place on every platform:
+    // `~/.covexcode/feedback.log` on macOS/Linux and
+    // `%USERPROFILE%\.covexcode\feedback.log` on Windows, and it follows
+    // `COVEXCODE_CONFIG_DIR` the way everything else does.
+    crate::config::Config::config_dir().join("feedback.log")
 }
 
-/// Appends the message to `~/.covexcode/feedback.log` *before* anything is
-/// sent, so a failed network call cannot lose it. Best-effort by design: a
-/// read-only `$HOME` must not turn feedback into an error the user notices.
-pub fn log(message: &str) {
+/// Appends the message to the platform's `feedback.log` *before* anything is
+/// sent, so a failed network call cannot lose it. A write failure is returned
+/// as `Err` -- the one outcome the caller reports as an error -- because if
+/// this does not succeed the message has not been saved anywhere.
+pub fn log(message: &str) -> Result<(), String> {
     use std::io::Write;
     let path = feedback_log_path();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
     }
     let stamp = crate::dateutil::now_utc_timestamp();
-    if let Ok(mut file) = std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
-    {
-        let _ = writeln!(file, "[{stamp}] {message}");
-    }
+        .open(&path)
+        .map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    writeln!(file, "[{stamp}] {message}")
+        .map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
 /// The JSON body that goes on the wire, exactly four keys and nothing else.
@@ -112,29 +111,30 @@ pub fn build_body(message: &str, version: &str) -> serde_json::Value {
 
 /// POST the message to the feedback endpoint. Fire-and-forget from the caller's
 /// point of view: the runtime loop spawns this and never awaits it on the UI
-/// path. Returns `Err` with a human reason so the transcript can say what
-/// happened (the message is already on disk in `log` either way).
+/// path.
+///
+/// The endpoint does not exist yet, so *every* network outcome -- connection
+/// refused, 404, 5xx, a timeout, any transport error -- is treated as success.
+/// The message is already on disk in `log`, which is the part the user cares
+/// about; when the site admin finishes the endpoint it simply starts receiving
+/// 200s and nothing here changes. The `Result` return is kept only so the
+/// channel that carries outcomes stays one shape: this arm always succeeds.
 pub async fn send(message: &str, version: &str) -> Result<(), String> {
-    let client = reqwest::Client::builder()
+    let body = build_body(message, version).to_string();
+
+    if let Ok(client) = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .user_agent(format!("covexcode/{version}"))
         .build()
-        .map_err(|e| format!("could not build an HTTP client: {e}"))?;
-
-    let body = build_body(message, version).to_string();
-
-    let response = client
-        .post(FEEDBACK_URL)
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("could not reach the feedback service: {e}"))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("the feedback service refused this ({status})"));
+    {
+        let _ = client
+            .post(FEEDBACK_URL)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await;
     }
+
     Ok(())
 }
 
@@ -143,8 +143,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_char_cap_is_exactly_two_thousand() {
-        assert_eq!(MAX_CHARS, 2000);
+    fn the_char_cap_is_exactly_ten_thousand() {
+        assert_eq!(MAX_CHARS, 10000);
     }
 
     #[test]
@@ -167,6 +167,32 @@ mod tests {
             assert_eq!(keys, vec!["anon_id", "message", "os", "version"]);
             assert_eq!(object["message"], "hello");
             assert_eq!(object["version"], "1.2.3");
+        });
+    }
+
+    #[test]
+    fn the_os_field_is_a_non_empty_known_platform() {
+        crate::config::test_support::with_isolated_home(|| {
+            let body = build_body("hello", "1.2.3");
+            let os = body["os"].as_str().expect("the os field is a string");
+            assert!(!os.is_empty());
+            assert!(
+                matches!(os, "macos" | "linux" | "windows"),
+                "unexpected os value: {os}"
+            );
+        });
+    }
+
+    #[test]
+    fn the_log_path_resolves_and_log_writes_on_the_current_platform() {
+        crate::config::test_support::with_isolated_home(|| {
+            let path = feedback_log_path();
+            assert!(
+                path.ends_with("feedback.log"),
+                "log path must end in feedback.log: {path:?}"
+            );
+            assert!(log("path check").is_ok());
+            assert!(path.exists(), "log() must create the file: {path:?}");
         });
     }
 }

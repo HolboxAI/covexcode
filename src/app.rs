@@ -5785,9 +5785,9 @@ impl App {
                     self.overlay_input.clear();
                     self.overlay_cursor = 0;
                     let notice = if crate::feedback::is_opted_out() {
-                        "· feedback opt-out active — saved locally to ~/.covexcode/feedback.log"
+                        "· feedback opt-out active — saved locally"
                     } else {
-                        "· feedback sending…"
+                        "· sending feedback…"
                     };
                     self.messages.push(Message::new(Role::System, notice));
                     self.feedback_request = Some(text);
@@ -5809,17 +5809,18 @@ impl App {
         }
     }
 
-    /// Called by the runtime loop when the `/feedback` POST resolves. The
-    /// "sending…" line was pushed on Enter; this replaces it with the outcome.
+    /// Called by the runtime loop when the `/feedback` outcome resolves. The
+    /// "sending feedback…" line was pushed on Enter; this replaces it with the
+    /// outcome -- success, or a local write failure.
     pub fn finish_feedback(&mut self, result: Result<(), String>) {
         match result {
             Ok(()) => self.messages.push(Message::new(
                 Role::System,
-                "✓ feedback sent — thank you",
+                "✓ feedback saved — thank you",
             )),
-            Err(_) => self.messages.push(Message::new(
+            Err(e) => self.messages.push(Message::new(
                 Role::Error,
-                "✗ feedback failed — saved to ~/.covexcode/feedback.log",
+                format!("✗ feedback could not be saved locally — {e}"),
             )),
         }
     }
@@ -8372,14 +8373,14 @@ mod tests {
     }
 
     #[test]
-    fn feedback_stops_accepting_at_the_two_thousand_char_cap() {
+    fn feedback_stops_accepting_at_the_ten_thousand_char_cap() {
         let mut a = app();
         a.run_command("/feedback");
         a.overlay_input = "x".repeat(crate::feedback::MAX_CHARS);
         a.overlay_cursor = crate::feedback::MAX_CHARS;
         a.handle_key(key(KeyCode::Char('y')));
         assert_eq!(a.overlay_input.chars().count(), crate::feedback::MAX_CHARS);
-        assert!(!a.overlay_input.contains('y'), "the 2001st char is rejected");
+        assert!(!a.overlay_input.contains('y'), "the 10001st char is rejected");
     }
 
     #[test]

@@ -5829,7 +5829,7 @@ mod tests {
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let text = rows(&terminal, w, h).join("\n");
         assert!(text.contains("Send Feedback"), "{text}");
-        assert!(text.contains("0 / 2000"), "{text}");
+        assert!(text.contains("0 / 10000"), "{text}");
         assert!(text.contains("Enter to send"), "{text}");
 
         // 142 characters typed: the counter tracks it exactly.
@@ -5837,7 +5837,7 @@ mod tests {
         app.overlay_cursor = 142;
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let text = rows(&terminal, w, h).join("\n");
-        assert!(text.contains("142 / 2000"), "{text}");
+        assert!(text.contains("142 / 10000"), "{text}");
 
         // Esc closes; one more frame must leave no box rows behind.
         app.handle_key(crossterm::event::KeyEvent::new(
@@ -5847,7 +5847,7 @@ mod tests {
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let text = rows(&terminal, w, h).join("\n");
         assert!(!text.contains("Send Feedback"), "box title lingered: {text}");
-        assert!(!text.contains("/ 2000"), "counter lingered: {text}");
+        assert!(!text.contains("/ 10000"), "counter lingered: {text}");
         assert!(!text.contains("Enter to send"), "hint lingered: {text}");
     }
 

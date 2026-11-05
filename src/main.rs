@@ -732,15 +732,25 @@ async fn run_app(
         }
 
         // `/feedback`: log first (so the message is on disk before the network
-        // can fail), then send fire-and-forget. Opted-out runs log only.
+        // can fail), then send fire-and-forget. Opted-out runs log only. A
+        // local write failure is the one outcome surfaced as an error; the
+        // send itself never fails, because the endpoint may not exist yet.
         if let Some(message) = app.feedback_request.take() {
-            crate::feedback::log(&message);
-            if !crate::feedback::is_opted_out() {
-                let feedback_tx = feedback_tx.clone();
-                tokio::spawn(async move {
-                    let result = crate::feedback::send(&message, VERSION).await;
-                    let _ = feedback_tx.send(result).await;
-                });
+            match crate::feedback::log(&message) {
+                Err(e) => {
+                    let _ = feedback_tx.send(Err(e)).await;
+                }
+                Ok(()) if crate::feedback::is_opted_out() => {
+                    // Logged locally, nothing to send. The Enter line already
+                    // told the user it was saved locally.
+                }
+                Ok(()) => {
+                    let feedback_tx = feedback_tx.clone();
+                    tokio::spawn(async move {
+                        let result = crate::feedback::send(&message, VERSION).await;
+                        let _ = feedback_tx.send(result).await;
+                    });
+                }
             }
         }
 
