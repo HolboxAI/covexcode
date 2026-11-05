@@ -16,8 +16,11 @@ Landed on `main`:
   lifecycle, usage, status, plans/todos, and approvals; cooperative ACP
   `session/cancel`; `HeadlessSession` is the reusable engine behind both
   `--acp` and `--listen`, with `SessionCommand` (cancel + approval answers) as
-  its serializable control surface. The TUI still runs its own `App` loop --
-  rendering the engine's events in the TUI is the one Phase 1 item left.
+  its serializable control surface. The TUI still runs its own `App` loop by
+  default; `COVEXCODE_CORE_SESSION=1` opts into driving it through the engine
+  (`session_client` + `core_tui`) for streaming text, tool results, usage and
+  cancel, while approvals and the history-affecting slash commands remain on
+  the `App` path -- full parity is the one Phase 1 item left.
 - **Phase 2**: a `SessionRegistry` with one actor per session, shared by every
   connection a `--listen` process accepts. `session/list`, `session/attach`,
   `session/close` and `session/cancel` work across connections, status changes
