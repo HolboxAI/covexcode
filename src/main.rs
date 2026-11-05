@@ -396,9 +396,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut core = if core_tui::CoreTui::enabled() {
         workspace.as_ref().map(|ws| {
             app.startup_notices.push(
-                "Core-session mode (experimental): tools run in the engine; approval prompts are \
-                 refused, and /new, /compact, /rollback and --resume still act on the TUI \
-                 history only."
+                "Core-session mode (experimental): the engine owns the turn and its approval \
+                 prompts; /new, /compact, /rollback and --resume still act on the TUI history \
+                 only."
                     .to_string(),
             );
             core_tui::CoreTui::start(ws.clone(), app.config.clone())
@@ -740,7 +740,7 @@ async fn run_app<B: ratatui::backend::Backend>(
         // request, and `App`'s own abort handle is never set.
         if let Some(core) = core.as_mut() {
             if was_busy && !app.is_busy() {
-                core.cancel();
+                core.cancel(app);
             }
         }
 
@@ -756,6 +756,9 @@ async fn run_app<B: ratatui::backend::Backend>(
         // App state through the bridge, never through `agent::handle_event`.
         if let Some(core) = core.as_mut() {
             core.drain(app);
+            // The user may have answered an approval prompt this tick; App
+            // recorded the choice, the bridge sends it to the engine.
+            core.answer_queued_decision(app);
         }
 
         // Deployment progress. Same shape as the token drain above, and drained
