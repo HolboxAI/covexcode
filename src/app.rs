@@ -43,6 +43,10 @@ pub enum Overlay {
         model: String,
     },
     CustomEndpoint(CustomStep),
+    /// `/feedback`. A free-text, multiline popup whose text lives in the shared
+    /// `overlay_input`/`overlay_cursor` fields, like `ApiKeyPrompt`. Enter (with
+    /// text) queues it on `feedback_request` and closes; Esc closes with no trace.
+    Feedback,
     /// `/pull`. Projects this machine has published in the last
     /// `artifacts::EXPIRY_HOURS`, (path, artifact id) pairs from
     /// `artifacts::all_local` -- picking one sets `pending_relaunch` rather
@@ -176,6 +180,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear-images", "remove all staged image attachments"),
     ("/exit", "leave covexcode"),
     ("/doctor", "check this install's health"),
+    ("/feedback", "send feedback about covexcode"),
     ("/help", "list every slash command"),
 ];
 
@@ -859,6 +864,11 @@ pub struct App {
     /// `DeployAction::RunInteractive`, because two things cannot own one
     /// terminal.
     pub login_request: bool,
+    /// `/feedback` asked to send a message. The runtime loop takes this, writes
+    /// the local log, and spawns the POST (or, when opted out, skips the POST
+    /// since the opt-out notice was already pushed). Same split as
+    /// `hosted_request`: `App` performs no network I/O of its own.
+    pub feedback_request: Option<String>,
     /// Pending async clipboard read. Polled in the main loop without blocking.
     pub clipboard_rx: Option<std::sync::mpsc::Receiver<ClipboardOutcome>>,
     #[cfg(test)]
@@ -946,6 +956,7 @@ impl App {
             turn_starts: Vec::new(),
             turn_prompts: Vec::new(),
             login_request: false,
+            feedback_request: None,
             clipboard_rx: None,
             #[cfg(test)]
             mock_clipboard_outcome: None,
@@ -1089,6 +1100,7 @@ impl App {
             "/clear-images" => self.clear_pending_images(),
             "/exit" => self.exit_now(),
             "/doctor" => self.show_doctor(),
+            "/feedback" => self.start_feedback(),
             "/help" => self.show_help(),
             other => unreachable!("COMMANDS names {other:?}, not dispatched here"),
         }
@@ -5412,6 +5424,7 @@ impl App {
                 self.handle_api_key_prompt_key(key, provider_id, model)
             }
             Overlay::CustomEndpoint(step) => self.handle_custom_endpoint_key(key, step),
+            Overlay::Feedback => self.handle_feedback_key(key),
             Overlay::ArtifactPicker { items, selected } => {
                 self.handle_artifact_picker_key(key, items, selected)
             }
@@ -5726,6 +5739,88 @@ impl App {
             _ => {
                 self.overlay = Some(Overlay::CustomEndpoint(step));
             }
+        }
+    }
+
+    /// `/feedback` — open the floating feedback box. The message is typed into
+    /// `overlay_input`; Enter (with text) queues it on `feedback_request` and the
+    /// runtime loop sends it, Esc closes with no transcript entry.
+    fn start_feedback(&mut self) {
+        if self.is_busy() {
+            self.messages.push(Message::new(
+                Role::System,
+                "Wait for the current turn to finish, then run /feedback.",
+            ));
+            return;
+        }
+        self.overlay_input.clear();
+        self.overlay_cursor = 0;
+        self.overlay = Some(Overlay::Feedback);
+    }
+
+    /// Key handling for the `/feedback` box. Only insert/backspace is
+    /// supported (no cursor repositioning), matching `ApiKeyPrompt`.
+    fn handle_feedback_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Esc => {
+                // Close with no transcript entry and no request.
+                self.overlay_input.clear();
+                self.overlay_cursor = 0;
+            }
+            KeyCode::Enter => {
+                if alt || shift {
+                    // Multiline: a newline is text, not "send".
+                    if self.overlay_input.chars().count() < crate::feedback::MAX_CHARS {
+                        insert_into(&mut self.overlay_input, &mut self.overlay_cursor, "\n");
+                    }
+                    self.overlay = Some(Overlay::Feedback);
+                } else if self.overlay_input.trim().is_empty() {
+                    // Empty input: Enter does nothing, the box stays open.
+                    self.overlay = Some(Overlay::Feedback);
+                } else {
+                    let text = self.overlay_input.clone();
+                    self.overlay_input.clear();
+                    self.overlay_cursor = 0;
+                    let notice = if crate::feedback::is_opted_out() {
+                        "· feedback opt-out active — saved locally to ~/.covexcode/feedback.log"
+                    } else {
+                        "· feedback sending…"
+                    };
+                    self.messages.push(Message::new(Role::System, notice));
+                    self.feedback_request = Some(text);
+                }
+            }
+            KeyCode::Backspace => {
+                delete_before_in(&mut self.overlay_input, &mut self.overlay_cursor);
+                self.overlay = Some(Overlay::Feedback);
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if self.overlay_input.chars().count() < crate::feedback::MAX_CHARS {
+                    insert_into(&mut self.overlay_input, &mut self.overlay_cursor, &c.to_string());
+                }
+                self.overlay = Some(Overlay::Feedback);
+            }
+            _ => {
+                self.overlay = Some(Overlay::Feedback);
+            }
+        }
+    }
+
+    /// Called by the runtime loop when the `/feedback` POST resolves. The
+    /// "sending…" line was pushed on Enter; this replaces it with the outcome.
+    pub fn finish_feedback(&mut self, result: Result<(), String>) {
+        match result {
+            Ok(()) => self.messages.push(Message::new(
+                Role::System,
+                "✓ feedback sent — thank you",
+            )),
+            Err(_) => self.messages.push(Message::new(
+                Role::Error,
+                "✗ feedback failed — saved to ~/.covexcode/feedback.log",
+            )),
         }
     }
 
@@ -8227,6 +8322,81 @@ mod tests {
             !a.command_menu_active(),
             "the slash menu must not survive the command"
         );
+    }
+
+    // ---- /feedback ---------------------------------------------------------
+
+    #[test]
+    fn slash_feedback_opens_the_floating_box() {
+        let mut a = app();
+        a.run_command("/feedback");
+        assert_eq!(a.overlay, Some(Overlay::Feedback));
+    }
+
+    #[test]
+    fn feedback_esc_closes_with_no_trace() {
+        let mut a = app();
+        a.run_command("/feedback");
+        type_str(&mut a, "hello");
+        let before = a.messages.len();
+        a.handle_key(key(KeyCode::Esc));
+        assert_eq!(a.overlay, None);
+        assert_eq!(a.feedback_request, None);
+        assert_eq!(a.messages.len(), before, "Esc leaves no transcript entry");
+        assert!(a.overlay_input.is_empty());
+    }
+
+    #[test]
+    fn feedback_empty_enter_does_nothing() {
+        let mut a = app();
+        a.run_command("/feedback");
+        let before = a.messages.len();
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.overlay, Some(Overlay::Feedback), "empty Enter keeps the box open");
+        assert_eq!(a.feedback_request, None);
+        assert_eq!(a.messages.len(), before, "no transcript entry on empty Enter");
+    }
+
+    #[test]
+    fn feedback_enter_with_text_queues_and_announces() {
+        let mut a = app();
+        a.run_command("/feedback");
+        type_str(&mut a, "make the header sticky");
+        let before = a.messages.len();
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.overlay, None);
+        assert_eq!(a.feedback_request.as_deref(), Some("make the header sticky"));
+        assert_eq!(a.messages.len(), before + 1, "exactly one notice is pushed");
+        let body = a.messages.last().unwrap().body().to_string();
+        assert!(body.contains("feedback"), "{body}");
+    }
+
+    #[test]
+    fn feedback_stops_accepting_at_the_two_thousand_char_cap() {
+        let mut a = app();
+        a.run_command("/feedback");
+        a.overlay_input = "x".repeat(crate::feedback::MAX_CHARS);
+        a.overlay_cursor = crate::feedback::MAX_CHARS;
+        a.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(a.overlay_input.chars().count(), crate::feedback::MAX_CHARS);
+        assert!(!a.overlay_input.contains('y'), "the 2001st char is rejected");
+    }
+
+    #[test]
+    fn feedback_opt_out_skips_the_request_and_announces_it() {
+        let guard = std::env::var("COVEXCODE_TELEMETRY_URL").ok();
+        std::env::set_var("COVEXCODE_TELEMETRY_URL", "");
+        let mut a = app();
+        a.run_command("/feedback");
+        type_str(&mut a, "still logged locally");
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.feedback_request.as_deref(), Some("still logged locally"));
+        let body = a.messages.last().unwrap().body().to_string();
+        assert!(body.contains("opt-out"), "{body}");
+        match guard {
+            Some(v) => std::env::set_var("COVEXCODE_TELEMETRY_URL", v),
+            None => std::env::remove_var("COVEXCODE_TELEMETRY_URL"),
+        }
     }
 
     /// Once a space is typed, the "/word" is finished -- what follows is an

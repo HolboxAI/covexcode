@@ -19,7 +19,7 @@ const MAX_INPUT_HEIGHT: u16 = 10;
 const MAX_APPROVAL_HEIGHT: u16 = 24;
 /// Tall enough for every command in `app::COMMANDS` plus its border. There is
 /// a test.
-const MAX_COMMAND_MENU_HEIGHT: u16 = 28;
+const MAX_COMMAND_MENU_HEIGHT: u16 = 29;
 /// The deployment panel is allowed to be taller than the approval prompt: it
 /// carries a checklist, a menu and a live log at the same time, and clipping
 /// the log is what makes a failed build undiagnosable.
@@ -1538,6 +1538,7 @@ fn render_overlay(f: &mut Frame, area: Rect, app: &App) {
             };
             render_text_prompt(f, area, title, hint, &app.overlay_input, masked);
         }
+        Some(Overlay::Feedback) => render_feedback(f, area, app),
         Some(Overlay::ArtifactPicker { items, selected }) => {
             // Just the id, not the full path: a picker row is one line and a
             // canonicalized absolute path routinely runs past the popup
@@ -3640,6 +3641,81 @@ fn render_text_prompt(
     f.set_cursor(popup.x + 1 + col as u16, popup.y + 3);
 }
 
+/// The `/feedback` box: a free-text, multiline prompt whose only confirmation
+/// is the live character counter in the bottom-right corner. Deliberately no
+/// second step -- see `App::handle_feedback_key`.
+fn render_feedback(f: &mut Frame, area: Rect, app: &App) {
+    let popup = centered_rect(64, 12, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::p().accent))
+        .title(Span::styled(" Send Feedback ", theme::accent_bold()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    // Row 1: the instruction.
+    let hint_area = Rect { y: inner.y, height: 1, ..inner };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "What's on your mind? (Enter to send · Esc to cancel)",
+            theme::faint(),
+        ))),
+        hint_area,
+    );
+
+    // Last row: the counter, right-aligned so it never runs into the text.
+    let counter_area = Rect { y: inner.bottom() - 1, height: 1, ..inner };
+    let count = app.overlay_input.chars().count();
+    let counter = format!("{count} / {}", crate::feedback::MAX_CHARS);
+    f.render_widget(
+        Paragraph::new(counter)
+            .alignment(Alignment::Right)
+            .style(theme::faint()),
+        counter_area,
+    );
+
+    // Middle: the message, wrapped to width and scrolled to its tail so the
+    // caret (which always sits at the end) stays on screen while typing.
+    let body_area = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(2),
+        ..inner
+    };
+    let width = body_area.width as usize;
+    let mut rows: Vec<String> = Vec::new();
+    if app.overlay_input.is_empty() {
+        rows.push(String::new());
+    } else {
+        for logical in app.overlay_input.split('\n') {
+            rows.extend(hard_wrap(logical, width.max(1)));
+        }
+    }
+    let start = rows.len().saturating_sub(body_area.height as usize);
+    let visible: Vec<Line> = rows
+        .iter()
+        .skip(start)
+        .map(|s| {
+            if app.overlay_input.is_empty() {
+                Line::from(Span::styled("(type here)", theme::faint()))
+            } else {
+                Line::from(Span::styled(s.clone(), theme::text()))
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(visible), body_area);
+
+    // Caret at the end of the last visible row, clamped to the body.
+    if body_area.height > 0 {
+        let caret_col = rows.last().map(|r| r.chars().count()).unwrap_or(0);
+        let caret_row = body_area.y + rows.len().saturating_sub(1 + start) as u16;
+        let x = body_area.x + caret_col.min(width) as u16;
+        f.set_cursor(x, caret_row.min(body_area.bottom() - 1));
+    }
+}
+
 // ---- text layout helpers ------------------------------------------------------
 
 fn hard_wrap_rows(len: usize, width: usize) -> usize {
@@ -5736,6 +5812,43 @@ mod tests {
             rows_with_keys, 1,
             "the y/n/esc bar must be drawn once, not twice"
         );
+    }
+
+    /// `/feedback` render: the floating box shows its title and a live counter,
+    /// and Esc leaves no box rows in the buffer on the next frame.
+    #[test]
+    fn feedback_box_renders_title_counter_and_clears_on_esc() {
+        let w = 80;
+        let h = 24;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+
+        let mut app = App::new(crate::config::Config::default());
+        app.greeted = true;
+        app.overlay = Some(Overlay::Feedback);
+
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let text = rows(&terminal, w, h).join("\n");
+        assert!(text.contains("Send Feedback"), "{text}");
+        assert!(text.contains("0 / 2000"), "{text}");
+        assert!(text.contains("Enter to send"), "{text}");
+
+        // 142 characters typed: the counter tracks it exactly.
+        app.overlay_input = "x".repeat(142);
+        app.overlay_cursor = 142;
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let text = rows(&terminal, w, h).join("\n");
+        assert!(text.contains("142 / 2000"), "{text}");
+
+        // Esc closes; one more frame must leave no box rows behind.
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let text = rows(&terminal, w, h).join("\n");
+        assert!(!text.contains("Send Feedback"), "box title lingered: {text}");
+        assert!(!text.contains("/ 2000"), "counter lingered: {text}");
+        assert!(!text.contains("Enter to send"), "hint lingered: {text}");
     }
 
     /// Regression: submitting a slash command must clean up every row previously

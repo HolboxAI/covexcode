@@ -15,6 +15,7 @@ mod deploy;
 mod diff;
 mod domain;
 mod errors;
+mod feedback;
 mod headless;
 mod history;
 mod llm;
@@ -359,6 +360,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // control plane about several projects at once, which is neither the model
     // talking nor a deployment running. One message, sent once.
     let (hosted_tx, mut hosted_rx) = mpsc::channel::<Vec<backend::Mine>>(8);
+    let (feedback_tx, mut feedback_rx) = mpsc::channel::<Result<(), String>>(8);
 
     let result = run_app(
         &mut terminal,
@@ -371,6 +373,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &mut deploy_rx,
         hosted_tx,
         &mut hosted_rx,
+        feedback_tx,
+        &mut feedback_rx,
         &modes,
     )
     .await;
@@ -656,6 +660,8 @@ async fn run_app(
     deploy_rx: &mut mpsc::Receiver<deploy::DeployEvent>,
     hosted_tx: mpsc::Sender<Vec<backend::Mine>>,
     hosted_rx: &mut mpsc::Receiver<Vec<backend::Mine>>,
+    feedback_tx: mpsc::Sender<Result<(), String>>,
+    feedback_rx: &mut mpsc::Receiver<Result<(), String>>,
     modes: &TerminalModes,
 ) -> Result<(), Box<dyn Error>> {
     loop {
@@ -707,6 +713,10 @@ async fn run_app(
             app.show_hosted(projects);
         }
 
+        while let Ok(result) = feedback_rx.try_recv() {
+            app.finish_feedback(result);
+        }
+
         app.check_clipboard_result();
 
         // `/hosted` asking the control plane what is still up. Spawned like
@@ -719,6 +729,19 @@ async fn run_app(
                 let answered = backend::statuses(&endpoint, projects).await;
                 let _ = hosted_tx.send(answered).await;
             });
+        }
+
+        // `/feedback`: log first (so the message is on disk before the network
+        // can fail), then send fire-and-forget. Opted-out runs log only.
+        if let Some(message) = app.feedback_request.take() {
+            crate::feedback::log(&message);
+            if !crate::feedback::is_opted_out() {
+                let feedback_tx = feedback_tx.clone();
+                tokio::spawn(async move {
+                    let result = crate::feedback::send(&message, VERSION).await;
+                    let _ = feedback_tx.send(result).await;
+                });
+            }
         }
 
         // Work the deployment flow asked for. Spawned, never awaited inline:
