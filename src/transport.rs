@@ -130,6 +130,21 @@ struct SessionIdRequest {
     session_id: SessionId,
 }
 
+/// `session/recordings`: list what can be resumed for a workspace.
+#[derive(serde::Deserialize)]
+struct WorkspaceRequest {
+    cwd: String,
+}
+
+/// `session/resume`: a path from `session/recordings`, plus the workspace it
+/// must belong to. The workspace check is deliberate -- resuming a recording
+/// into a project it was never about would silently mix two histories.
+#[derive(serde::Deserialize)]
+struct ResumeSessionRequest {
+    cwd: String,
+    path: std::path::PathBuf,
+}
+
 /// A message sent to one session's own task.
 enum SessionMsg {
     Prompt {
@@ -559,6 +574,65 @@ impl Router {
         }
     }
 
+    /// Create one engine, wire it to this connection's hubs, register it, and
+    /// start its actor. Shared by `session/new` and `session/resume`; the
+    /// caller has already validated the workspace and any MCP configs, and
+    /// `restore` carries a recorded history when resuming.
+    async fn spawn_session(
+        &self,
+        workspace: Workspace,
+        mcp_configs: Vec<crate::mcp::McpServerConfig>,
+        restore: Option<Vec<crate::llm::ChatMessage>>,
+    ) -> SessionId {
+        let session_id = self.sessions.lock().await.allocate_id();
+        let channels = SessionChannels::new(session_id.clone());
+        // The creating connection is the first subscriber to every hub;
+        // attach adds another.
+        channels
+            .updates
+            .subscribe(self.outgoing_tx.clone())
+            .await;
+        channels
+            .approvals
+            .subscribe(self.permission_relay_tx.clone())
+            .await;
+        channels
+            .browser_checks
+            .subscribe(self.browser_relay_tx.clone())
+            .await;
+        channels
+            .browser_interactions
+            .subscribe(self.browser_interact_relay_tx.clone())
+            .await;
+        let mut session =
+            HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
+        if let Some(messages) = restore {
+            session.restore(messages);
+        }
+        let events = session.subscribe_events();
+        let cancel = session.cancel_handle();
+        let handle = SessionActor::spawn(session, channels.clone(), mcp_configs.clone());
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), handle, cancel, channels);
+        spawn_status_tracker(self.sessions.clone(), session_id.clone(), events);
+
+        // Configs are validated by the caller; the handshake itself happens in
+        // SessionActor::spawn, which calls session.connect_mcp() off the
+        // request path. That is deliberate: connecting takes seconds, so the
+        // response must not wait for the servers to be up.
+        if !mcp_configs.is_empty() {
+            tracing::info!(
+                target: "mcp",
+                session = %session_id.0,
+                count = mcp_configs.len(),
+                "mcp servers validated; connecting off the request path"
+            );
+        }
+        session_id
+    }
+
     /// Handles one classified incoming line, returning zero or more lines
     /// to write back immediately (a response to a request, or nothing for
     /// a notification/response). `session/prompt` is the one request whose
@@ -714,49 +788,7 @@ impl Router {
                 let mcp_configs = crate::mcp::parse_server_configs(&req.mcp_servers)
                     .map_err(|e| (-32602, format!("invalid mcpServers: {e}")))?;
 
-                let session_id = self.sessions.lock().await.allocate_id();
-                let channels = SessionChannels::new(session_id.clone());
-                // The creating connection is the first subscriber to every
-                // hub; attach adds another.
-                channels
-                    .updates
-                    .subscribe(self.outgoing_tx.clone())
-                    .await;
-                channels
-                    .approvals
-                    .subscribe(self.permission_relay_tx.clone())
-                    .await;
-                channels
-                    .browser_checks
-                    .subscribe(self.browser_relay_tx.clone())
-                    .await;
-                channels
-                    .browser_interactions
-                    .subscribe(self.browser_interact_relay_tx.clone())
-                    .await;
-                let session =
-                    HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
-                let events = session.subscribe_events();
-                let cancel = session.cancel_handle();
-                let handle = SessionActor::spawn(session, channels.clone(), mcp_configs.clone());
-                self.sessions
-                    .lock()
-                    .await
-                    .insert(session_id.clone(), handle, cancel, channels);
-                spawn_status_tracker(self.sessions.clone(), session_id.clone(), events);
-
-                // Configs are validated here; the handshake itself happens in
-                // SessionActor::spawn, which calls session.connect_mcp() off the
-                // request path. That is deliberate: connecting takes seconds, so
-                // session/new must reply before the servers are up.
-                if !mcp_configs.is_empty() {
-                    tracing::info!(
-                        target: "mcp",
-                        session = %session_id.0,
-                        count = mcp_configs.len(),
-                        "mcp servers validated; connecting off the request path"
-                    );
-                }
+                let session_id = self.spawn_session(workspace, mcp_configs, None).await;
 
                 Ok(serde_json::to_value(NewSessionResponse { session_id }).expect("serializes"))
             }
@@ -774,6 +806,30 @@ impl Router {
                     .map(|(id, status)| serde_json::json!({ "sessionId": id, "status": status }))
                     .collect();
                 Ok(serde_json::json!({ "sessions": sessions }))
+            }
+            // Custom (not ACP v1): the workspace's recorded conversations --
+            // the same files `/sessions` shows in the TUI, including headless
+            // conversations this server wrote (see `HeadlessSession::persist`).
+            // The cwd is canonicalized the same way `session/new` canonicalizes
+            // it, so the store lookup matches the header the engine wrote.
+            "session/recordings" => {
+                let req: WorkspaceRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let root = workspace.root().to_string_lossy().into_owned();
+                let recordings: Vec<serde_json::Value> = crate::session::list_for(&root)
+                    .into_iter()
+                    .map(|saved| {
+                        serde_json::json!({
+                            "path": saved.path,
+                            "stamp": saved.stamp as u64,
+                            "date": saved.date,
+                            "preview": saved.preview,
+                            "messages": saved.messages,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "recordings": recordings }))
             }
             // Custom: stop the turn and end the session's actor. Dropping the
             // handle closes the last command sender, which ends the actor once
@@ -821,6 +877,30 @@ impl Router {
                     .subscribe(self.browser_interact_relay_tx.clone())
                     .await;
                 Ok(serde_json::json!({}))
+            }
+            // Custom (not ACP v1): load a recording from `session/recordings`
+            // into a new live session. The recording is never appended to --
+            // `restore` rotates the log -- so resuming twice is safe.
+            "session/resume" => {
+                let req: ResumeSessionRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let root = workspace.root().to_string_lossy().into_owned();
+                let recorded_for = crate::session::workspace_of(&req.path)
+                    .ok_or_else(|| (-32002, "not a covexcode session recording".to_string()))?;
+                if recorded_for != root {
+                    return Err((
+                        -32002,
+                        "that recording belongs to another workspace".to_string(),
+                    ));
+                }
+                let messages = crate::session::load_chat(&req.path);
+                if messages.is_empty() {
+                    return Err((-32002, "that recording is empty or unreadable".to_string()));
+                }
+                let count = messages.len();
+                let session_id = self.spawn_session(workspace, Vec::new(), Some(messages)).await;
+                Ok(serde_json::json!({ "sessionId": session_id, "messages": count }))
             }
             "session/rollback" => {
                 let req: RollbackRequest = serde_json::from_value(params)
@@ -1912,6 +1992,178 @@ mod tests {
             .await
             .expect("attach answers with an error line");
         assert!(attach.contains("no such session"), "{attach}");
+    }
+
+    /// A recording listed by `session/recordings` can be resumed into a live
+    /// session, and the model actually receives the restored history on the
+    /// next prompt -- not just a session id that claims it has one.
+    #[tokio::test]
+    async fn a_recording_can_be_listed_resumed_and_used() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fake_home = tempfile::tempdir().expect("temp home");
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home.path());
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir
+            .path()
+            .canonicalize()
+            .expect("canonical")
+            .to_string_lossy()
+            .into_owned();
+        let mut log = crate::session::ChatLog::new(&root);
+        log.append(&[
+            crate::llm::ChatMessage::text("user", "earlier question"),
+            crate::llm::ChatMessage::text("assistant", "earlier answer"),
+        ]);
+        let recording = crate::session::latest_for(&root).expect("recorded");
+
+        // The model server captures the next request body, then answers, so
+        // the test can prove the restored messages went out on the wire.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if buf.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let _ = body_tx.send(String::from_utf8_lossy(&buf).to_string());
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                            Connection: close\r\n\r\n\
+                            data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                            data: [DONE]\n\n";
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+
+        let mut config = Config::default();
+        config.llm.endpoint = format!("http://{addr}");
+        config.llm.model = "test-model".to_string();
+        config.llm.api_key = "sk-test".to_string();
+        let (outgoing_tx, _outgoing_in) = mpsc::channel(64);
+        let mut router = Router::new(config, outgoing_tx);
+
+        let listed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "session/recordings",
+                "params": { "cwd": dir.path().display().to_string() }
+            })))
+            .await
+            .expect("session/recordings answers");
+        let listed: serde_json::Value = serde_json::from_str(listed.trim()).unwrap();
+        let recordings = listed["result"]["recordings"].as_array().unwrap();
+        assert_eq!(recordings.len(), 1);
+        assert_eq!(recordings[0]["preview"], "earlier question");
+        assert_eq!(recordings[0]["messages"], 2);
+
+        let resumed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "session/resume",
+                "params": {
+                    "cwd": dir.path().display().to_string(),
+                    "path": recording.display().to_string()
+                }
+            })))
+            .await
+            .expect("session/resume answers");
+        let resumed: serde_json::Value = serde_json::from_str(resumed.trim()).unwrap();
+        assert_eq!(resumed["result"]["sessionId"], "sess_1");
+        assert_eq!(resumed["result"]["messages"], 2);
+
+        let prompt_ack = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                "params": {
+                    "sessionId": "sess_1",
+                    "prompt": [{ "type": "text", "text": "follow up" }]
+                }
+            })))
+            .await;
+        assert_eq!(prompt_ack, None);
+
+        let body = body_rx.await.expect("the model request arrived");
+
+        router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 4, "method": "session/close",
+                "params": { "sessionId": "sess_1" }
+            })))
+            .await
+            .expect("session/close answers");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert!(body.contains("earlier question"), "{body}");
+        assert!(body.contains("earlier answer"), "{body}");
+        assert!(body.contains("follow up"), "{body}");
+    }
+
+    /// A recording from another project is refused rather than mixed in.
+    #[tokio::test]
+    async fn resuming_another_workspaces_recording_is_refused() {
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fake_home = tempfile::tempdir().expect("temp home");
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home.path());
+
+        let recorded_in = tempfile::tempdir().expect("recorded dir");
+        let requested = tempfile::tempdir().expect("requested dir");
+        let root = recorded_in
+            .path()
+            .canonicalize()
+            .expect("canonical")
+            .to_string_lossy()
+            .into_owned();
+        let mut log = crate::session::ChatLog::new(&root);
+        log.append(&[crate::llm::ChatMessage::text("user", "hi")]);
+        let recording = crate::session::latest_for(&root).expect("recorded");
+
+        let (outgoing_tx, _outgoing_in) = mpsc::channel(64);
+        let mut router = Router::new(Config::default(), outgoing_tx);
+        let refused = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "session/resume",
+                "params": {
+                    "cwd": requested.path().display().to_string(),
+                    "path": recording.display().to_string()
+                }
+            })))
+            .await
+            .expect("resume answers with an error line");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        assert!(refused.contains("another workspace"), "{refused}");
     }
 
     /// The engine's status events must reach the shared registry; that is what
