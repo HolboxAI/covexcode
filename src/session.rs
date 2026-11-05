@@ -219,6 +219,15 @@ fn chat_message(message: Message) -> Option<ChatMessage> {
     })
 }
 
+/// The workspace recorded in `path`'s header, if it is a session file. A
+/// resume uses it to refuse a recording from another project rather than
+/// loading it into a workspace it never belonged to.
+pub fn workspace_of(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let header = serde_json::from_str::<Header>(content.lines().next()?).ok()?;
+    Some(header.workspace)
+}
+
 /// The newest session file recorded for this workspace, if any.
 pub fn latest_for(workspace: &str) -> Option<PathBuf> {
     let dir = sessions_dir()?;

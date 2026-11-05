@@ -565,6 +565,13 @@ pub struct HeadlessSession {
     /// boundaries so a completed turn survives a restart even though ACP
     /// clients have no other persistence of their own.
     log: crate::session::ChatLog,
+    /// Tests share one process-global `$HOME`, and most engine tests do not
+    /// isolate it; writing every turn into the developer's real session
+    /// directory would pollute it (or another test's temporary home). Off by
+    /// default under `cfg(test)`; the one test that verifies the file opts in
+    /// with `allow_persistence_for_test`. Production always writes.
+    #[cfg(test)]
+    test_persist: bool,
     /// Transport-agnostic event fan-out. The ACP transport keeps using
     /// `SessionUpdate`; any number of TUI/daemon subscribers can observe the
     /// same session without changing the ACP path.
@@ -601,6 +608,8 @@ impl HeadlessSession {
             last_prompt_tokens: None,
             rollback: crate::rollback::Journal::default(),
             log,
+            #[cfg(test)]
+            test_persist: false,
             mcp: crate::mcp::McpRegistry::default(),
             events: EventHub::default(),
             cancel: CancelHandle::default(),
@@ -642,6 +651,30 @@ impl HeadlessSession {
     /// the seam a TUI or a session manager uses; the ACP path is unchanged.
     pub fn subscribe_events(&self) -> mpsc::UnboundedReceiver<SessionEvent> {
         self.events.subscribe()
+    }
+
+    /// Replace this session's conversation with a recorded one (see
+    /// `session::load_chat`). Called once, before the session is served.
+    ///
+    /// Turn boundaries are rebuilt the same way `App::resume_path` rebuilds
+    /// them: every `user` message starts a turn. A browser screenshot note is
+    /// also a `user` message, so a resumed session may count one extra turn
+    /// per screenshot -- a rollback still lands on a user-message boundary,
+    /// just possibly a synthetic one.
+    ///
+    /// The log rotates: the recording being read is never appended to, so
+    /// resuming a session and then changing your mind still leaves the
+    /// original intact.
+    pub fn restore(&mut self, messages: Vec<ChatMessage>) {
+        self.turn_starts = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role == "user")
+            .map(|(index, _)| index)
+            .collect();
+        self.turn = self.turn_starts.len() as u64;
+        self.messages = messages;
+        self.log.reset();
     }
 
     fn emit(&self, event: SessionEvent) {
@@ -725,7 +758,16 @@ impl HeadlessSession {
     /// round boundaries, so a crash leaves at most the in-flight round
     /// unwritten, and a completed turn is always on disk.
     fn persist(&mut self) {
+        #[cfg(test)]
+        if !self.test_persist {
+            return;
+        }
         self.log.append(&self.messages);
+    }
+
+    #[cfg(test)]
+    fn allow_persistence_for_test(&mut self) {
+        self.test_persist = true;
     }
 
     fn finish_turn(&self, reason: StopReason) -> StopReason {
@@ -2705,6 +2747,7 @@ mod tests {
         let endpoint = serve_rounds(vec![text_round("Hello!")]).await;
         let config = config_for(&endpoint);
         let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        session.allow_persistence_for_test();
         let (updates_tx, _updates_rx) = mpsc::channel(16);
         let (permissions_tx, _permissions_rx) = mpsc::channel(16);
         let (browser_tx, _browser_rx) = mpsc::channel(16);
@@ -2736,6 +2779,25 @@ mod tests {
         assert_eq!(recorded[0].content.as_deref(), Some("hi"));
         assert_eq!(recorded[1].role, "assistant");
         assert_eq!(recorded[1].content.as_deref(), Some("Hello!"));
+    }
+
+    /// Restoring a recording replaces the history and rebuilds turn
+    /// boundaries the same way `App::resume_path` does.
+    #[test]
+    fn restore_rebuilds_turn_boundaries_from_user_messages() {
+        let (_dir, ws) = workspace();
+        let config = config_for("http://127.0.0.1:1");
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        session.restore(vec![
+            ChatMessage::text("user", "one"),
+            ChatMessage::text("assistant", "a"),
+            ChatMessage::text("user", "two"),
+            ChatMessage::text("assistant", "b"),
+        ]);
+
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(session.turn, 2);
+        assert_eq!(session.turn_starts, vec![0, 2]);
     }
 
     /// Multiple clients can watch the same session: every subscriber gets its
