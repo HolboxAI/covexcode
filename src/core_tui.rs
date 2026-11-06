@@ -3,12 +3,12 @@
 //!
 //! Enabled by `COVEXCODE_CORE_SESSION=1`. Deliberately partial in this first
 //! slice: the engine owns the turn, so text, tool results, usage and approval
-//! prompts are real and stream in normally, and `/new`, `/compact`, `/resume`,
-//! `/sessions` and startup `--resume` are mirrored into the engine. The one
-//! TUI surface not wired yet:
+//! prompts are real and stream in normally, and `/new`, `/compact`,
+//! `/rollback`, `/resume`, `/sessions` and startup `--resume` are mirrored
+//! into the engine. The one TUI surface not wired yet:
 //!
-//! - `/rollback` is refused with a note: the engine keeps its own journal and
-//!   the TUI cannot see it.
+//! - `/diff` reads App's own journal, which the engine fills instead, so it
+//!   reports no changes in this mode.
 //!
 //! The old path stays the default and is untouched; with the variable unset
 //! nothing in this module runs.
@@ -122,6 +122,22 @@ impl CoreTui {
     pub fn restore(&mut self, app: &mut App, messages: Vec<crate::llm::ChatMessage>) {
         self.cancel(app);
         let _ = self.client.restore(messages);
+    }
+
+    /// The engine's rollback journal, for the TUI's confirmation dialog.
+    pub async fn list_changes(&self) -> Option<crate::protocol::ListChangesResponse> {
+        self.client.list_changes().await
+    }
+
+    /// Apply the confirmed `/rollback` filter through the engine. `Some(turn)`
+    /// restores to before that query; `None` undoes every change.
+    pub async fn rollback(
+        &self,
+        target_turn: Option<u64>,
+    ) -> Option<crate::protocol::RollbackResponse> {
+        self.client
+            .rollback(target_turn.filter(|turn| *turn > 0))
+            .await
     }
 
     /// Start the turn `App::submit` queued. A no-op unless the app is in

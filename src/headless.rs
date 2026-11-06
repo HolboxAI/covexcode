@@ -833,6 +833,10 @@ impl HeadlessSession {
         self.turn
     }
 
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
     /// Handles one `session/prompt`: appends the user's message, then runs
     /// rounds of fire-stream-decide-execute until the model answers with no
     /// further tool calls or a hard stop condition is hit. Blocks until

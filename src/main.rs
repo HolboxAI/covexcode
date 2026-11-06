@@ -372,8 +372,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         workspace.as_ref().map(|ws| {
             app.startup_notices.push(
                 "Core-session mode (experimental): the engine owns the turn, approvals, /new, \
-                 /compact and resuming (/resume, /sessions, --resume); /rollback is not \
-                 available in this mode yet."
+                 /compact, /rollback and resuming (/resume, /sessions, --resume); /diff still \
+                 reads the TUI's journal."
                     .to_string(),
             );
             // The engine gets the same recording App just loaded (if any),
@@ -925,6 +925,25 @@ async fn run_app(
             }
         }
 
+        // `/rollback` in core mode: the engine owns the journal, so ask it
+        // for the undo plan and show the same confirmation dialog App's own
+        // journal would produce. The request is answered on a later tick,
+        // after the user confirms.
+        if let Some(target) = app.core_rollback_query.take() {
+            if let Some(core) = core.as_mut() {
+                match core.list_changes().await {
+                    Some(changes) => app.show_core_rollback(
+                        (target > 0).then_some(target),
+                        changes.changes,
+                        changes.shell_warning,
+                    ),
+                    None => app.note(
+                        "The engine session is gone; the undo plan is unavailable.".to_string(),
+                    ),
+                }
+            }
+        }
+
         // `/rollback`, once the user has said yes to it. Here rather than in
         // `App` for the same reason the plan file and the usage log are:
         // `App` performs no I/O, which is what lets its tests run without a
@@ -934,7 +953,15 @@ async fn run_app(
         // whatever the next turn does.
         if let Some(steps) = app.rollback_request.take() {
             let target_turn = app.pending_rollback_query.take();
-            app.finish_query_rollback(rollback::apply(&steps), target_turn);
+            match core.as_mut() {
+                Some(core) => match core.rollback(target_turn).await {
+                    Some(response) => app.finish_core_rollback(response.summary, target_turn),
+                    None => app.note(
+                        "The engine session is gone; nothing was rolled back.".to_string(),
+                    ),
+                },
+                None => app.finish_query_rollback(rollback::apply(&steps), target_turn),
+            }
         }
 
         // The agent loop's two active steps: fire the request `App` queued,

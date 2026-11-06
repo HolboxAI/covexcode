@@ -649,6 +649,11 @@ pub struct App {
     /// not moved yet consult it, to say so instead of acting on a journal the
     /// engine owns.
     pub core_session: bool,
+    /// `/rollback` in core mode: the turn filter to ask the engine about
+    /// (`0` = every change, otherwise "restore to before this turn").
+    /// `main.rs` fetches the engine's journal and calls
+    /// [`App::show_core_rollback`], then applies the confirmed filter.
+    pub core_rollback_query: Option<u64>,
     /// How many of `messages` have already been printed into the terminal's own
     /// scrollback. Everything below this index is the terminal's to keep and
     /// must never be drawn again; everything at or above it still belongs to
@@ -927,6 +932,7 @@ impl App {
             core_decision: None,
             pending_resume: None,
             core_session: false,
+            core_rollback_query: None,
             flushed: 0,
             welcome_flushed: false,
             stream_printed: 0,
@@ -3138,14 +3144,6 @@ impl App {
     }
 
     pub fn start_rollback_command(&mut self, cmd: &str) {
-        if self.core_session {
-            self.messages.push(Message::new(
-                Role::System,
-                "Rollback is not available in core-session mode yet -- the engine keeps its \
-                 own rollback journal, and this TUI cannot see it.",
-            ));
-            return;
-        }
         if self.state != AppState::AwaitingInput {
             self.messages.push(Message::new(
                 Role::System,
@@ -3213,6 +3211,13 @@ impl App {
             return;
         }
 
+        // The engine owns the journal in core mode; `main.rs` asks it for
+        // the entries and builds the same confirmation dialog.
+        if self.core_session {
+            self.core_rollback_query = Some(target_turn);
+            return;
+        }
+
         let steps = self.rollback.plan_before_turn(target_turn);
         let warning = self.rollback.shell_warning();
         let prompt_snippet = self.turn_prompts.get((target_turn - 1) as usize).cloned();
@@ -3245,6 +3250,64 @@ impl App {
         });
     }
 
+    /// Put the engine's undo plan on screen. `target_turn` is `Some(N)` for
+    /// "restore to before query N" and `None` for undoing every change.
+    /// The steps are display-only in core mode: the engine resolves paths and
+    /// applies the undo itself.
+    pub fn show_core_rollback(
+        &mut self,
+        target_turn: Option<u64>,
+        changes: Vec<crate::protocol::ChangeEntry>,
+        warning: Option<String>,
+    ) {
+        self.follow_tail = true;
+        let steps: Vec<crate::rollback::Step> = changes
+            .into_iter()
+            .filter(|entry| match target_turn {
+                Some(turn) => entry.turn == 0 || entry.turn >= turn,
+                None => true,
+            })
+            .map(|entry| crate::rollback::Step {
+                display: entry.path.clone(),
+                path: std::path::PathBuf::from(&entry.path),
+                touches: entry.touches,
+                turn: entry.turn,
+                action: match entry.action.as_str() {
+                    "restore" => crate::rollback::Action::Restore(String::new()),
+                    "delete" => crate::rollback::Action::Delete,
+                    _ => crate::rollback::Action::Blocked(
+                        entry.reason.unwrap_or_else(|| "cannot undo".to_string()),
+                    ),
+                },
+            })
+            .collect();
+
+        if steps.is_empty() {
+            let mut text = match target_turn {
+                Some(turn) => format!("No files to roll back before Query {turn}."),
+                None => {
+                    "Nothing to roll back — no file has been written or edited this session."
+                        .to_string()
+                }
+            };
+            if let Some(warning) = &warning {
+                text.push_str(&format!("\n\n{warning}"));
+            }
+            self.messages.push(Message::new(Role::System, text));
+            return;
+        }
+
+        let prompt_snippet = target_turn
+            .and_then(|turn| self.turn_prompts.get((turn - 1) as usize).cloned());
+        self.overlay = Some(Overlay::RollbackConfirm {
+            target_turn,
+            prompt_snippet,
+            steps,
+            warning,
+            confirmed: false,
+        });
+    }
+
     fn start_rollback(&mut self) {
         self.follow_tail = true;
 
@@ -3257,6 +3320,10 @@ impl App {
             return;
         }
 
+        if self.core_session {
+            self.core_rollback_query = Some(0);
+            return;
+        }
         if self.rollback.is_empty() {
             let mut text =
                 "Nothing to roll back — no file has been written or edited this session."
@@ -3452,6 +3519,41 @@ impl App {
                 .push(Message::new(Role::System, report.summary()));
             self.messages
                 .push(Message::new(Role::Context, report.notice()));
+        }
+    }
+
+    /// Complete a rollback the engine performed: the engine already applied
+    /// the files and cut its own history, so this mirrors the transcript cut
+    /// and shows the engine's summary.
+    pub fn finish_core_rollback(&mut self, summary: String, target_turn: Option<u64>) {
+        self.follow_tail = true;
+        if let Some(turn) = target_turn {
+            let turn_idx = (turn as usize).saturating_sub(1);
+            if turn_idx < self.turn_starts.len() {
+                let cutoff = self.turn_starts[turn_idx];
+                let rolled_back_prompt = self.turn_prompts.get(turn_idx).cloned();
+                self.messages.truncate(cutoff);
+                self.turn_starts.truncate(turn_idx);
+                self.turn_prompts.truncate(turn_idx);
+                self.turn = (turn - 1).min(self.turn);
+                if let Some(prompt) = rolled_back_prompt {
+                    self.input_buffer = prompt;
+                    self.cursor = self.input_buffer.chars().count();
+                }
+            } else {
+                self.turn = (turn - 1).min(self.turn);
+            }
+            self.rollback.prune_after_turn(turn);
+            self.session_reset = true;
+            self.flushed = 0;
+            self.scroll = 0;
+            self.messages.push(Message::new(
+                Role::System,
+                format!("Rolled back to before Query {turn}. {summary}"),
+            ));
+        } else {
+            self.rollback.clear();
+            self.messages.push(Message::new(Role::System, summary));
         }
     }
 
@@ -12624,13 +12726,107 @@ mod tests {
     }
 
     #[test]
-    fn rollback_in_core_session_mode_explains_itself() {
+    fn core_session_rollback_asks_the_engine_for_the_journal() {
         let mut a = app();
         a.core_session = true;
+        a.turn = 2;
+        a.turn_prompts = vec!["one".to_string(), "two".to_string()];
+
+        a.start_rollback_for_turn(2);
+
+        assert_eq!(a.core_rollback_query, Some(2));
+        assert!(a.overlay.is_none(), "main.rs asks the engine first");
+
+        a.core_rollback_query = None;
+        a.turn = 0;
         a.start_rollback_command("/rollback");
-        let last = a.messages.last().expect("a note");
-        assert!(last.content.contains("not available"), "{}", last.content);
-        assert!(last.content.contains("core-session"), "{}", last.content);
+        assert_eq!(a.core_rollback_query, Some(0), "all changes");
+    }
+
+    #[test]
+    fn show_core_rollback_builds_the_confirmation_from_engine_entries() {
+        let mut a = app();
+        a.turn = 2;
+        a.turn_prompts = vec!["one".to_string(), "two".to_string()];
+
+        a.show_core_rollback(
+            Some(2),
+            vec![
+                crate::protocol::ChangeEntry {
+                    path: "old.txt".to_string(),
+                    turn: 1,
+                    touches: 1,
+                    action: "restore".to_string(),
+                    reason: None,
+                },
+                crate::protocol::ChangeEntry {
+                    path: "new.txt".to_string(),
+                    turn: 2,
+                    touches: 2,
+                    action: "delete".to_string(),
+                    reason: None,
+                },
+            ],
+            Some("a shell command ran".to_string()),
+        );
+
+        match &a.overlay {
+            Some(Overlay::RollbackConfirm {
+                target_turn,
+                prompt_snippet,
+                steps,
+                warning,
+                ..
+            }) => {
+                assert_eq!(*target_turn, Some(2));
+                assert_eq!(prompt_snippet.as_deref(), Some("two"));
+                assert_eq!(steps.len(), 1, "turn 1 was filtered out");
+                assert_eq!(steps[0].display, "new.txt");
+                assert!(matches!(
+                    &steps[0].action,
+                    crate::rollback::Action::Delete
+                ));
+                assert_eq!(warning.as_deref(), Some("a shell command ran"));
+            }
+            other => panic!("expected RollbackConfirm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn show_core_rollback_with_no_changes_says_so() {
+        let mut a = app();
+        a.show_core_rollback(None, Vec::new(), None);
+        assert!(a.overlay.is_none());
+        assert!(a
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Nothing to roll back"));
+    }
+
+    #[test]
+    fn finish_core_rollback_mirrors_the_engine_transcript_cut() {
+        let mut a = app();
+        a.messages = vec![
+            Message::new(Role::User, "one"),
+            Message::new(Role::Assistant, "a"),
+            Message::new(Role::User, "two"),
+            Message::new(Role::Assistant, "b"),
+        ];
+        a.turn = 2;
+        a.turn_starts = vec![0, 2];
+        a.turn_prompts = vec!["one".to_string(), "two".to_string()];
+
+        a.finish_core_rollback("restored 1 file".to_string(), Some(2));
+
+        assert_eq!(a.turn, 1);
+        assert_eq!(a.input_buffer, "two", "the prompt comes back");
+        assert!(a.session_reset);
+        assert_eq!(a.messages.len(), 3, "cutoff plus the summary note");
+        let last = a.messages.last().unwrap();
+        assert!(last.content.contains("Rolled back to before Query 2"));
+        assert!(last.content.contains("restored 1 file"));
     }
 
     #[test]
