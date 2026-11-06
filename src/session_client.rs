@@ -64,6 +64,11 @@ enum ClientMsg {
     ChangeSteps {
         respond: oneshot::Sender<Vec<crate::rollback::Step>>,
     },
+    /// `/provider` / `/model`: future turns use this config.
+    UpdateConfig {
+        config: Config,
+        respond: oneshot::Sender<()>,
+    },
 }
 
 /// A frontend's handle to one running engine. Dropping it ends the actor
@@ -140,6 +145,10 @@ impl EngineClient {
                     }
                     ClientMsg::ChangeSteps { respond } => {
                         let _ = respond.send(session.changes());
+                    }
+                    ClientMsg::UpdateConfig { config, respond } => {
+                        session.update_config(config);
+                        let _ = respond.send(());
                     }
                 }
             }
@@ -255,6 +264,22 @@ impl EngineClient {
             .await
             .ok()?;
         receive.await.ok()
+    }
+
+    /// Replace the config future turns use (`/provider`, `/model`, login).
+    /// Ordered with prompts on the same channel, so a switch made before a
+    /// prompt applies to that prompt.
+    pub async fn update_config(&self, config: Config) -> bool {
+        let (respond, receive) = oneshot::channel();
+        if self
+            .commands
+            .send(ClientMsg::UpdateConfig { config, respond })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        receive.await.is_ok()
     }
 }
 
@@ -690,5 +715,23 @@ mod tests {
             .expect("the journal answered")
             .changes
             .is_empty());
+    }
+
+    /// A provider/model switch reaches the running engine: the very next
+    /// request goes to the new model.
+    #[tokio::test]
+    async fn a_config_update_changes_the_model_the_next_prompt_uses() {
+        let (_dir, ws) = workspace();
+        let (endpoint, mut bodies) = serve_rounds_capturing(vec![text_round("ok")]).await;
+        let SpawnedSession { client, .. } = EngineClient::spawn(ws, config_for(&endpoint));
+
+        let mut updated = config_for(&endpoint);
+        updated.llm.model = "switched-model".to_string();
+        assert!(client.update_config(updated).await);
+
+        let stop = client.prompt("hi", Vec::new(), None).await;
+        assert_eq!(stop, Some(StopReason::EndTurn));
+        let body = bodies.recv().await.expect("the request");
+        assert!(body.contains("switched-model"), "{body}");
     }
 }

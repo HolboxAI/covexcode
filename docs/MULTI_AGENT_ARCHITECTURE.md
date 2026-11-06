@@ -19,10 +19,10 @@ Landed on `main`:
   its serializable control surface. The TUI still runs its own `App` loop by
   default; `COVEXCODE_CORE_SESSION=1` opts into driving it through the engine
   (`session_client` + `core_tui`) for streaming text, tool results, usage,
-  cancel, approval prompts, `/new`, `/compact`, `/rollback`, `/diff`, and
-  resuming (`/resume`, `/sessions`, startup `--resume`); `/subagents` and
-  mid-session `/provider`/`/model` changes are still one-sided -- closing those
-  closes Phase 1.
+  cancel, approval prompts, `/new`, `/compact`, `/rollback`, `/diff`,
+  `/provider`/`/model` switches, and resuming (`/resume`, `/sessions`,
+  startup `--resume`); `/subagents` still shows only App's trail list --
+  closing that closes Phase 1.
 - **Phase 2**: a `SessionRegistry` with one actor per session, shared by every
   connection a `--listen` process accepts. `session/list`, `session/attach`,
   `session/close` and `session/cancel` work across connections, status changes

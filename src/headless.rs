@@ -693,6 +693,14 @@ impl HeadlessSession {
         self.log.reset();
     }
 
+    /// Replace the config future turns use. A frontend that lets the user
+    /// switch provider or model mid-conversation calls this so the engine
+    /// stops sending to the endpoint it was started with. Workspace, session
+    /// id, history and the session log are untouched.
+    pub fn update_config(&mut self, config: Config) {
+        self.config = config;
+    }
+
     fn emit(&self, event: SessionEvent) {
         self.events.send(event);
     }
