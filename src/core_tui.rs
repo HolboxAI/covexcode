@@ -605,7 +605,7 @@ mod tests {
         let (_dir, mut core, mut app) = core_with_workspace();
         core.apply(&mut app, approval_event(7, None));
 
-        app.decide(crate::approval::Decision::Allowed);
+        app.decide(crate::approval::Decision::Allow);
 
         assert_eq!(app.core_decision, Some((7, true)));
         assert_eq!(app.core_approval, None, "the prompt closes on answer");
@@ -620,7 +620,7 @@ mod tests {
         let (_dir, mut core, mut app) = core_with_workspace();
         core.apply(&mut app, approval_event(7, None));
 
-        app.decide(crate::approval::Decision::Refused);
+        app.decide(crate::approval::Decision::Deny);
 
         assert_eq!(app.core_decision, Some((7, false)));
         core.answer_queued_decision(&mut app);
@@ -718,7 +718,7 @@ mod tests {
                 core.answer_queued_decision(&mut app);
                 if !answered && app.state == AppState::AwaitingApproval {
                     answered = true;
-                    app.decide(crate::approval::Decision::Allowed);
+                    app.decide(crate::approval::Decision::Allow);
                     core.answer_queued_decision(&mut app);
                 }
                 if answered && !core.active {

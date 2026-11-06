@@ -100,6 +100,15 @@ fn device_id() -> Option<String> {
     Some(id)
 }
 
+/// The same anonymous per-install id the ping bodies carry, exposed for
+/// `/feedback` so its payload can reuse the machine label instead of inventing
+/// a second one. Reads (and, on first use, creates) the same `device_id` file.
+/// Not telemetry itself -- the feedback opt-out is judged separately in
+/// `feedback.rs` -- so this must not be gated on `telemetry_url()`.
+pub fn anon_id() -> Option<String> {
+    device_id()
+}
+
 /// 128 bits as hex. Not cryptographically secured, and doesn't need to be --
 /// this only ever labels an anonymous count, never protects anything.
 fn random_id() -> String {

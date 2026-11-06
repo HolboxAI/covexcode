@@ -29,7 +29,7 @@ jobs:
   # inlined into create-release) so `build` can be skipped outright via
   # `if:` when there is nothing to release.
   determine-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
       tag: ${{ steps.check.outputs.tag }}
@@ -86,7 +86,7 @@ jobs:
 
   create-release:
     name: Create Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [determine-version, build]
     if: needs.determine-version.outputs.should_release == 'true'
     steps:

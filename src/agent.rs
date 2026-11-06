@@ -450,6 +450,9 @@ mod tests {
     /// tool call, with the file's contents nowhere in it.
     #[tokio::test]
     async fn a_subagent_researches_then_reports_only_its_final_message() {
+        // A turn records usage, so this must not run against the real config
+        // directory -- see `IsolatedHome`.
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws) = workspace_with_hello();
         let (endpoint, requests) = serve_rounds(vec![
             tool_call_round(tools::READ_FILE, r#"{"path":"hello.txt"}"#),
@@ -556,6 +559,7 @@ mod tests {
     /// reaching disk or a prompt.
     #[tokio::test]
     async fn a_subagent_write_is_refused_and_the_child_carries_on() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         let (dir, ws) = workspace_with_hello();
         let (endpoint, requests) = serve_rounds(vec![
             tool_call_round(tools::WRITE_FILE, r#"{"path":"notes.md","content":"hi"}"#),
@@ -588,6 +592,7 @@ mod tests {
     /// spelled out, because a bare "no" gets retried.
     #[tokio::test]
     async fn an_unknown_agent_type_is_refused_with_directions() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws) = workspace_with_hello();
         let config = config_for("http://127.0.0.1:9"); // never contacted
         let outcome = run_subagent(
@@ -603,6 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn unparseable_arguments_are_reported_not_run() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws) = workspace_with_hello();
         let config = config_for("http://127.0.0.1:9"); // never contacted
         let mut call = agent_call(json!({}));
@@ -617,6 +623,7 @@ mod tests {
     /// stale-id guard and the trail bookkeeping both work unchanged.
     #[tokio::test]
     async fn a_subagent_reports_each_step_while_it_works() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws) = workspace_with_hello();
         let (endpoint, _requests) = serve_rounds(vec![
             tool_call_round(tools::READ_FILE, r#"{"path":"hello.txt"}"#),
@@ -671,6 +678,7 @@ mod tests {
     /// for.
     #[tokio::test]
     async fn a_spent_budget_forces_the_report() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws) = workspace_with_hello();
         let (endpoint, requests) = serve_rounds(vec![
             tool_call_round(tools::READ_FILE, r#"{"path":"hello.txt"}"#),

@@ -5288,10 +5288,40 @@ pub fn declined(call: &ToolCall) -> ToolOutcome {
         .unwrap_or_else(|| call.function.name.clone());
     outcome(
         &call.id,
-        format!("{} — declined", clip_label(&label, 60)),
+        format!("✗ {} — rejected", clip_label(&label, 60)),
         "The user declined to let this happen. Do not try it again; take a different \
          approach or answer without it."
             .to_string(),
+    )
+}
+
+/// The result when the user said no *and* said why.
+///
+/// The reason is passed through verbatim rather than paraphrased, summarised or
+/// trimmed to a sentence: it is the only thing in this whole exchange the model
+/// could not have worked out for itself, and any rewriting here would be the
+/// assistant guessing at what the person meant. It is fenced in quotes so a
+/// long or oddly-punctuated reason cannot read as an instruction from the tool
+/// itself rather than as the user's words.
+///
+/// "Do not retry the same action" is in the same spirit as the plain refusal's
+/// wording but is not identical: a reason means there is something to adjust
+/// *to*, so the model is pointed at that rather than merely stopped.
+pub fn declined_with_reason(call: &ToolCall, reason: &str) -> ToolOutcome {
+    let label = describe_action(call)
+        .map(|a| a.label())
+        .unwrap_or_else(|| call.function.name.clone());
+    outcome(
+        &call.id,
+        format!(
+            "✗ {} — rejected: \"{}\"",
+            clip_label(&label, 60),
+            clip_label(reason, 60)
+        ),
+        format!(
+            "User rejected this. Reason: {reason}. Do not retry the same action; adjust your \
+             approach or ask the user how to proceed."
+        ),
     )
 }
 
@@ -5456,16 +5486,48 @@ pub fn todos_recorded(call: &ToolCall, items: &[TodoItem]) -> ToolOutcome {
 /// and the model is told so explicitly -- otherwise its next move is a write
 /// that gets refused.
 pub fn plan_declined(call: &ToolCall) -> ToolOutcome {
+    plan_declined_inner(call, None)
+}
+
+/// A rejected plan, with the reason the user gave for rejecting it.
+///
+/// The model is still told it is in plan mode -- that part is not negotiable and
+/// a reason does not change it. What the reason changes is that the model now
+/// knows which part of the plan was wrong, which is the difference between a
+/// round spent revising and a round spent guessing.
+pub fn plan_declined_with_reason(call: &ToolCall, reason: &str) -> ToolOutcome {
+    plan_declined_inner(call, Some(reason))
+}
+
+fn plan_declined_inner(call: &ToolCall, reason: Option<&str>) -> ToolOutcome {
+    // The no-reason branch is the exact string this function has always
+    // returned: a plain refusal has to behave and read identically to before,
+    // and "they will usually say what was wrong with it" is about the user's
+    // *next* message, which a reason in this very result would contradict.
+    let content = match reason {
+        None => "The user did not approve this plan. You are still in plan mode and still \
+                 cannot change anything. They will usually say what was wrong with it: read \
+                 that, investigate further if you need to, and propose a revised plan with \
+                 {EXIT_PLAN_MODE}. Do not send the same plan again, and do not attempt to \
+                 implement it."
+            .to_string(),
+        Some(reason) => format!(
+            "The user did not approve this plan. You are still in plan mode and still cannot \
+             change anything. Reason: {reason}. Read that, investigate further if you need \
+             to, and propose a revised plan with {EXIT_PLAN_MODE}. Do not send the same plan \
+             again, and do not attempt to implement it."
+        ),
+    };
     outcome(
         &call.id,
-        "plan declined — still planning".to_string(),
-        format!(
-            "The user did not approve this plan. You are still in plan mode and still cannot \
-             change anything. They will usually say what was wrong with it: read that, \
-             investigate further if you need to, and propose a revised plan with \
-             {EXIT_PLAN_MODE}. Do not send the same plan again, and do not attempt to \
-             implement it."
-        ),
+        match reason {
+            Some(reason) => format!(
+                "✗ plan — rejected: \"{}\"",
+                clip_label(reason, 60)
+            ),
+            None => "✗ plan — rejected".to_string(),
+        },
+        content,
     )
 }
 

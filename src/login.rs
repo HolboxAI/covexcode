@@ -2,11 +2,30 @@
 
 use crate::config::Config;
 use serde::Deserialize;
-use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
 const DEFAULT_AUTH_BASE: &str = "https://covexcode.com";
+
+/// How long any one request may take.
+///
+/// Bounded on purpose: the TUI stands down for the whole of `login()` -- raw
+/// mode off, nothing drawn, nothing reading the keyboard -- so a request that
+/// never answers leaves the user in a terminal that looks hung, with the only
+/// way out being to kill the process.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the device-code wait may last in total.
+///
+/// The code expires server-side and says so (see the `GONE` and `expired`
+/// answers in `login()`), but a server that goes quiet must not hold the
+/// terminal hostage either way.
+const MAX_WAIT: Duration = Duration::from_secs(300);
+
+fn http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build()
+}
 
 fn is_promo_proxy(endpoint: &str) -> bool {
     let e = endpoint.to_lowercase();
@@ -29,6 +48,25 @@ fn covexcode_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".covexcode")
+}
+
+/// Appends a log line to ~/.covexcode/covexcode.log.
+pub fn log_to_covexcode(msg: &str) {
+    let dir = covexcode_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("covexcode.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{secs}] {msg}");
+    }
 }
 
 fn account_token_path() -> PathBuf {
@@ -147,26 +185,64 @@ struct PollResponse {
     error: Option<String>,
 }
 
-fn open_browser(url: &str) {
+/// The command that hands `url` to the desktop's default browser, or `None` on
+/// a platform with no such convention.
+fn browser_command(url: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(url).status();
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg(url);
+        Some(cmd)
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open").arg(url).status();
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(url);
+        Some(cmd)
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .status();
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", "", url]);
+        Some(cmd)
     }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = url;
+        None
+    }
+}
+
+/// Open the browser, without letting it near this terminal.
+///
+/// Detached, not waited on: `open` blocks until the handler exits on some
+/// systems, and this is called from the event loop while the whole UI is stood
+/// down. Both streams go to `/dev/null` -- inherited ones would print the
+/// browser's own chatter into a terminal this app is about to redraw on, which
+/// is half of what made `/login` leave a mess behind.
+fn open_browser(url: &str) {
+    let Some(mut command) = browser_command(url) else {
+        return;
+    };
+    // Reaped on its own thread so a handler that keeps running does not leave a
+    // zombie for the rest of the session.
+    if let Ok(mut child) = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+    // A browser that will not open is not worth failing the login over: the URL
+    // is printed above, so the worst case is opening it by hand.
 }
 
 pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
     let base = auth_base();
-    let client = reqwest::Client::new();
+    let client = http_client()?;
 
     let start: StartResponse = client
         .post(format!("{base}/api/auth/device/start"))
@@ -180,21 +256,19 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
         .verification_uri_complete
         .unwrap_or_else(|| format!("{}?code={}", start.verification_uri, start.user_code));
 
-    println!("covexcode login");
-    println!();
-    println!("  Opening the browser to authorize this device…");
-    println!();
-    println!("Sign in with Google if asked, then click Authorize.");
-    println!("Return here when the browser says you're connected.");
-    print!("Waiting");
-    let _ = io::stdout().flush();
+    log_to_covexcode("covexcode login: opening browser for device authorization");
     open_browser(&verify);
 
     let interval = Duration::from_secs(start.interval.unwrap_or(2).max(1));
+    // Bounded even though the code itself expires: see `MAX_WAIT`.
+    let deadline = tokio::time::Instant::now() + MAX_WAIT;
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                "timed out waiting for the browser to authorize -- run /login again".into(),
+            );
+        }
         tokio::time::sleep(interval).await;
-        print!(".");
-        let _ = io::stdout().flush();
 
         let res = client
             .post(format!("{base}/api/auth/device/poll"))
@@ -203,13 +277,11 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
 
         if res.status() == reqwest::StatusCode::GONE {
-            println!();
             return Err("device code expired — run covexcode login again".into());
         }
 
         let body: PollResponse = res.json().await?;
         if body.api_key.is_some() {
-            println!();
             let mut config = Config::load().unwrap_or_default();
             if let Some(endpoint) = body.endpoint {
                 config.llm.endpoint = endpoint.trim_end_matches('/').to_string();
@@ -239,13 +311,10 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
                 write_account_email(email);
             }
 
-            println!(
+            log_to_covexcode(&format!(
                 "✓ Signed in as {}. Credentials saved to ~/.covexcode/config.toml",
                 body.email.unwrap_or_else(|| "you".into())
-            );
-            println!("  Endpoint: {}", config.llm.endpoint);
-            println!("  Model:    {}", config.llm.model);
-            println!("  IDE uses the same config file.");
+            ));
             // Immediate heartbeat so DAU counts this login.
             heartbeat_once().await;
             return Ok(());
@@ -254,12 +323,10 @@ pub async fn login() -> Result<(), Box<dyn std::error::Error>> {
         match body.status.as_deref() {
             Some("pending") | None => continue,
             Some("expired") => {
-                println!();
                 return Err("device code expired — run covexcode login again".into());
             }
             _ => {
                 if let Some(err) = body.error {
-                    println!();
                     return Err(err.into());
                 }
                 continue;
@@ -306,7 +373,9 @@ pub async fn heartbeat_once() {
         return;
     }
     let base = auth_base();
-    let client = reqwest::Client::new();
+    let Ok(client) = http_client() else {
+        return;
+    };
     let _ = client
         .post(format!("{base}/api/heartbeat"))
         .bearer_auth(token)

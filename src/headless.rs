@@ -2012,7 +2012,7 @@ impl HeadlessSession {
 
         let decision: Decision = match outcome {
             Some(o) => o.into(),
-            None => Decision::Refused,
+            None => Decision::Deny,
         };
 
         if decision.is_allowed() {
@@ -2164,7 +2164,7 @@ impl HeadlessSession {
         drop(pending);
         let decision: Decision = match outcome {
             Some(o) => o.into(),
-            None => Decision::Refused,
+            None => Decision::Deny,
         };
 
         if decision.is_allowed() {

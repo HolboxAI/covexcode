@@ -793,18 +793,18 @@ impl From<InteractInBrowserOutcome> for BrowserInteractResult {
 impl From<RequestPermissionOutcome> for Decision {
     fn from(outcome: RequestPermissionOutcome) -> Self {
         match outcome {
-            RequestPermissionOutcome::Cancelled => Decision::Refused,
+            RequestPermissionOutcome::Cancelled => Decision::Deny,
             RequestPermissionOutcome::Selected { option_id } => {
                 if option_id.0 == "allow" {
-                    Decision::Allowed
+                    Decision::Allow
                 } else {
-                    Decision::Refused
+                    Decision::Deny
                 }
             }
             // `Partial` is handled by `HeadlessSession::ask_permission` before
             // it ever reaches this conversion; reaching here means a malformed
             // or legacy caller sent it where a binary decision was expected.
-            RequestPermissionOutcome::Partial { .. } => Decision::Refused,
+            RequestPermissionOutcome::Partial { .. } => Decision::Deny,
         }
     }
 }
@@ -1328,17 +1328,17 @@ mod tests {
             Decision::from(RequestPermissionOutcome::Selected {
                 option_id: PermissionOptionId("allow".to_string())
             }),
-            Decision::Allowed
+            Decision::Allow
         );
         assert_eq!(
             Decision::from(RequestPermissionOutcome::Selected {
                 option_id: PermissionOptionId("reject".to_string())
             }),
-            Decision::Refused
+            Decision::Deny
         );
         assert_eq!(
             Decision::from(RequestPermissionOutcome::Cancelled),
-            Decision::Refused
+            Decision::Deny
         );
     }
 

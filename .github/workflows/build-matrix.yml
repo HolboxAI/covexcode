@@ -39,7 +39,7 @@ jobs:
             suffix: ""
           - os: linux
             arch: aarch64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: aarch64-unknown-linux-gnu
             suffix: ""
           - os: linux
@@ -49,7 +49,7 @@ jobs:
             suffix: -musl
           - os: linux
             arch: aarch64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: aarch64-unknown-linux-musl
             suffix: -musl
           - os: windows

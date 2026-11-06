@@ -31,6 +31,24 @@ pub fn days_ago_string(n: i64) -> String {
     date_string(today_days() - n)
 }
 
+/// Full UTC timestamp for log lines: `YYYY-MM-DDTHH:MM:SSZ`. Computed from a
+/// single `SystemTime` instant so the date and time cannot straddle a second
+/// boundary (unlike calling `today_string` and reading the clock again for the
+/// time).
+pub fn now_utc_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let hh = rem / 3600;
+    let mm = (rem % 3600) / 60;
+    let ss = rem % 60;
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
 /// Howard Hinnant's days-since-epoch -> civil (proleptic Gregorian) date
 /// algorithm: http://howardhinnant.github.io/date_algorithms.html#civil_from_days
 /// Pure integer arithmetic, correct for the entire `i64` range this app will

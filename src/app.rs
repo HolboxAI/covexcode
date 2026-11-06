@@ -43,6 +43,10 @@ pub enum Overlay {
         model: String,
     },
     CustomEndpoint(CustomStep),
+    /// `/feedback`. A free-text, multiline popup whose text lives in the shared
+    /// `overlay_input`/`overlay_cursor` fields, like `ApiKeyPrompt`. Enter (with
+    /// text) queues it on `feedback_request` and closes; Esc closes with no trace.
+    Feedback,
     /// `/pull`. Projects this machine has published in the last
     /// `artifacts::EXPIRY_HOURS`, (path, artifact id) pairs from
     /// `artifacts::all_local` -- picking one sets `pending_relaunch` rather
@@ -176,6 +180,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear-images", "remove all staged image attachments"),
     ("/exit", "leave covexcode"),
     ("/doctor", "check this install's health"),
+    ("/feedback", "send feedback about covexcode"),
     ("/help", "list every slash command"),
 ];
 
@@ -613,6 +618,19 @@ pub struct App {
     /// every new prompt starts back on "yes" to match bare-Enter's long-
     /// standing meaning.
     pub approval_selected: bool,
+    /// `Some` while the "why?" prompt is open, which is only ever after the
+    /// user pressed `n` on an approval. Holds the text typed so far.
+    ///
+    /// A plain `App` field rather than a variant on the overlay for the same
+    /// reason `approval_selected` is: the *question* being answered never
+    /// changes when the feedback prompt opens, only how it is being answered.
+    /// Keeping it here means the popup, the pending call and the queue are
+    /// all untouched by opening and closing this.
+    ///
+    /// Cleared in `show_approval`, so it can never leak from one queued call
+    /// to the next -- a reason typed for the third edit in a row has nothing
+    /// to do with the fourth.
+    pub approval_feedback: Option<crate::approval::Feedback>,
     /// The engine-issued approval id currently on screen in core-session
     /// mode, if any. `None` on the default path, where `pending_tools` owns
     /// the question instead.
@@ -864,6 +882,11 @@ pub struct App {
     /// `DeployAction::RunInteractive`, because two things cannot own one
     /// terminal.
     pub login_request: bool,
+    /// `/feedback` asked to send a message. The runtime loop takes this, writes
+    /// the local log, and spawns the POST (or, when opted out, skips the POST
+    /// since the opt-out notice was already pushed). Same split as
+    /// `hosted_request`: `App` performs no network I/O of its own.
+    pub feedback_request: Option<String>,
     /// Pending async clipboard read. Polled in the main loop without blocking.
     pub clipboard_rx: Option<std::sync::mpsc::Receiver<ClipboardOutcome>>,
     #[cfg(test)]
@@ -899,6 +922,7 @@ impl App {
             scroll: 0,
             follow_tail: true,
             approval_selected: true,
+            approval_feedback: None,
             core_approval: None,
             core_decision: None,
             pending_resume: None,
@@ -954,6 +978,7 @@ impl App {
             turn_starts: Vec::new(),
             turn_prompts: Vec::new(),
             login_request: false,
+            feedback_request: None,
             clipboard_rx: None,
             #[cfg(test)]
             mock_clipboard_outcome: None,
@@ -1037,7 +1062,32 @@ impl App {
     /// Run a slash command by name. The single dispatch point for both the
     /// slash-autocomplete Enter path and the Ctrl+P palette, so a command added
     /// to `COMMANDS` only needs wiring here once.
-    fn run_command(&mut self, cmd: &str) {
+    pub fn prepare_command_state(&mut self) {
+        self.input_buffer.clear();
+        self.cursor = 0;
+        self.command_menu_selected = 0;
+        self.overlay = None;
+    }
+
+    pub fn dispatch_slash_command<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: Option<&mut ratatui::Terminal<B>>,
+        cmd: &str,
+    ) {
+        if let Some(t) = terminal {
+            let _ = crate::ui::prepare_slash_command(t, self);
+        } else {
+            self.prepare_command_state();
+        }
+        self.run_command_handler(cmd);
+    }
+
+    #[allow(dead_code)]
+    pub fn run_command(&mut self, cmd: &str) {
+        self.dispatch_slash_command::<ratatui::backend::TestBackend>(None, cmd);
+    }
+
+    pub fn run_command_handler(&mut self, cmd: &str) {
         match cmd {
             "/plan" => self.toggle_plan_mode(),
             "/provider" => self.open_provider_picker(),
@@ -1057,6 +1107,7 @@ impl App {
             "/subagents" => self.show_subagents(),
             "/hosted" => self.start_hosted(),
             cmd if cmd.starts_with("/rollback") => self.start_rollback_command(cmd),
+            cmd if cmd.starts_with("/quota") => self.handle_quota_command(cmd),
             "/diff" => self.show_diff(),
             "/paste" => self.handle_paste_key(),
             "/image" | "/img" => self.handle_image_command(""),
@@ -1071,8 +1122,31 @@ impl App {
             "/clear-images" => self.clear_pending_images(),
             "/exit" => self.exit_now(),
             "/doctor" => self.show_doctor(),
+            "/feedback" => self.start_feedback(),
             "/help" => self.show_help(),
             other => unreachable!("COMMANDS names {other:?}, not dispatched here"),
+        }
+    }
+
+    fn handle_quota_command(&mut self, cmd: &str) {
+        match cmd {
+            "/quota override" => {
+                self.greeted = true;
+                self.set_quota_override(true);
+            }
+            "/quota reset" => {
+                self.greeted = true;
+                self.set_quota_override(false);
+            }
+            "/quota clear" => {
+                self.greeted = true;
+                self.clear_own_limits();
+            }
+            rest if rest.starts_with("/quota set") => {
+                self.greeted = true;
+                self.set_own_limit(rest.trim_start_matches("/quota set").trim());
+            }
+            _ => self.show_quota(),
         }
     }
 
@@ -1174,7 +1248,24 @@ impl App {
         false
     }
 
+    #[allow(dead_code)]
     pub fn handle_key(&mut self, key: KeyEvent) {
+        self.handle_key_internal::<ratatui::backend::TestBackend>(None, key);
+    }
+
+    pub fn handle_key_with_terminal<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<B>,
+        key: KeyEvent,
+    ) {
+        self.handle_key_internal(Some(terminal), key);
+    }
+
+    fn handle_key_internal<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: Option<&mut ratatui::Terminal<B>>,
+        key: KeyEvent,
+    ) {
         // Any other key means the Ctrl-C was a slip, or a change of mind.
         // Disarming on the next keystroke is what keeps a stale "press again"
         // from turning a much later, unrelated Ctrl-C into an instant exit.
@@ -1196,7 +1287,7 @@ impl App {
         // The overlay intercepts all input while active; none of the normal
         // editing/submit logic below ever sees these keys.
         if self.overlay.is_some() {
-            self.handle_overlay_key(key);
+            self.handle_overlay_key_internal(terminal, key);
             return;
         }
 
@@ -1246,12 +1337,9 @@ impl App {
                 if alt || shift {
                     self.insert_str("\n");
                 } else if let Some(cmd) = self.selected_command() {
-                    self.input_buffer.clear();
-                    self.cursor = 0;
-                    self.command_menu_selected = 0;
-                    self.run_command(cmd);
+                    self.dispatch_slash_command(terminal, cmd);
                 } else {
-                    self.submit();
+                    self.submit_internal(terminal);
                 }
             }
 
@@ -1721,7 +1809,15 @@ impl App {
         true
     }
 
+    #[allow(dead_code)]
     fn submit(&mut self) {
+        self.submit_internal::<ratatui::backend::TestBackend>(None);
+    }
+
+    fn submit_internal<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: Option<&mut ratatui::Terminal<B>>,
+    ) {
         if self.is_busy() {
             return;
         }
@@ -1750,63 +1846,16 @@ impl App {
             }
         }
 
-        // `/quota` takes an argument, so it cannot come through the
-        // autocomplete registry, which matches whole commands.
+        // `/quota` and `/rollback` commands with arguments, or explicit slash commands
         match prompt.as_str() {
-            "/quota override" => {
-                self.input_buffer.clear();
-                self.cursor = 0;
+            cmd if cmd.starts_with("/quota")
+                || cmd.starts_with("/rollback")
+                || cmd == "/projects"
+                || cmd == "/recent"
+                || cmd == "/history" =>
+            {
                 self.greeted = true;
-                self.set_quota_override(true);
-                return;
-            }
-            "/quota reset" => {
-                self.input_buffer.clear();
-                self.cursor = 0;
-                self.greeted = true;
-                self.set_quota_override(false);
-                return;
-            }
-            "/quota clear" => {
-                self.input_buffer.clear();
-                self.cursor = 0;
-                self.greeted = true;
-                self.clear_own_limits();
-                return;
-            }
-            rest if rest.starts_with("/quota set") => {
-                self.input_buffer.clear();
-                self.cursor = 0;
-                self.greeted = true;
-                self.set_own_limit(rest.trim_start_matches("/quota set").trim());
-                return;
-            }
-            "/projects" | "/recent" => {
-                self.input_buffer.clear();
-                self.cursor = 0;
-                self.greeted = true;
-                self.open_projects_picker();
-                return;
-            }
-            "/history" => {
-                self.input_buffer.clear();
-                self.cursor = 0;
-                self.greeted = true;
-                self.open_history_picker();
-                return;
-            }
-            "/rollback" => {
-                self.input_buffer.clear();
-                self.cursor = 0;
-                self.greeted = true;
-                self.start_rollback_command("/rollback");
-                return;
-            }
-            rest if rest.starts_with("/rollback ") => {
-                self.input_buffer.clear();
-                self.cursor = 0;
-                self.greeted = true;
-                self.start_rollback_command(rest);
+                self.dispatch_slash_command(terminal, prompt.as_str());
                 return;
             }
             "/paste" => {
@@ -3243,10 +3292,62 @@ impl App {
         warning: Option<String>,
         confirmed: bool,
     ) {
+        // Same shared prompt as the tool approvals: a rollback is a "no" that
+        // people frequently want to explain ("not that far back"), and having
+        // one approval surface offer that and another not would be the kind of
+        // inconsistency nobody can predict from the screen.
+        if let Some(mut feedback) = self.approval_feedback.take() {
+            match feedback.handle_key(key.code, key.modifiers) {
+                None => {
+                    self.approval_feedback = Some(feedback);
+                    self.overlay = Some(Overlay::RollbackConfirm {
+                        target_turn,
+                        prompt_snippet,
+                        steps,
+                        warning,
+                        confirmed,
+                    });
+                }
+                Some(decision) => {
+                    self.overlay = None;
+                    self.cancel_rollback(decision.reason());
+                }
+            }
+            return;
+        }
+
         let decided = match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => true,
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => false,
-            KeyCode::Enter => confirmed,
+            // `n` offers the chance to say why before the rollback is
+            // abandoned -- see `handle_command_approval_key`, which this
+            // mirrors deliberately.
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.approval_feedback = Some(crate::approval::Feedback::new());
+                self.overlay = Some(Overlay::RollbackConfirm {
+                    target_turn,
+                    prompt_snippet,
+                    steps,
+                    warning,
+                    confirmed,
+                });
+                return;
+            }
+            KeyCode::Esc => false,
+            KeyCode::Enter => {
+                if confirmed {
+                    true
+                } else {
+                    self.approval_feedback = Some(crate::approval::Feedback::new());
+                    self.overlay = Some(Overlay::RollbackConfirm {
+                        target_turn,
+                        prompt_snippet,
+                        steps,
+                        warning,
+                        confirmed,
+                    });
+                    return;
+                }
+            }
             KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
                 self.overlay = Some(Overlay::RollbackConfirm {
                     target_turn,
@@ -3271,15 +3372,32 @@ impl App {
 
         self.follow_tail = true;
         if !decided {
-            self.messages.push(Message::new(
-                Role::System,
-                "Rollback cancelled — nothing was changed.",
-            ));
+            self.cancel_rollback(None);
             return;
         }
 
         self.pending_rollback_query = target_turn;
         self.rollback_request = Some(steps);
+    }
+
+    /// The user said no to a rollback, with or without a reason.
+    ///
+    /// A rollback is not a tool call, so there is no model-facing result to
+    /// attach a reason to -- the transcript is the only place it can go, and
+    /// the transcript is the right place: it is what the user will be reading
+    /// when they wonder why the undo they asked for never happened.
+    fn cancel_rollback(&mut self, reason: Option<&str>) {
+        // Belt and braces: the prompt must not outlive the question it was
+        // asking, whichever path got here.
+        self.approval_feedback = None;
+        self.follow_tail = true;
+        let text = match reason {
+            Some(reason) => {
+                format!("Rollback cancelled — nothing was changed.\nReason: {reason}")
+            }
+            None => "Rollback cancelled — nothing was changed.".to_string(),
+        };
+        self.messages.push(Message::new(Role::System, text));
     }
 
     pub fn finish_query_rollback(
@@ -3515,6 +3633,10 @@ impl App {
         self.overlay = Some(Overlay::ToolApproval(request));
         self.approval_scroll = 0;
         self.approval_selected = true;
+        // Every new question starts with the feedback prompt closed and
+        // empty. Carrying one over would attach a reason typed about one
+        // command to a completely different one.
+        self.approval_feedback = None;
         self.state = AppState::AwaitingApproval;
     }
 
@@ -3531,6 +3653,18 @@ impl App {
     }
 
     fn handle_command_approval_key(&mut self, key: KeyEvent) {
+        // The "why?" prompt, when it is open, owns every key -- including
+        // `y`/`n`, which are now ordinary characters being typed into a
+        // reason. Nothing below may see a keypress while it is up.
+        if let Some(mut feedback) = self.approval_feedback.take() {
+            match feedback.handle_key(key.code, key.modifiers) {
+                // Still typing: put it back and change nothing else.
+                None => self.approval_feedback = Some(feedback),
+                Some(decision) => self.decide(decision),
+            }
+            return;
+        }
+
         if matches!(key.code, KeyCode::Up | KeyCode::Down) {
             self.approval_selected = !self.approval_selected;
             return;
@@ -3553,18 +3687,42 @@ impl App {
 
         use crate::approval::Decision;
         let decision = match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => Decision::Allowed,
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Decision::Refused,
+            KeyCode::Char('y') | KeyCode::Char('Y') => Decision::Allow,
+            // `n` is the one key that does *not* decide on its own any more:
+            // it opens the chance to say why, and the user finishes the
+            // refusal with Enter (send the reason), or Enter on an empty box /
+            // Esc (no reason). Two keystrokes instead of one -- but Enter
+            // straight after `n` is exactly that, so a fast "no, no, no" is
+            // still three n-Enter pairs rather than three trips to the mouse.
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.open_feedback();
+                return;
+            }
+            // Esc never opens the prompt: it is the reflex "no" and has to
+            // stay one press.
+            KeyCode::Esc => Decision::Deny,
             KeyCode::Enter => {
                 if self.approval_selected {
-                    Decision::Allowed
+                    Decision::Allow
                 } else {
-                    Decision::Refused
+                    // Enter on the highlighted "no" is the same act as
+                    // pressing `n`, so it gets the same offer.
+                    self.open_feedback();
+                    return;
                 }
             }
             _ => return, // unrecognised key: leave the prompt exactly as it was
         };
         self.decide(decision);
+    }
+
+    /// Ask the user why, without yet refusing anything.
+    ///
+    /// Separate from `decide` because the refusal has not happened until the
+    /// user answers -- and answering "no feedback" has to leave the prompt in
+    /// exactly the state it was in, which it does: this only flips a flag.
+    fn open_feedback(&mut self) {
+        self.approval_feedback = Some(crate::approval::Feedback::new());
     }
 
     /// Apply the user's answer to the request currently on screen -- the one
@@ -3582,6 +3740,13 @@ impl App {
             return;
         }
         let allowed = decision.is_allowed();
+        // Borrowed from `decision` before it is consumed below; the reason is
+        // the only part of an answer that is not a plain bool, and every branch
+        // that needs it takes it by `&str`.
+        let reason = decision.reason();
+        // A refusal is over the moment it is made: whatever was typed belongs
+        // to the answer just applied, never to the next queued call.
+        self.approval_feedback = None;
         let Some(call) = self.pending_tools.pop_front() else {
             return;
         };
@@ -3597,7 +3762,7 @@ impl App {
         let plan_rejected = proposal.is_some() && !allowed;
 
         if let Some(proposal) = proposal {
-            self.resolve_plan(&call, proposal, allowed);
+            self.resolve_plan(&call, proposal, allowed, reason);
         } else if allowed {
             // A deployment the model asked for is handed to the same flow
             // `/deploy` uses, rather than run headlessly by `tools::execute`:
@@ -3610,7 +3775,11 @@ impl App {
                 Some(call) => self.approved_tools.push(call),
             }
         } else {
-            self.push_tool_outcome(tools::declined(&call));
+            let outcome = match reason {
+                Some(reason) => tools::declined_with_reason(&call, reason),
+                None => tools::declined(&call),
+            };
+            self.push_tool_outcome(outcome);
         }
         self.follow_tail = true;
         self.advance_approvals();
@@ -3622,7 +3791,13 @@ impl App {
         // than the user simply saying it. Only when nothing else was queued
         // behind the plan: if there is real work still to run, that comes
         // first.
-        if plan_rejected && self.state == AppState::Sending {
+        //
+        // A rejection *with* a reason is the opposite case: the model has been
+        // told exactly what was wrong, in the tool result, so the round that
+        // used to be a guess is now the revision itself. Giving the turn back
+        // there would throw that away and make the user prompt again to hear
+        // the answer they just paid for.
+        if plan_rejected && reason.is_none() && self.state == AppState::Sending {
             let tokens = self.record_quota();
             self.pending_usage
                 .push((tokens.total() as usize, self.config.llm.model.clone()));
@@ -3643,20 +3818,41 @@ impl App {
     /// Either way the plan goes into the transcript. It was only ever shown
     /// inside a popup that is now gone, and the point of approving a plan is
     /// being able to hold the work to it afterwards.
-    fn resolve_plan(&mut self, call: &ToolCall, proposal: tools::Proposal, approved: bool) {
+    fn resolve_plan(
+        &mut self,
+        call: &ToolCall,
+        proposal: tools::Proposal,
+        approved: bool,
+        reason: Option<&str>,
+    ) {
         let rendered = Self::proposal_text(&proposal);
 
         if !approved {
+            // The reason is shown back to the user as well as sent to the
+            // model. It is the one line that makes the transcript's "declined"
+            // entry self-explanatory a week later, when the popup that asked
+            // is long gone.
+            let why = match reason {
+                Some(reason) => format!("\nReason: {reason}"),
+                None => String::new(),
+            };
             self.messages.push(Message::new(
                 Role::System,
-                format!("Plan declined — still in plan mode\n\n{rendered}"),
+                format!("Plan declined — still in plan mode{why}\n\n{rendered}"),
             ));
-            self.push_tool_outcome(tools::plan_declined(call));
-            self.messages.push(Message::new(
-                Role::System,
-                "Say what you'd like different and it'll plan again. /plan turns plan mode off \
-                 if you'd rather just get on with it.",
-            ));
+            match reason {
+                Some(reason) => self.push_tool_outcome(tools::plan_declined_with_reason(call, reason)),
+                None => self.push_tool_outcome(tools::plan_declined(call)),
+            };
+            // Only when the model was not told why. With a reason, that round
+            // is now useful work rather than a guess.
+            if reason.is_none() {
+                self.messages.push(Message::new(
+                    Role::System,
+                    "Say what you'd like different and it'll plan again. /plan turns plan mode off \
+                     if you'd rather just get on with it.",
+                ));
+            }
             return;
         }
 
@@ -5266,7 +5462,16 @@ impl App {
         self.greeted = true;
     }
 
+    #[allow(dead_code)]
     fn handle_overlay_key(&mut self, key: KeyEvent) {
+        self.handle_overlay_key_internal::<ratatui::backend::TestBackend>(None, key);
+    }
+
+    fn handle_overlay_key_internal<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: Option<&mut ratatui::Terminal<B>>,
+        key: KeyEvent,
+    ) {
         let overlay = match self.overlay.take() {
             Some(o) => o,
             None => return,
@@ -5281,11 +5486,12 @@ impl App {
                 self.handle_api_key_prompt_key(key, provider_id, model)
             }
             Overlay::CustomEndpoint(step) => self.handle_custom_endpoint_key(key, step),
+            Overlay::Feedback => self.handle_feedback_key(key),
             Overlay::ArtifactPicker { items, selected } => {
                 self.handle_artifact_picker_key(key, items, selected)
             }
             Overlay::CommandPalette { filter, selected } => {
-                self.handle_command_palette_key(key, filter, selected)
+                self.handle_command_palette_key(terminal, key, filter, selected)
             }
             // Put back first: an unrecognised key must leave the prompt standing
             // rather than silently dismissing it, and `handle_overlay_key` took
@@ -5334,7 +5540,13 @@ impl App {
         }
     }
 
-    fn handle_command_palette_key(&mut self, key: KeyEvent, mut filter: String, selected: usize) {
+    fn handle_command_palette_key<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: Option<&mut ratatui::Terminal<B>>,
+        key: KeyEvent,
+        mut filter: String,
+        selected: usize,
+    ) {
         // The matches correspond to `filter` as it stands *before* this key,
         // so Enter and Up/Down index into the list currently on screen. A
         // filter change (Backspace/Char) recomputes on the next render and
@@ -5370,8 +5582,7 @@ impl App {
             KeyCode::Enter => {
                 if let Some(cmd) = matches.get(selected) {
                     let cmd = cmd.0;
-                    self.overlay = None;
-                    self.run_command(cmd);
+                    self.dispatch_slash_command(terminal, cmd);
                 }
             }
             KeyCode::Backspace => {
@@ -5590,6 +5801,88 @@ impl App {
             _ => {
                 self.overlay = Some(Overlay::CustomEndpoint(step));
             }
+        }
+    }
+
+    /// `/feedback` — open the floating feedback box. The message is typed into
+    /// `overlay_input`; Enter (with text) queues it on `feedback_request` and the
+    /// runtime loop sends it, Esc closes with no transcript entry.
+    fn start_feedback(&mut self) {
+        if self.is_busy() {
+            self.messages.push(Message::new(
+                Role::System,
+                "Wait for the current turn to finish, then run /feedback.",
+            ));
+            return;
+        }
+        self.overlay_input.clear();
+        self.overlay_cursor = 0;
+        self.overlay = Some(Overlay::Feedback);
+    }
+
+    /// Key handling for the `/feedback` box. Only insert/backspace is
+    /// supported (no cursor repositioning), matching `ApiKeyPrompt`.
+    fn handle_feedback_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Esc => {
+                // Close with no transcript entry and no request.
+                self.overlay_input.clear();
+                self.overlay_cursor = 0;
+            }
+            KeyCode::Enter => {
+                if alt || shift {
+                    // Multiline: a newline is text, not "send".
+                    if self.overlay_input.chars().count() < crate::feedback::MAX_CHARS {
+                        insert_into(&mut self.overlay_input, &mut self.overlay_cursor, "\n");
+                    }
+                    self.overlay = Some(Overlay::Feedback);
+                } else if self.overlay_input.trim().is_empty() {
+                    // Empty input: Enter does nothing, the box stays open.
+                    self.overlay = Some(Overlay::Feedback);
+                } else {
+                    let text = self.overlay_input.clone();
+                    self.overlay_input.clear();
+                    self.overlay_cursor = 0;
+                    let notice = if crate::feedback::is_opted_out() {
+                        "· feedback opt-out active — saved locally to ~/.covexcode/feedback.log"
+                    } else {
+                        "· feedback sending…"
+                    };
+                    self.messages.push(Message::new(Role::System, notice));
+                    self.feedback_request = Some(text);
+                }
+            }
+            KeyCode::Backspace => {
+                delete_before_in(&mut self.overlay_input, &mut self.overlay_cursor);
+                self.overlay = Some(Overlay::Feedback);
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if self.overlay_input.chars().count() < crate::feedback::MAX_CHARS {
+                    insert_into(&mut self.overlay_input, &mut self.overlay_cursor, &c.to_string());
+                }
+                self.overlay = Some(Overlay::Feedback);
+            }
+            _ => {
+                self.overlay = Some(Overlay::Feedback);
+            }
+        }
+    }
+
+    /// Called by the runtime loop when the `/feedback` POST resolves. The
+    /// "sending…" line was pushed on Enter; this replaces it with the outcome.
+    pub fn finish_feedback(&mut self, result: Result<(), String>) {
+        match result {
+            Ok(()) => self.messages.push(Message::new(
+                Role::System,
+                "✓ feedback sent — thank you",
+            )),
+            Err(_) => self.messages.push(Message::new(
+                Role::Error,
+                "✗ feedback failed — saved to ~/.covexcode/feedback.log",
+            )),
         }
     }
 
@@ -6169,7 +6462,8 @@ mod tests {
             other => panic!("expected the confirmation, got {other:?}"),
         }
 
-        a.handle_key(key(KeyCode::Enter));
+        a.handle_key(key(KeyCode::Enter)); // opens the feedback prompt
+        a.handle_key(key(KeyCode::Enter)); // empty: a plain refusal
         assert!(a.rollback_request.is_none(), "Enter on no must not act");
         assert!(a.messages.last().unwrap().content.contains("cancelled"));
     }
@@ -6590,6 +6884,7 @@ mod tests {
         app.state = AppState::Streaming;
         app.request_tools(vec![deploy_tool_call(r#"{"provider":"vercel"}"#)]);
         app.handle_key(key(KeyCode::Char('n')));
+        app.handle_key(key(KeyCode::Enter)); // no reason: a plain refusal
 
         assert!(app.deploy.is_none(), "nothing may have started");
         assert!(app.deploy_tool_call.is_none());
@@ -8060,6 +8355,112 @@ mod tests {
         assert!(a.overlay.is_none(), "Esc closes without running anything");
     }
 
+    /// The reported bug, reproduced: type `/`, open the palette with Ctrl+P,
+    /// pick a command, Enter. The palette path cleared `overlay` but never the
+    /// input buffer, and the slash menu has no open flag of its own -- it is
+    /// derived from that buffer -- so it stayed "open" after the command ran,
+    /// re-rendering into the terminal's scrollback every frame with the
+    /// command's own system lines printed underneath it.
+    #[test]
+    fn running_a_command_from_the_palette_clears_the_slash_menu() {
+        let mut a = app();
+        type_str(&mut a, "/");
+        assert!(a.command_menu_active(), "a lone slash opens the menu");
+
+        a.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(matches!(a.overlay, Some(Overlay::CommandPalette { .. })));
+
+        // /help runs without opening a picker of its own, so the only lasting
+        // effect is the menu going away.
+        type_str(&mut a, "help");
+        a.handle_key(key(KeyCode::Enter));
+
+        assert!(a.overlay.is_none());
+        assert!(
+            a.input_buffer.is_empty(),
+            "the command should consume the input"
+        );
+        assert!(
+            !a.command_menu_active(),
+            "the slash menu must not survive the command"
+        );
+    }
+
+    // ---- /feedback ---------------------------------------------------------
+
+    #[test]
+    fn slash_feedback_opens_the_floating_box() {
+        let mut a = app();
+        a.run_command("/feedback");
+        assert_eq!(a.overlay, Some(Overlay::Feedback));
+    }
+
+    #[test]
+    fn feedback_esc_closes_with_no_trace() {
+        let mut a = app();
+        a.run_command("/feedback");
+        type_str(&mut a, "hello");
+        let before = a.messages.len();
+        a.handle_key(key(KeyCode::Esc));
+        assert_eq!(a.overlay, None);
+        assert_eq!(a.feedback_request, None);
+        assert_eq!(a.messages.len(), before, "Esc leaves no transcript entry");
+        assert!(a.overlay_input.is_empty());
+    }
+
+    #[test]
+    fn feedback_empty_enter_does_nothing() {
+        let mut a = app();
+        a.run_command("/feedback");
+        let before = a.messages.len();
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.overlay, Some(Overlay::Feedback), "empty Enter keeps the box open");
+        assert_eq!(a.feedback_request, None);
+        assert_eq!(a.messages.len(), before, "no transcript entry on empty Enter");
+    }
+
+    #[test]
+    fn feedback_enter_with_text_queues_and_announces() {
+        let mut a = app();
+        a.run_command("/feedback");
+        type_str(&mut a, "make the header sticky");
+        let before = a.messages.len();
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.overlay, None);
+        assert_eq!(a.feedback_request.as_deref(), Some("make the header sticky"));
+        assert_eq!(a.messages.len(), before + 1, "exactly one notice is pushed");
+        let body = a.messages.last().unwrap().body().to_string();
+        assert!(body.contains("feedback"), "{body}");
+    }
+
+    #[test]
+    fn feedback_stops_accepting_at_the_two_thousand_char_cap() {
+        let mut a = app();
+        a.run_command("/feedback");
+        a.overlay_input = "x".repeat(crate::feedback::MAX_CHARS);
+        a.overlay_cursor = crate::feedback::MAX_CHARS;
+        a.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(a.overlay_input.chars().count(), crate::feedback::MAX_CHARS);
+        assert!(!a.overlay_input.contains('y'), "the 2001st char is rejected");
+    }
+
+    #[test]
+    fn feedback_opt_out_skips_the_request_and_announces_it() {
+        let guard = std::env::var("COVEXCODE_TELEMETRY_URL").ok();
+        std::env::set_var("COVEXCODE_TELEMETRY_URL", "");
+        let mut a = app();
+        a.run_command("/feedback");
+        type_str(&mut a, "still logged locally");
+        a.handle_key(key(KeyCode::Enter));
+        assert_eq!(a.feedback_request.as_deref(), Some("still logged locally"));
+        let body = a.messages.last().unwrap().body().to_string();
+        assert!(body.contains("opt-out"), "{body}");
+        match guard {
+            Some(v) => std::env::set_var("COVEXCODE_TELEMETRY_URL", v),
+            None => std::env::remove_var("COVEXCODE_TELEMETRY_URL"),
+        }
+    }
+
     /// Once a space is typed, the "/word" is finished -- what follows is an
     /// argument or just an ordinary message that happens to start with "/",
     /// not more of the command name. The menu must not keep showing.
@@ -9031,7 +9432,8 @@ mod tests {
         let mut a = streaming_app();
         a.request_tools(vec![command_call("call_1", "rm -rf build")]);
         a.handle_key(key(KeyCode::Down)); // move to "no"
-        a.handle_key(key(KeyCode::Enter));
+        a.handle_key(key(KeyCode::Enter)); // opens the feedback prompt
+        a.handle_key(key(KeyCode::Enter)); // empty: a plain refusal
 
         assert!(
             a.approved_tools.is_empty(),
@@ -9118,12 +9520,17 @@ mod tests {
     /// reflexive keypress has to be the safe one.
     #[test]
     fn esc_refuses_the_command_rather_than_cancelling_the_turn() {
-        for refuse in [KeyCode::Char('n'), KeyCode::Esc] {
+        // Esc still refuses in one press. `n` now opens the feedback prompt,
+        // so the one-press refusal it used to be is `n` then Enter -- checked
+        // here so the pair keeps behaving exactly like the bare key did.
+        for refuse in [&[KeyCode::Char('n'), KeyCode::Enter][..], &[KeyCode::Esc][..]] {
             let mut a = streaming_app();
             // Dangerous but not blocked: this test is about the *prompt*, and a
             // blocked command never reaches one.
             a.request_tools(vec![command_call("call_1", "rm -rf build")]);
-            a.handle_key(key(refuse));
+            for k in refuse {
+                a.handle_key(key(*k));
+            }
 
             assert!(
                 a.approved_tools.is_empty(),
@@ -9136,6 +9543,216 @@ mod tests {
             assert_eq!(a.state, AppState::Sending);
             assert_history_is_well_formed(&a.history(None));
         }
+    }
+
+    // ---- deny with feedback ------------------------------------------------
+
+    /// `n` no longer refuses on its own: it opens the chance to say why, and
+    /// decides nothing until the user answers that offer.
+    #[test]
+    fn pressing_n_opens_the_feedback_prompt_and_decides_nothing() {
+        let mut a = streaming_app();
+        a.request_tools(vec![command_call("call_1", "rm -rf build")]);
+        a.handle_key(key(KeyCode::Char('n')));
+
+        assert!(a.approval_feedback.is_some(), "n must open the prompt");
+        assert!(a.approved_tools.is_empty(), "nothing may have run");
+        assert_eq!(
+            a.state,
+            AppState::AwaitingApproval,
+            "the question is still on screen, only its answer is being refined"
+        );
+        assert!(
+            a.pending_tools.len() == 1,
+            "the call must still be queued while the reason is typed"
+        );
+    }
+
+    /// The whole point: the reason the user types is what the model is told,
+    /// word for word.
+    #[test]
+    fn a_reason_typed_after_n_reaches_the_model_verbatim() {
+        let mut a = streaming_app();
+        a.request_tools(vec![command_call("call_1", "rm -rf build")]);
+        a.handle_key(key(KeyCode::Char('n')));
+        type_str(&mut a, "use the existing helper instead");
+        a.handle_key(key(KeyCode::Enter));
+
+        assert!(a.approved_tools.is_empty(), "a refusal runs nothing");
+        let told = a.messages.last().unwrap();
+        assert_eq!(told.tool_call_id.as_deref(), Some("call_1"));
+        assert!(
+            told.content
+                .contains("Reason: use the existing helper instead"),
+            "the reason must arrive intact: {}",
+            told.content
+        );
+        assert!(
+            told.content.contains("Do not retry the same action"),
+            "{}",
+            told.content
+        );
+        // The transcript line names the refusal and the reason.
+        let display = told.display.as_deref().unwrap();
+        assert!(display.starts_with('✗'), "{display}");
+        assert!(display.contains("— rejected: \"use the existing helper instead\""), "{display}");
+        assert!(a.approval_feedback.is_none(), "the prompt must be gone");
+    }
+
+    /// Enter on an empty box is the old one-key refusal, unchanged -- including
+    /// the wording the model already knew how to react to.
+    #[test]
+    fn an_empty_enter_after_n_is_the_plain_refusal_it_always_was() {
+        let mut a = streaming_app();
+        a.request_tools(vec![command_call("call_1", "rm -rf build")]);
+        a.handle_key(key(KeyCode::Char('n')));
+        a.handle_key(key(KeyCode::Enter));
+
+        let told = a.messages.last().unwrap();
+        assert_eq!(
+            told.content,
+            "The user declined to let this happen. Do not try it again; take a different \
+             approach or answer without it.",
+            "a plain refusal must not be reworded"
+        );
+        let display = told.display.as_deref().unwrap();
+        assert_eq!(display, "✗ $ rm -rf build — rejected");
+    }
+
+    /// Esc skips the offer entirely -- it never opens the prompt, so the
+    /// reflexive keypress stays one press.
+    #[test]
+    fn esc_after_n_is_a_plain_refusal_and_discards_the_reason() {
+        let mut a = streaming_app();
+        a.request_tools(vec![command_call("call_1", "rm -rf build")]);
+        a.handle_key(key(KeyCode::Char('n')));
+        type_str(&mut a, "never mind");
+        a.handle_key(key(KeyCode::Esc));
+
+        let told = a.messages.last().unwrap();
+        assert!(
+            !told.content.contains("never mind"),
+            "esc must send nothing: {}",
+            told.content
+        );
+        assert_eq!(
+            told.content,
+            "The user declined to let this happen. Do not try it again; take a different \
+             approach or answer without it."
+        );
+    }
+
+    /// Esc at the y/n prompt (before any `n`) is still the immediate refusal it
+    /// has always been.
+    #[test]
+    fn esc_without_pressing_n_does_not_open_the_feedback_prompt() {
+        let mut a = streaming_app();
+        a.request_tools(vec![command_call("call_1", "rm -rf build")]);
+        a.handle_key(key(KeyCode::Esc));
+
+        assert!(a.approval_feedback.is_none());
+        assert_eq!(a.messages.last().unwrap().tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    /// A reason is per-call. The next queued question must not inherit it, or a
+    /// refusual typed about one command would silently explain another.
+    #[test]
+    fn a_reason_does_not_leak_onto_the_next_queued_call() {
+        let mut a = streaming_app();
+        a.request_tools(vec![
+            command_call("call_1", "rm -rf build"),
+            command_call("call_2", "rm -rf dist"),
+        ]);
+
+        a.handle_key(key(KeyCode::Char('n')));
+        type_str(&mut a, "not the build dir");
+        a.handle_key(key(KeyCode::Enter));
+
+        assert!(
+            a.approval_feedback.is_none(),
+            "the next prompt must start with an empty box"
+        );
+        a.handle_key(key(KeyCode::Enter)); // yes to the second
+        assert_eq!(a.approved_tools.len(), 1, "only the second call runs");
+    }
+
+    /// The reason survives a y/n-shaped character inside it -- while the
+    /// prompt is open those keys are just letters.
+    #[test]
+    fn a_reason_containing_y_and_n_is_not_read_as_an_answer() {
+        let mut a = streaming_app();
+        a.request_tools(vec![command_call("call_1", "rm -rf build")]);
+        a.handle_key(key(KeyCode::Char('n')));
+        type_str(&mut a, "ny");
+        a.handle_key(key(KeyCode::Enter));
+
+        assert!(a.approved_tools.is_empty());
+        assert!(
+            a.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Reason: ny"),
+            "{}",
+            a.messages.last().unwrap().content
+        );
+    }
+
+    /// A plan rejected with a reason goes straight back to the model -- the
+    /// round that used to be a guess is now the revision itself. Without a
+    /// reason the turn still goes back to the user, as it always has.
+    #[test]
+    fn a_plan_rejected_with_a_reason_goes_straight_back_to_the_model() {
+        let mut a = planning_app();
+        a.request_tools(vec![plan_call("call_1", "rewrite everything")]);
+        a.handle_key(key(KeyCode::Char('n')));
+        type_str(&mut a, "step 2 is wrong");
+        a.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(a.mode, Mode::Plan, "still planning");
+        assert_eq!(
+            a.state,
+            AppState::Sending,
+            "the model has been told why, so it can revise now"
+        );
+        let told = a
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Tool)
+            .unwrap();
+        assert!(told.content.contains("step 2 is wrong"), "{}", told.content);
+        assert!(told.content.contains("still in plan mode"), "{}", told.content);
+    }
+
+    /// ...and without one it keeps the old behaviour exactly.
+    #[test]
+    fn a_plan_rejected_without_a_reason_still_waits_for_the_user() {
+        let mut a = planning_app();
+        a.request_tools(vec![plan_call("call_1", "rewrite everything")]);
+        a.handle_key(key(KeyCode::Char('n')));
+        a.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(a.mode, Mode::Plan);
+        assert_eq!(a.state, AppState::AwaitingInput);
+    }
+
+    /// A rollback has no model round-trip, so its reason goes where the user
+    /// will actually look for it: the transcript.
+    #[test]
+    fn a_rollback_cancelled_with_a_reason_says_so_in_the_transcript() {
+        let mut a = app();
+        wrote_new(&mut a, "1", "src/a.rs", "/tmp/a.rs");
+        a.start_rollback();
+        a.handle_key(key(KeyCode::Char('n')));
+        type_str(&mut a, "not that far back");
+        a.handle_key(key(KeyCode::Enter));
+
+        assert!(a.rollback_request.is_none(), "nothing may have run");
+        assert!(a.overlay.is_none());
+        let said = &a.messages.last().unwrap().content;
+        assert!(said.contains("cancelled"), "{said}");
+        assert!(said.contains("Reason: not that far back"), "{said}");
     }
 
     #[test]
@@ -9172,6 +9789,7 @@ mod tests {
         }
 
         a.handle_key(key(KeyCode::Char('n')));
+        a.handle_key(key(KeyCode::Enter)); // no reason: a plain refusal
         assert_eq!(a.state, AppState::ExecutingTools);
         assert_eq!(a.approved_tools.len(), 1); // only `ls`
     }
@@ -11543,6 +12161,7 @@ mod tests {
         let mut a = planning_app();
         a.request_tools(vec![plan_call("call_1", "rewrite everything")]);
         a.handle_key(key(KeyCode::Char('n')));
+        a.handle_key(key(KeyCode::Enter)); // no reason: a plain refusal
 
         assert_eq!(a.mode, Mode::Plan, "a declined plan does not end plan mode");
         assert_eq!(
@@ -11580,10 +12199,12 @@ mod tests {
     /// the runner, so this is the one that is easiest to leave unanswered.
     #[test]
     fn a_resolved_plan_leaves_a_history_the_endpoint_will_accept() {
-        for answer in [KeyCode::Char('y'), KeyCode::Char('n')] {
+        for answer in [&[KeyCode::Char('y')][..], &[KeyCode::Char('n'), KeyCode::Enter][..]] {
             let mut a = planning_app();
             a.request_tools(vec![plan_call("call_1", "a plan")]);
-            a.handle_key(key(answer));
+            for k in answer {
+                a.handle_key(key(*k));
+            }
 
             let history = a.history(None);
             let asked: Vec<&str> = history

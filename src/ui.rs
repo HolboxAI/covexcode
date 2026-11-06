@@ -19,7 +19,7 @@ const MAX_INPUT_HEIGHT: u16 = 10;
 const MAX_APPROVAL_HEIGHT: u16 = 24;
 /// Tall enough for every command in `app::COMMANDS` plus its border. There is
 /// a test.
-const MAX_COMMAND_MENU_HEIGHT: u16 = 28;
+const MAX_COMMAND_MENU_HEIGHT: u16 = 29;
 /// The deployment panel is allowed to be taller than the approval prompt: it
 /// carries a checklist, a menu and a live log at the same time, and clipping
 /// the log is what makes a failed build undiagnosable.
@@ -56,8 +56,32 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // would hide the thing being deployed while asking about it.
     let deploying = app.overlay == Some(Overlay::Deploy) && app.deploy.is_some();
 
+    // A live to-do list reserves a full-height column on the right edge, so the
+    // panel spans the whole terminal rather than hugging the transcript's
+    // bottom corner. Only when there is both a list to show and enough width
+    // to show it without starving the transcript -- on a narrow terminal the
+    // list stays in the footer's one-line summary instead.
+    //
+    // Decided *before* `bottom_height`, not after it: every panel below is
+    // drawn into `main_area`, and this column makes `main_area` narrower than
+    // the terminal. Sizing those panels from `size.width` reserved rows for a
+    // width they are never drawn at, so a prompt that wrapped to two rows at
+    // the real width was given room for one and the start of it scrolled
+    // silently out of the box.
+    let show_todo =
+        !app.todos.is_empty() && size.width > TODO_PANEL_WIDTH + MIN_SIDE_PANEL_SPLIT_WIDTH;
+    let (main_area, todo_area) = if show_todo {
+        let side = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(TODO_PANEL_WIDTH)])
+            .split(size);
+        (side[0], Some(side[1]))
+    } else {
+        (size, None)
+    };
+
     let bottom_height = if deploying {
-        let inner_width = size.width.saturating_sub(4).max(1) as usize;
+        let inner_width = main_area.width.saturating_sub(4).max(1) as usize;
         let lines = deployment_lines(app, inner_width);
         // Deliberately not clamped against the terminal height: on one shorter
         // than `MIN_INPUT_HEIGHT` that would put the ceiling below the floor,
@@ -67,11 +91,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     } else {
         match &approval {
             Some(request) => {
-                let inner_width = size.width.saturating_sub(4).max(1) as usize;
+                let inner_width = main_area.width.saturating_sub(4).max(1) as usize;
                 let (_, lines) = tool_approval_lines(app, request, inner_width);
                 (lines.len() as u16 + 2).clamp(MIN_INPUT_HEIGHT, MAX_APPROVAL_HEIGHT)
             }
-            None => input_height(app, size.width),
+            None => input_height(app, main_area.width),
         }
     };
 
@@ -87,23 +111,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         // added is silently clipped out of its own menu -- which is how a
         // command comes to look like it does not exist.
         (command_matches.len() as u16 + 2).min(MAX_COMMAND_MENU_HEIGHT)
-    };
-
-    // A live to-do list reserves a full-height column on the right edge, so the
-    // panel spans the whole terminal rather than hugging the transcript's
-    // bottom corner. Only when there is both a list to show and enough width
-    // to show it without starving the transcript -- on a narrow terminal the
-    // list stays in the footer's one-line summary instead.
-    let show_todo =
-        !app.todos.is_empty() && size.width > TODO_PANEL_WIDTH + MIN_SIDE_PANEL_SPLIT_WIDTH;
-    let (main_area, todo_area) = if show_todo {
-        let side = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(TODO_PANEL_WIDTH)])
-            .split(size);
-        (side[0], Some(side[1]))
-    } else {
-        (size, None)
     };
 
     // The viewport is a strip at the bottom of the real terminal, not a whole
@@ -161,6 +168,28 @@ fn adapt_colors_for_terminal(f: &mut Frame) {
         cell.fg = theme::adapt(cell.fg);
         cell.bg = theme::adapt(cell.bg);
     }
+}
+
+/// Shared preparation routine executed before any slash command runs:
+/// 1. Clear the input buffer and reset the cursor.
+/// 2. Set popup state to closed/hidden.
+/// 3. Call terminal.clear() to wipe the full terminal area including all rows the popup was occupying.
+/// 4. Call terminal.draw() once with popup closed and input cleared so Ratatui repaints clean cells over every old popup row.
+pub fn prepare_slash_command<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    app: &mut App,
+) -> std::io::Result<()> {
+    // 1. Clear the input buffer and reset the cursor.
+    app.input_buffer.clear();
+    app.cursor = 0;
+    // 2. Set popup state to closed/hidden.
+    app.command_menu_selected = 0;
+    app.overlay = None;
+    // 3. Wipe the inline viewport area.
+    terminal.clear()?;
+    // 4. Repaint clean cells over all former popup rows.
+    terminal.draw(|f| render(f, app))?;
+    Ok(())
 }
 
 /// The transcript, drawn without a box around it.
@@ -553,9 +582,26 @@ fn render_live(f: &mut Frame, area: Rect, app: &mut App) {
     let skip = lines.len().saturating_sub(height);
     let shown: Vec<Line> = lines.into_iter().skip(skip).collect();
 
+    // Anchor the tail to the *bottom* of the strip instead of the top. This
+    // area exists to sit directly above the composer, so unused rows belong
+    // above the content -- a top-anchored `Paragraph` left them underneath it,
+    // which opened a gap of dead rows between the last message and the box you
+    // type into (`Min(0)` hands this area every row nothing else claimed).
+    // Bottom-anchoring also reads correctly while a reply streams: new lines
+    // push the older ones up, and the newest stays next to the prompt.
+    let used = shown.len().min(height) as u16;
+    if used == 0 {
+        return;
+    }
+    let strip = Rect {
+        y: area.y + area.height.saturating_sub(used),
+        height: used,
+        ..area
+    };
+
     f.render_widget(
         Paragraph::new(shown).block(Block::default().padding(Padding::new(GUTTER, 1, 0, 0))),
-        area,
+        strip,
     );
 }
 
@@ -1118,14 +1164,22 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // The frame is structure, not emphasis, so it takes `border` -- the same
+    // tone the command menu, the to-do column and the deployment panel are
+    // drawn in, and the only tone any other bordered widget in this file uses.
+    //
+    // It used to take `accent` while idle, which put the most saturated colour
+    // in the palette on two rules that run the full width of the terminal: at
+    // 100 columns that is 200 purple cells, permanently, which made a frame
+    // nobody interacts with the loudest thing on screen and read as a stray
+    // divider under the conversation. `accent` is for what changes *inside*
+    // the frame -- the `❯` marker, the spinner, a streaming line -- and the
+    // busy state still distinguishes itself by dimming the marker to `faint`
+    // (see `marker_style` above), so nothing is lost by dropping it here.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if busy {
-            Style::default().fg(theme::p().border)
-        } else {
-            Style::default().fg(theme::p().accent)
-        });
+        .border_style(Style::default().fg(theme::p().border));
 
     // Where the cursor sits in the *wrapped* text. Needed before drawing, not
     // after, because it is also what decides how far the box is scrolled.
@@ -1484,6 +1538,7 @@ fn render_overlay(f: &mut Frame, area: Rect, app: &App) {
             };
             render_text_prompt(f, area, title, hint, &app.overlay_input, masked);
         }
+        Some(Overlay::Feedback) => render_feedback(f, area, app),
         Some(Overlay::ArtifactPicker { items, selected }) => {
             // Just the id, not the full path: a picker row is one line and a
             // canonicalized absolute path routinely runs past the popup
@@ -2324,6 +2379,42 @@ fn tool_approval_parts(
     }
     lines.push(Line::from(""));
 
+    // The "why?" prompt, when it is open, replaces the y/n choice outright.
+    //
+    // It is drawn as exactly the same three rows the y/n choice occupies, and
+    // that is deliberate rather than incidental: `render` sizes the whole
+    // approval box from `lines.len()` (see `bottom_height`), so an identical
+    // footer height means opening the prompt cannot change the box's height by
+    // even one row. Nothing above it is re-laid-out, nothing below it moves,
+    // and there is no vacated row for a stale prompt to survive in -- the
+    // failure mode the /login fix was about, avoided here by never creating
+    // the row in the first place rather than by clearing it afterwards.
+    if let Some(feedback) = &app.approval_feedback {
+        // Two rows of instructions here would repeat each other, so the third
+        // row is the caret's row extended: the reason, then the keys. Kept
+        // flat and prefix-free so a long reason clips from the right like any
+        // other single-line field rather than wrapping into the body.
+        let footer = vec![
+            Line::from(Span::styled(
+                "  Why? (optional — enter to send, esc to skip)",
+                theme::faint(),
+            )),
+            Line::from(vec![
+                Span::styled("❯ ", theme::accent()),
+                Span::styled(format!("{}▏", feedback.text()), theme::text()),
+            ]),
+            Line::from(Span::styled(
+                if feedback.is_blank() {
+                    "  enter skip · esc skip · it stays a plain refusal"
+                } else {
+                    "  enter send this reason to the model · esc skip"
+                },
+                theme::faint(),
+            )),
+        ];
+        return (title, lines, footer);
+    }
+
     // Two choices, one highlighted -- Up/Down move the cursor between them,
     // Enter confirms whichever one it is on, and y/n/esc still work directly
     // for anyone who already knows which they want. The highlighted key stays
@@ -2369,7 +2460,6 @@ fn tool_approval_parts(
 
     (title, lines, footer)
 }
-
 /// Draws the approval prompt into its reserved region at the bottom of the
 /// frame -- see the placement comment on `render`. No `Clear` and no
 /// centering: unlike a floating popup, this area belongs to the prompt alone,
@@ -2425,8 +2515,15 @@ fn render_tool_approval_inline(f: &mut Frame, area: Rect, app: &App, request: &A
         // of them.
         if (scroll > 0 || hidden_below > 0) && !footer.is_empty() {
             let last = footer.len() - 1;
+            // Which keys are worth naming depends on what the prompt is
+            // currently asking for: while the feedback input is open, y/n are
+            // ordinary characters and Up/Down are not the choice at all.
             footer[last] = Line::from(Span::styled(
-                "  ↑↓ choose · enter confirm · esc skip · PgUp/PgDn scroll",
+                if app.approval_feedback.is_some() {
+                    "  enter send · esc skip · PgUp/PgDn scroll"
+                } else {
+                    "  ↑↓ choose · enter confirm · esc skip · PgUp/PgDn scroll"
+                },
                 theme::faint(),
             ));
         }
@@ -3544,6 +3641,81 @@ fn render_text_prompt(
     f.set_cursor(popup.x + 1 + col as u16, popup.y + 3);
 }
 
+/// The `/feedback` box: a free-text, multiline prompt whose only confirmation
+/// is the live character counter in the bottom-right corner. Deliberately no
+/// second step -- see `App::handle_feedback_key`.
+fn render_feedback(f: &mut Frame, area: Rect, app: &App) {
+    let popup = centered_rect(64, 12, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::p().accent))
+        .title(Span::styled(" Send Feedback ", theme::accent_bold()));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    // Row 1: the instruction.
+    let hint_area = Rect { y: inner.y, height: 1, ..inner };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "What's on your mind? (Enter to send · Esc to cancel)",
+            theme::faint(),
+        ))),
+        hint_area,
+    );
+
+    // Last row: the counter, right-aligned so it never runs into the text.
+    let counter_area = Rect { y: inner.bottom() - 1, height: 1, ..inner };
+    let count = app.overlay_input.chars().count();
+    let counter = format!("{count} / {}", crate::feedback::MAX_CHARS);
+    f.render_widget(
+        Paragraph::new(counter)
+            .alignment(Alignment::Right)
+            .style(theme::faint()),
+        counter_area,
+    );
+
+    // Middle: the message, wrapped to width and scrolled to its tail so the
+    // caret (which always sits at the end) stays on screen while typing.
+    let body_area = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(2),
+        ..inner
+    };
+    let width = body_area.width as usize;
+    let mut rows: Vec<String> = Vec::new();
+    if app.overlay_input.is_empty() {
+        rows.push(String::new());
+    } else {
+        for logical in app.overlay_input.split('\n') {
+            rows.extend(hard_wrap(logical, width.max(1)));
+        }
+    }
+    let start = rows.len().saturating_sub(body_area.height as usize);
+    let visible: Vec<Line> = rows
+        .iter()
+        .skip(start)
+        .map(|s| {
+            if app.overlay_input.is_empty() {
+                Line::from(Span::styled("(type here)", theme::faint()))
+            } else {
+                Line::from(Span::styled(s.clone(), theme::text()))
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(visible), body_area);
+
+    // Caret at the end of the last visible row, clamped to the body.
+    if body_area.height > 0 {
+        let caret_col = rows.last().map(|r| r.chars().count()).unwrap_or(0);
+        let caret_row = body_area.y + rows.len().saturating_sub(1 + start) as u16;
+        let x = body_area.x + caret_col.min(width) as u16;
+        f.set_cursor(x, caret_row.min(body_area.bottom() - 1));
+    }
+}
+
 // ---- text layout helpers ------------------------------------------------------
 
 fn hard_wrap_rows(len: usize, width: usize) -> usize {
@@ -4454,6 +4626,136 @@ mod tests {
             .collect()
     }
 
+    /// A prompt that wraps is only visible if the box reserved enough rows for
+    /// the width it is actually drawn at.
+    ///
+    /// The to-do panel makes `main_area` narrower than the terminal. Sizing the
+    /// composer from `size.width` instead reserved a row for a width it never
+    /// gets, and `render_input` scrolls to the cursor -- so the second half of
+    /// the prompt filled the box and the first half silently vanished, with no
+    /// clip marker to say anything was missing.
+    #[test]
+    fn a_prompt_wrapped_by_the_todo_panel_keeps_every_character_visible() {
+        let mut app = App::new(crate::config::Config::default());
+        app.todos = vec![crate::tools::TodoItem {
+            content: "one".to_string(),
+            status: crate::tools::TodoStatus::InProgress,
+        }];
+        app.input_buffer = "x".repeat(140);
+        app.cursor = 140;
+
+        let rows = rendered_rows(&mut app, 160, 24);
+        // Only the composer's own rows: "covexcode" elsewhere in the frame also
+        // contains an `x`, and counting those would make this a test of the
+        // whole screen rather than of what the box kept.
+        let top = rows
+            .iter()
+            .position(|r| r.contains('╭'))
+            .expect("the composer is drawn");
+        let bottom = rows
+            .iter()
+            .position(|r| r.contains('╰'))
+            .expect("the composer is drawn");
+        let shown: usize = rows[top + 1..bottom]
+            .iter()
+            .map(|r| r.matches('x').count())
+            .sum();
+        assert_eq!(shown, 140, "the whole prompt stays in the box: {rows:?}");
+    }
+
+    /// The live strip sits directly above the composer, so spare rows belong
+    /// above the content rather than between the content and the prompt.
+    ///
+    /// `Constraint::Min(0)` hands this area every row nothing else claimed; a
+    /// top-anchored `Paragraph` then left all of them as dead space under the
+    /// last line, which is the gap that reads as the transcript having fallen
+    /// away from the input box.
+    #[test]
+    fn the_live_transcript_sits_against_the_composer_rather_than_at_the_top() {
+        let mut app = App::new(crate::config::Config::default());
+        app.messages.push(crate::app::Message::new(
+            crate::app::Role::Assistant,
+            "the answer",
+        ));
+
+        let rows = rendered_rows(&mut app, 100, 12);
+        let content = rows
+            .iter()
+            .position(|r| r.contains("the answer"))
+            .expect("the message is drawn");
+        let composer = rows
+            .iter()
+            .position(|r| r.contains('╭'))
+            .expect("the composer is drawn");
+
+        assert!(
+            content > 0,
+            "content is anchored low, not at row 0: {rows:?}"
+        );
+        assert!(
+            content < composer,
+            "content stays above the composer: {rows:?}"
+        );
+    }
+
+    /// The composer's frame is structural chrome, so it is drawn in `border`,
+    /// the tone every other bordered panel in this file uses -- not in the
+    /// `accent` that is reserved for the logo, the spinner and the prompt
+    /// marker.
+    ///
+    /// Two rules running the full width of the terminal in the most saturated
+    /// colour of the palette is what reads as a stray purple divider under the
+    /// conversation, and it was drawn on every frame whether or not anything
+    /// was happening. `adapt` is applied to the expectation because
+    /// `adapt_colors_for_terminal` rewrites the frame on terminals that cannot
+    /// show 24-bit colour -- an assertion against the raw token would depend on
+    /// the terminal the suite happens to run in.
+    #[test]
+    fn the_composer_frame_is_drawn_in_the_structural_border_tone() {
+        let mut app = App::new(crate::config::Config::default());
+        app.input_buffer = "hello".to_string();
+        app.cursor = "hello".len();
+
+        const W: u16 = 100;
+        const H: u16 = 24;
+        let mut terminal = Terminal::new(TestBackend::new(W, H)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let find_row = |glyph: &str| {
+            (0..H)
+                .find(|&y| (0..W).any(|x| buffer.get(x, y).symbol() == glyph))
+                .unwrap_or_else(|| panic!("the composer draws {glyph}"))
+        };
+        let (top, bottom) = (find_row("╭"), find_row("╰"));
+
+        for y in [top, bottom] {
+            for x in 0..W {
+                let cell = buffer.get(x, y);
+                assert_eq!(
+                    cell.fg,
+                    theme::adapt(theme::p().border),
+                    "({x},{y}) {:?} is structure, not a highlight",
+                    cell.symbol()
+                );
+            }
+        }
+
+        // The accent has not left the composer: it is on the marker, which is
+        // the part that says where you are typing.
+        let marker_row = (top + 1..bottom)
+            .find(|&y| (0..W).any(|x| buffer.get(x, y).symbol() == "❯"))
+            .expect("the prompt marker is drawn");
+        let marker_x = (0..W)
+            .find(|&x| buffer.get(x, marker_row).symbol() == "❯")
+            .unwrap();
+        assert_eq!(
+            buffer.get(marker_x, marker_row).fg,
+            theme::adapt(theme::p().accent),
+            "the marker keeps the accent"
+        );
+    }
+
     /// Pasting something enormous into the prompt must not take the app down.
     ///
     /// A pasted file or a long log is a completely ordinary thing to put in
@@ -5344,6 +5646,136 @@ mod tests {
         );
     }
 
+    /// The "why?" prompt, drawn at the two widths that matter: narrow enough
+    /// that everything on the row has to fit, and wide enough that nothing is
+    /// being clipped to make it pass.
+    ///
+    /// Drawn twice into the **same** terminal on purpose. A backend that is
+    /// reused across draws is what catches a row that was written in the first
+    /// frame and never overwritten in the second -- the failure mode the /login
+    /// fix was about. If the y/n choice were still visible anywhere after the
+    /// feedback prompt took over, that is exactly what a stale row looks like.
+    #[test]
+    fn the_feedback_prompt_replaces_the_choice_with_no_leftover_rows() {
+        for width in [60u16, 120u16] {
+            let mut app = approval_app();
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let before = rows(&terminal, width, 24);
+            assert!(
+                before.iter().any(|r| r.contains("y run")),
+                "{width}: the y/n choice should be on screen to begin with"
+            );
+
+            // Press `n`: the offer, not a decision.
+            app.handle_key(crate::event::KeyEvent::new(
+                crate::event::KeyCode::Char('n'),
+                crate::event::KeyModifiers::NONE,
+            ));
+            assert!(app.approval_feedback.is_some(), "{width}: n opens the prompt");
+
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let after = rows(&terminal, width, 24);
+
+            // Exactly one prompt, and it asks for a reason.
+            assert_eq!(
+                after.iter().filter(|r| r.contains("Why? (optional")).count(),
+                1,
+                "{width}: the prompt must be drawn once: {after:#?}"
+            );
+            // The input line, with its caret.
+            assert!(
+                after.iter().any(|r| r.contains('❯') && r.contains('▏')),
+                "{width}: the reason field must be visible: {after:#?}"
+            );
+            // Not one row of the choice it replaced survives.
+            assert!(
+                !after.iter().any(|r| r.contains("y run") || r.contains("deny")),
+                "{width}: the y/n rows must not linger: {after:#?}"
+            );
+        }
+    }
+
+    /// The box is sized from its line count, so an identical footer height is
+    /// what makes opening the prompt a pure repaint -- no growth, no shrink, and
+    /// therefore no row for anything to be left behind in.
+    #[test]
+    fn opening_the_feedback_prompt_does_not_change_the_box_height() {
+        for width in [60u16, 120u16] {
+            let inner = width.saturating_sub(4) as usize;
+            let request = approval_request();
+
+            let plain = approval_app();
+            let (_, plain_lines) = tool_approval_lines(&plain, &request, inner);
+
+            let mut asking = approval_app();
+            asking.approval_feedback = Some(crate::approval::Feedback::new());
+            let (_, asking_lines) = tool_approval_lines(&asking, &request, inner);
+
+            assert_eq!(
+                plain_lines.len(),
+                asking_lines.len(),
+                "{width}: the feedback prompt must occupy exactly the rows the choice did"
+            );
+        }
+    }
+
+    /// The reason is echoed as it is typed, so the user can see what the model
+    /// is about to be told.
+    #[test]
+    fn the_typed_reason_is_visible_in_the_input_line() {
+        let mut app = approval_app();
+        let mut feedback = crate::approval::Feedback::new();
+        for c in "step 2 is wrong".chars() {
+            feedback.handle_key(
+                crate::event::KeyCode::Char(c),
+                crate::event::KeyModifiers::NONE,
+            );
+        }
+        app.approval_feedback = Some(feedback);
+
+        let rows = rendered_rows(&mut app, 120, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("step 2 is wrong"))
+            .unwrap_or_else(|| panic!("the reason must be on screen: {rows:#?}"));
+        assert!(row.contains('❯'), "{row}");
+    }
+
+    fn approval_request() -> crate::approval::ApprovalRequest {
+        crate::approval::ApprovalRequest {
+            call: Default::default(),
+            action: Action::Command {
+                command: "ls -la".to_string(),
+                purpose: None,
+            },
+            remaining: 0,
+            preview: None,
+        }
+    }
+
+    /// An app sitting at an approval prompt, for the render tests above.
+    fn approval_app() -> App {
+        let mut app = App::new(crate::config::Config::default());
+        app.greeted = true;
+        app.state = AppState::AwaitingApproval;
+        app.workspace_root = "/tmp/project".to_string();
+        app.overlay = Some(Overlay::ToolApproval(approval_request()));
+        app
+    }
+
+    fn rows(
+        terminal: &Terminal<TestBackend>,
+        w: u16,
+        h: u16,
+    ) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buffer.get(x, y).symbol()).collect())
+            .collect()
+    }
+
     /// Regression: the approval box prints y/n/esc directly under the command,
     /// and the footer printed the same three keys one row below it. Two
     /// identical key bars a row apart read as two separate prompts.
@@ -5380,6 +5812,123 @@ mod tests {
             rows_with_keys, 1,
             "the y/n/esc bar must be drawn once, not twice"
         );
+    }
+
+    /// `/feedback` render: the floating box shows its title and a live counter,
+    /// and Esc leaves no box rows in the buffer on the next frame.
+    #[test]
+    fn feedback_box_renders_title_counter_and_clears_on_esc() {
+        let w = 80;
+        let h = 24;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+
+        let mut app = App::new(crate::config::Config::default());
+        app.greeted = true;
+        app.overlay = Some(Overlay::Feedback);
+
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let text = rows(&terminal, w, h).join("\n");
+        assert!(text.contains("Send Feedback"), "{text}");
+        assert!(text.contains("0 / 2000"), "{text}");
+        assert!(text.contains("Enter to send"), "{text}");
+
+        // 142 characters typed: the counter tracks it exactly.
+        app.overlay_input = "x".repeat(142);
+        app.overlay_cursor = 142;
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let text = rows(&terminal, w, h).join("\n");
+        assert!(text.contains("142 / 2000"), "{text}");
+
+        // Esc closes; one more frame must leave no box rows behind.
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let text = rows(&terminal, w, h).join("\n");
+        assert!(!text.contains("Send Feedback"), "box title lingered: {text}");
+        assert!(!text.contains("/ 2000"), "counter lingered: {text}");
+        assert!(!text.contains("Enter to send"), "hint lingered: {text}");
+    }
+
+    /// Regression: submitting a slash command must clean up every row previously
+    /// occupied by the autocomplete popup so no ghost rows linger in the buffer
+    /// or scroll into terminal history.
+    #[test]
+    fn slash_command_dispatch_clears_popup_rows_and_repaints_cleanly() {
+        let mut app = App::new(crate::config::Config::default());
+        app.greeted = true;
+        app.input_buffer = "/".to_string();
+        app.cursor = 1;
+
+        let w = 80;
+        let h = 24;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+
+        // 1. Renders the app with slash popup open and "/" in the input box.
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let initial_rows: Vec<String> = (0..h)
+            .map(|y| (0..w).map(|x| terminal.backend().buffer().get(x, y).symbol()).collect())
+            .collect();
+
+        let popup_row_indices: Vec<usize> = initial_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.contains("/plan") || r.contains("/provider") || r.contains("research first"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !popup_row_indices.is_empty(),
+            "the popup must be visible before Enter is pressed"
+        );
+
+        // 2. Simulates Enter to submit any slash command.
+        app.handle_key_with_terminal(
+            &mut terminal,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+
+        // 3. Renders one frame after dispatch.
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let after_rows: Vec<String> = (0..h)
+            .map(|y| (0..w).map(|x| terminal.backend().buffer().get(x, y).symbol()).collect())
+            .collect();
+
+        // 4. Asserts every cell in the former popup rows is blank — no /plan, /provider or any popup text remains.
+        for &row_idx in &popup_row_indices {
+            let row = &after_rows[row_idx];
+            assert!(
+                !row.contains("/plan"),
+                "row {row_idx} still contained '/plan': {row}"
+            );
+            assert!(
+                !row.contains("/provider"),
+                "row {row_idx} still contained '/provider': {row}"
+            );
+            assert!(
+                !row.contains("research first"),
+                "row {row_idx} still contained 'research first': {row}"
+            );
+            assert!(
+                row.trim().is_empty(),
+                "former popup row {row_idx} is not blank: {row:?}"
+            );
+            for x in 0..w {
+                let sym = terminal.backend().buffer().get(x, row_idx as u16).symbol();
+                assert!(
+                    sym.trim().is_empty(),
+                    "cell at ({x}, {row_idx}) is not blank: {sym:?}"
+                );
+            }
+        }
+
+        // 5. Asserts the input buffer is empty.
+        assert!(app.input_buffer.is_empty(), "input buffer must be empty after dispatch");
     }
 
     /// Regression: no live suggestions existed at all -- typing "/" showed

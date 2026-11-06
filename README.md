@@ -129,6 +129,16 @@ to ask for the same thing.
   approved change then leaves that same diff in the transcript, so "wrote 4kb"
   becomes "changed these four lines". The preview is produced by the very code
   that applies the edit, so what you approve and what happens cannot differ.
+- **Saying no can say why** — press `n` and you get one optional line:
+  `Why? (optional — enter to send, esc to skip)`. Type a reason and the model
+  is told it verbatim, so its next attempt has something to go on instead of a
+  bare "no" to guess against:
+  `✗ edit src/main.rs — rejected: "use the existing helper instead"`.
+  Leaving it empty (Enter) or pressing Esc sends the plain refusal that was
+  always sent, so a fast `n`-Enter is still the two-keystroke "no" it was, and
+  nothing about a rejection gets slower unless you want it to. The same offer
+  appears on a rejected `/plan` — where the reason is fed straight back so the
+  model revises instead of guessing — and on a cancelled `/rollback`.
 - **`/plan`** — research first, get an editable plan, *then* approve the
   approach before any file changes. The plan lands as `plan.md` in your
   project, so it's a file you own, not hidden state. Full details:
@@ -194,6 +204,7 @@ to ask for the same thing.
 | `/usage` | Local token usage — today, last 7 days, all time |
 | `/rollback` | Undo every file the model wrote this session (asks first) |
 | `/doctor` | Check this install's health — version, config, provider, key presence |
+| `/feedback` | send feedback about covexcode |
 | `/help` | List every slash command |
 
 `/provider` and `/model` write to `~/.covexcode/config.toml` and apply
@@ -263,6 +274,11 @@ The definition's prompt is appended to the built-in read-only prompt, so a
 definition changes what the child is asked to do, not what it is able to do.
 Sibling `agent` calls run concurrently (default 4, `tools.subagent_concurrency`),
 and `tools.subagent_model` can route research to a faster model.
+
+There is no setting for the feedback prompt, and no key that turns it on: it is
+not a mode, a posture or a button. It appears only in the moment you have
+already said no, asking whether you want to say why — so the answer to "do I
+want this on screen" is "only while I am refusing something".
 
 ## Privacy
 
