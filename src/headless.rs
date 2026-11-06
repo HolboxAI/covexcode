@@ -1152,18 +1152,8 @@ impl HeadlessSession {
             })
             .await;
 
-        match self.request_summary(updates).await {
-            Ok(summary) if !summary.trim().is_empty() => {
-                let summary = summary.trim().to_string();
-                self.messages = vec![crate::compact::summary_message(&summary)];
-                // The old turn boundaries index a conversation that no longer
-                // exists. Keep the rollback journal (its file before-states are
-                // still valid), but start the conversation afresh -- including
-                // on disk, so the pre-compaction file stays resumable.
-                self.turn_starts.clear();
-                self.last_prompt_tokens = None;
-                self.log.reset();
-                self.persist();
+        match self.compact_history(updates).await {
+            Ok(Some(_)) => {
                 let _ = updates
                     .send(SessionUpdate::AgentMessageChunk {
                         content: ContentBlock::Text {
@@ -1178,7 +1168,7 @@ impl HeadlessSession {
                     .await;
                 true
             }
-            Ok(_) => {
+            Ok(None) => {
                 let _ = updates
                     .send(SessionUpdate::AgentMessageChunk {
                         content: ContentBlock::Text {
@@ -1206,6 +1196,72 @@ impl HeadlessSession {
                 false
             }
         }
+    }
+
+    /// Summarize and replace the conversation. `Ok(Some(summary))` when it
+    /// was replaced, `Ok(None)` for an empty summary, `Err` when the request
+    /// failed. The success note is the caller's, because auto and manual
+    /// compaction word it differently.
+    async fn compact_history(
+        &mut self,
+        updates: &UpdateSink<'_>,
+    ) -> Result<Option<String>, String> {
+        match self.request_summary(updates).await {
+            Ok(summary) if !summary.trim().is_empty() => {
+                let summary = summary.trim().to_string();
+                self.messages = vec![crate::compact::summary_message(&summary)];
+                // The old turn boundaries index a conversation that no longer
+                // exists. Keep the rollback journal (its file before-states are
+                // still valid), but start the conversation afresh -- including
+                // on disk, so the pre-compaction file stays resumable.
+                self.turn_starts.clear();
+                self.last_prompt_tokens = None;
+                self.log.reset();
+                self.persist();
+                Ok(Some(summary))
+            }
+            Ok(_) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Manual compaction (`/compact`), for an in-process client that owns
+    /// the command surface rather than sending a prompt. Emits
+    /// [`SessionEvent::Compacted`] with the outcome and returns whether the
+    /// history was actually replaced.
+    pub async fn compact_now(&mut self, updates: &mpsc::Sender<SessionUpdate>) -> bool {
+        if self.messages.len() < 2 {
+            self.emit(SessionEvent::Compacted {
+                session_id: self.session_id.clone(),
+                turn: TurnId::new(self.turn),
+                summary: None,
+                error: Some("there is nothing to compact".to_string()),
+            });
+            return false;
+        }
+        let sink = UpdateSink {
+            updates,
+            events: self.events.clone(),
+            session_id: self.session_id.clone(),
+            turn: TurnId::new(self.turn),
+        };
+        let outcome = self.compact_history(&sink).await;
+        let (summary, error) = match outcome {
+            Ok(Some(summary)) => (Some(summary), None),
+            Ok(None) => (
+                None,
+                Some("the endpoint returned an empty summary".to_string()),
+            ),
+            Err(error) => (None, Some(error)),
+        };
+        let replaced = summary.is_some();
+        self.emit(SessionEvent::Compacted {
+            session_id: self.session_id.clone(),
+            turn: TurnId::new(self.turn),
+            summary,
+            error,
+        });
+        replaced
     }
 
     /// Ask the model to summarize the current conversation. This request has
@@ -2814,6 +2870,66 @@ mod tests {
         assert_eq!(session.messages.len(), 4);
         assert_eq!(session.turn, 2);
         assert_eq!(session.turn_starts, vec![0, 2]);
+    }
+
+    /// A manual `/compact` summarizes the history, replaces it, and tells
+    /// event subscribers what happened.
+    #[tokio::test]
+    async fn manual_compaction_replaces_history_and_emits_compacted() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![text_round("the summary")]).await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let mut events = session.subscribe_events();
+        session.restore(vec![
+            ChatMessage::text("user", "one"),
+            ChatMessage::text("assistant", "two"),
+        ]);
+
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let replaced = session.compact_now(&updates_tx).await;
+        drop(updates_tx);
+
+        assert!(replaced);
+        assert_eq!(session.messages.len(), 1, "the history is the summary");
+        let content = session.messages[0].content.as_deref().unwrap_or("");
+        assert!(content.contains("the summary"), "{content}");
+        assert!(session.turn_starts.is_empty());
+
+        let mut compacted = None;
+        while let Ok(event) = events.try_recv() {
+            if let SessionEvent::Compacted {
+                summary: Some(summary),
+                ..
+            } = event
+            {
+                compacted = Some(summary);
+            }
+        }
+        assert_eq!(compacted.as_deref(), Some("the summary"));
+        while updates_rx.try_recv().is_ok() {}
+    }
+
+    /// Nothing to summarize is reported as an error on the same event, not
+    /// as a silent no-op.
+    #[tokio::test]
+    async fn compacting_a_single_message_reports_the_error() {
+        let (_dir, ws) = workspace();
+        let config = config_for("http://127.0.0.1:1");
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let mut events = session.subscribe_events();
+        session.restore(vec![ChatMessage::text("user", "only")]);
+
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let replaced = session.compact_now(&updates_tx).await;
+
+        assert!(!replaced);
+        assert_eq!(session.messages.len(), 1, "history is untouched");
+        let event = events.try_recv().expect("one event");
+        assert!(matches!(
+            event,
+            SessionEvent::Compacted { summary: None, error: Some(_), .. }
+        ));
     }
 
     /// Multiple clients can watch the same session: every subscriber gets its

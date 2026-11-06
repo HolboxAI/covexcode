@@ -46,6 +46,10 @@ enum ClientMsg {
     Restore {
         messages: Vec<crate::llm::ChatMessage>,
     },
+    /// `/compact`: summarize and replace the conversation. `respond` carries
+    /// whether the history was actually replaced; the outcome also arrives as
+    /// `SessionEvent::Compacted`.
+    Compact { respond: oneshot::Sender<bool> },
 }
 
 /// A frontend's handle to one running engine. Dropping it ends the actor
@@ -96,6 +100,15 @@ impl EngineClient {
                     }
                     ClientMsg::Reset => session.reset(),
                     ClientMsg::Restore { messages } => session.restore(messages),
+                    ClientMsg::Compact { respond } => {
+                        let (updates_tx, mut updates_rx) = mpsc::channel(64);
+                        let drain =
+                            tokio::spawn(async move { while updates_rx.recv().await.is_some() {} });
+                        let replaced = session.compact_now(&updates_tx).await;
+                        drop(updates_tx);
+                        let _ = drain.await;
+                        let _ = respond.send(replaced);
+                    }
                 }
             }
         });
@@ -160,6 +173,18 @@ impl EngineClient {
         self.commands
             .try_send(ClientMsg::Restore { messages })
             .is_ok()
+    }
+
+    /// Summarize and replace the conversation (`/compact`). Resolves with
+    /// whether the history was replaced; the same outcome arrives as
+    /// `SessionEvent::Compacted`.
+    pub async fn compact(&self) -> Option<bool> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ClientMsg::Compact { respond })
+            .await
+            .ok()?;
+        receive.await.ok()
     }
 }
 
@@ -507,5 +532,46 @@ mod tests {
         assert!(body.contains("earlier question"), "{body}");
         assert!(body.contains("earlier answer"), "{body}");
         assert!(body.contains("follow up"), "{body}");
+    }
+
+    /// `/compact` replaces what the next request carries, and reports the
+    /// outcome both as a return value and as an event.
+    #[tokio::test]
+    async fn compact_replaces_the_history_the_next_prompt_sends() {
+        let (_dir, ws) = workspace();
+        let (endpoint, mut bodies) = serve_rounds_capturing(vec![
+            text_round("summary of earlier"),
+            text_round("after answer"),
+        ])
+        .await;
+        let SpawnedSession {
+            client, mut events, ..
+        } = EngineClient::spawn(ws, config_for(&endpoint));
+        assert!(client.restore(vec![
+            crate::llm::ChatMessage::text("user", "earlier question"),
+            crate::llm::ChatMessage::text("assistant", "earlier answer"),
+        ]));
+
+        let replaced = client.compact().await;
+        assert_eq!(replaced, Some(true));
+        let _summary_request = bodies.recv().await.expect("the summary request");
+
+        let mut compacted = None;
+        while let Ok(event) = events.try_recv() {
+            if let SessionEvent::Compacted {
+                summary: Some(summary),
+                ..
+            } = event
+            {
+                compacted = Some(summary);
+            }
+        }
+        assert_eq!(compacted.as_deref(), Some("summary of earlier"));
+
+        let stop = client.prompt("after", Vec::new(), None).await;
+        assert_eq!(stop, Some(StopReason::EndTurn));
+        let body = bodies.recv().await.expect("the follow-up request");
+        assert!(body.contains("summary of earlier"), "{body}");
+        assert!(!body.contains("earlier question"), "{body}");
     }
 }

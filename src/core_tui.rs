@@ -3,12 +3,12 @@
 //!
 //! Enabled by `COVEXCODE_CORE_SESSION=1`. Deliberately partial in this first
 //! slice: the engine owns the turn, so text, tool results, usage and approval
-//! prompts are real and stream in normally, and `/new`, `/resume`,
-//! `/sessions` and startup `--resume` are mirrored into the engine, but the
-//! TUI's own surfaces that assume it owns the agent have not all moved yet:
+//! prompts are real and stream in normally, and `/new`, `/compact`, `/resume`,
+//! `/sessions` and startup `--resume` are mirrored into the engine. The one
+//! TUI surface not wired yet:
 //!
-//! - `/compact` and `/rollback` still operate on `App`'s local history, not
-//!   the engine's.
+//! - `/rollback` is refused with a note: the engine keeps its own journal and
+//!   the TUI cannot see it.
 //!
 //! The old path stays the default and is untouched; with the variable unset
 //! nothing in this module runs.
@@ -128,6 +128,22 @@ impl CoreTui {
     /// `Sending`, mirroring `agent::fire_request`.
     pub fn fire(&mut self, app: &mut App) {
         if app.state != AppState::Sending {
+            return;
+        }
+        // `/compact` is not a prompt: App has no user message to send, it
+        // queued a summary request. Hand it to the engine's compaction path
+        // and let the `Compacted` event settle the turn.
+        if app.compacting {
+            app.request_id += 1;
+            app.request_started = Some(std::time::Instant::now());
+            app.state = AppState::Streaming;
+            self.active = true;
+            self.titles.clear();
+            self.pending_approvals.clear();
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                let _ = client.compact().await;
+            });
             return;
         }
         let Some(message) = app.messages.iter().rev().find(|m| m.role == Role::User) else {
@@ -276,6 +292,18 @@ impl CoreTui {
                     ) {
                         app.note("The engine cancelled that approval request.".to_string());
                     }
+                }
+            }
+            SessionEvent::Compacted { summary, error, .. } => {
+                self.active = false;
+                match (summary, error) {
+                    (Some(summary), _) => app.finish_core_compaction(summary),
+                    (None, Some(error)) => app.fail_stream(format!("Compaction failed: {error}")),
+                    (None, None) => app.fail_stream(
+                        "The endpoint returned an empty summary, so nothing was compacted. \
+                         The conversation is unchanged."
+                            .to_string(),
+                    ),
                 }
             }
             SessionEvent::TurnFinished { .. } => {
@@ -745,5 +773,61 @@ mod tests {
         assert!(!core.active, "an in-flight turn is stopped");
         assert_eq!(app.core_approval, None);
         assert!(core.pending_approvals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_compacted_event_replaces_the_transcript() {
+        let (_dir, mut core, mut app) = core_with_workspace();
+        core.active = true;
+        app.compacting = true;
+        app.messages.push(Message::new(Role::User, "old"));
+        app.messages
+            .push(Message::new(Role::Assistant, "old answer"));
+
+        core.apply(
+            &mut app,
+            SessionEvent::Compacted {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                summary: Some("the summary".to_string()),
+                error: None,
+            },
+        );
+
+        assert!(!core.active);
+        assert!(!app.compacting);
+        assert_eq!(app.state, AppState::AwaitingInput);
+        assert!(app.messages.iter().any(|m| m.role == Role::Summary
+            && m.content.contains("the summary")
+            && m.display.as_deref() == Some("the summary")));
+    }
+
+    #[tokio::test]
+    async fn a_failed_compaction_keeps_the_transcript_and_reports_it() {
+        let (_dir, mut core, mut app) = core_with_workspace();
+        core.active = true;
+        app.compacting = true;
+        app.messages.push(Message::new(Role::User, "old"));
+
+        core.apply(
+            &mut app,
+            SessionEvent::Compacted {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                summary: None,
+                error: Some("endpoint said no".to_string()),
+            },
+        );
+
+        assert!(!core.active);
+        assert_eq!(app.state, AppState::AwaitingInput);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.role == Role::User && m.content == "old"));
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.role == Role::Error && m.content.contains("endpoint said no")));
     }
 }
