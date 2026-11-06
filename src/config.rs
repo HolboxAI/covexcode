@@ -1224,18 +1224,25 @@ mod tests {
     /// config or appended to the prompt history wrote to the live agent
     /// directory. This pins the fixed behaviour: the export does not survive
     /// into the isolation, and the temporary `$HOME` decides the path.
+    ///
+    /// The lock is taken *before* planting, same as the end-to-end test
+    /// below: an exported variable is process-global, so leaving it set while
+    /// another isolated test holds the lock would redirect *that* test's
+    /// `config_dir` too. That exact race emptied a backend test's deploy
+    /// registry in CI. `with_isolated_home` cannot be used here because it
+    /// takes the very lock this test already holds.
     #[test]
-    fn an_isolated_home_ignores_an_exported_config_dir() {
+    fn redirecting_home_ignores_an_exported_config_dir() {
+        let _lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let planted = tempfile::tempdir().unwrap();
         let _planted = EnvGuard::set("COVEXCODE_CONFIG_DIR", planted.path());
 
-        let (dir, override_inside, home_inside) = with_isolated_home(|| {
-            (
-                Config::config_dir(),
-                std::env::var_os("COVEXCODE_CONFIG_DIR"),
-                std::env::var_os("HOME").map(PathBuf::from),
-            )
-        });
+        let isolated = tempfile::tempdir().unwrap();
+        let prev = super::test_support::redirect_home(isolated.path());
+        let dir = Config::config_dir();
+        let override_inside = std::env::var_os("COVEXCODE_CONFIG_DIR");
+        let home_inside = std::env::var_os("HOME").map(PathBuf::from);
+        super::test_support::restore_home(prev);
 
         assert!(
             override_inside.is_none(),
