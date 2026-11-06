@@ -38,6 +38,14 @@ enum ClientMsg {
         mode: Option<Mode>,
         respond: oneshot::Sender<StopReason>,
     },
+    /// `/new`: forget the conversation. Queued behind any in-flight turn,
+    /// like every other actor message.
+    Reset,
+    /// `--resume`: replace the empty history with a recording. Sent once,
+    /// before the first prompt.
+    Restore {
+        messages: Vec<crate::llm::ChatMessage>,
+    },
 }
 
 /// A frontend's handle to one running engine. Dropping it ends the actor
@@ -86,6 +94,8 @@ impl EngineClient {
                         let stop = run_prompt(&mut session, text, images, mode).await;
                         let _ = respond.send(stop);
                     }
+                    ClientMsg::Reset => session.reset(),
+                    ClientMsg::Restore { messages } => session.restore(messages),
                 }
             }
         });
@@ -133,6 +143,23 @@ impl EngineClient {
             .await
             .ok()?;
         receive.await.ok()
+    }
+
+    /// Forget the conversation, matching the TUI's `/new`. Non-blocking: the
+    /// actor queue holds at most one in-flight prompt plus these control
+    /// messages, so a full channel would mean something is already wrong.
+    /// Returns false if the actor is gone.
+    pub fn reset(&self) -> bool {
+        self.commands.try_send(ClientMsg::Reset).is_ok()
+    }
+
+    /// Replace the session's history with a recording (`--resume`). Send it
+    /// before the first prompt; it is ordered with prompts on the same
+    /// channel, so a later prompt cannot overtake it.
+    pub fn restore(&self, messages: Vec<crate::llm::ChatMessage>) -> bool {
+        self.commands
+            .try_send(ClientMsg::Restore { messages })
+            .is_ok()
     }
 }
 
@@ -231,7 +258,7 @@ mod tests {
         ))
     }
 
-    async fn read_request(socket: &mut tokio::net::TcpStream) {
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
@@ -252,20 +279,32 @@ mod tests {
                 }
             }
         }
+        String::from_utf8_lossy(&buf).to_string()
     }
 
     async fn serve_rounds(responses: Vec<String>) -> String {
+        let (endpoint, _bodies) = serve_rounds_capturing(responses).await;
+        endpoint
+    }
+
+    /// Same server, but hands the test each request body -- enough to prove
+    /// what history was actually sent on the wire.
+    async fn serve_rounds_capturing(
+        responses: Vec<String>,
+    ) -> (String, mpsc::UnboundedReceiver<String>) {
+        let (tx, rx) = mpsc::unbounded_channel();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             for response in responses {
                 let (mut socket, _) = listener.accept().await.expect("accept");
-                read_request(&mut socket).await;
+                let body = read_request(&mut socket).await;
+                let _ = tx.send(body);
                 let _ = socket.write_all(response.as_bytes()).await;
                 let _ = socket.shutdown().await;
             }
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), rx)
     }
 
     async fn serve_delayed(delay: std::time::Duration, response: String) -> String {
@@ -422,5 +461,51 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// `/new` must clear what the *next* model request sends, not only what
+    /// the UI shows.
+    #[tokio::test]
+    async fn reset_clears_the_history_the_next_prompt_sends() {
+        let (_dir, ws) = workspace();
+        let (endpoint, mut bodies) = serve_rounds_capturing(vec![
+            text_round("first answer"),
+            text_round("second answer"),
+        ])
+        .await;
+        let SpawnedSession { client, .. } = EngineClient::spawn(ws, config_for(&endpoint));
+
+        let stop = client.prompt("first question", Vec::new(), None).await;
+        assert_eq!(stop, Some(StopReason::EndTurn));
+        let first = bodies.recv().await.expect("the first request");
+        assert!(first.contains("first question"), "{first}");
+
+        assert!(client.reset());
+        let stop = client.prompt("second question", Vec::new(), None).await;
+        assert_eq!(stop, Some(StopReason::EndTurn));
+        let second = bodies.recv().await.expect("the second request");
+        assert!(second.contains("second question"), "{second}");
+        assert!(!second.contains("first question"), "{second}");
+        assert!(!second.contains("first answer"), "{second}");
+    }
+
+    /// `--resume`: restored history is part of the very next request.
+    #[tokio::test]
+    async fn restored_history_is_sent_on_the_next_prompt() {
+        let (_dir, ws) = workspace();
+        let (endpoint, mut bodies) = serve_rounds_capturing(vec![text_round("ok")]).await;
+        let SpawnedSession { client, .. } = EngineClient::spawn(ws, config_for(&endpoint));
+
+        assert!(client.restore(vec![
+            crate::llm::ChatMessage::text("user", "earlier question"),
+            crate::llm::ChatMessage::text("assistant", "earlier answer"),
+        ]));
+
+        let stop = client.prompt("follow up", Vec::new(), None).await;
+        assert_eq!(stop, Some(StopReason::EndTurn));
+        let body = bodies.recv().await.expect("the request");
+        assert!(body.contains("earlier question"), "{body}");
+        assert!(body.contains("earlier answer"), "{body}");
+        assert!(body.contains("follow up"), "{body}");
     }
 }

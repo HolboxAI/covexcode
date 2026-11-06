@@ -677,6 +677,22 @@ impl HeadlessSession {
         self.log.reset();
     }
 
+    /// Forget the conversation, matching the TUI's `/new`: transcript, turn
+    /// boundaries, todo list, usage snapshot and rollback journal all reset,
+    /// and the next turn starts a fresh session file. The active plan is
+    /// deliberately kept -- it lives on disk and `/new` in the TUI leaves it
+    /// alone too.
+    pub fn reset(&mut self) {
+        self.messages.clear();
+        self.turn_starts.clear();
+        self.turn = 0;
+        self.tool_steps = 0;
+        self.last_prompt_tokens = None;
+        self.todos.clear();
+        self.rollback = crate::rollback::Journal::default();
+        self.log.reset();
+    }
+
     fn emit(&self, event: SessionEvent) {
         self.events.send(event);
     }
