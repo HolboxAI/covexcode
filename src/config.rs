@@ -1746,52 +1746,45 @@ mod tests {
     /// free-tier device token: losing it re-enrols the machine as brand new,
     /// which reads to the gateway as someone farming fresh daily budgets rather
     /// than as the same machine after an upgrade.
-    ///
-    /// Driven through `adopt_legacy_dir` with an explicit home, not through a
-    /// redirected `$HOME`. `$HOME` is process-global and adoption *renames* a
-    /// directory, so any test that reaches `Config::config_dir()` for its own
-    /// reason -- `tools`' change-request tests, `db`'s token tests -- adopts
-    /// and steals this test's `.tuisample-code` between the writes below. That
-    /// only bites where no real `~/.covexcode` exists to hit the early return:
-    /// a developer machine has one, a clean CI runner does not, which is why
-    /// it surfaced there as `Os { code: 2, NotFound }` on the `device_id`
-    /// write. Paths we own make the test independent of both.
     #[test]
     fn the_pre_rename_directory_is_adopted_on_first_run() {
-        let temp = tempfile::tempdir().expect("temp home");
-        let home = temp.path();
-        let legacy = home.join(".tuisample-code");
-        let dir = home.join(".covexcode");
+        with_isolated_home(|| {
+            let home = PathBuf::from(std::env::var("HOME").unwrap());
+            let legacy = home.join(".tuisample-code");
+            // Build the legacy directory somewhere adoption cannot see, then
+            // move it into place in one step. Other tests call
+            // `Config::config_dir` without this test's HOME_LOCK, and an
+            // adoption triggered between these writes would rename the
+            // half-built directory out from under the fixture.
+            let staging = home.join(".tuisample-code-staging");
+            std::fs::create_dir_all(&staging).unwrap();
+            std::fs::write(
+                staging.join("config.toml"),
+                "[llm]\nendpoint = \"https://api.deepseek.com\"\nmodel = \"kept\"\napi_key = \"sk-kept\"\n",
+            )
+            .unwrap();
+            std::fs::write(staging.join("device_id"), "device-kept").unwrap();
+            std::fs::rename(&staging, &legacy).unwrap();
 
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(
-            legacy.join("config.toml"),
-            "[llm]\nendpoint = \"https://api.deepseek.com\"\nmodel = \"kept\"\napi_key = \"sk-kept\"\n",
-        )
-        .unwrap();
-        std::fs::write(legacy.join("device_id"), "device-kept").unwrap();
+            let dir = Config::config_dir();
+            assert!(dir.ends_with(".covexcode"), "{dir:?}");
+            assert!(
+                !legacy.exists(),
+                "the old directory should have been moved, not copied"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join("device_id")).unwrap(),
+                "device-kept",
+                "the free-tier identity must survive the rename"
+            );
 
-        adopt_legacy_dir(home, &dir);
-
-        assert!(dir.exists(), "the old directory becomes the new one");
-        assert!(
-            !legacy.exists(),
-            "the old directory should have been moved, not copied"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("device_id")).unwrap(),
-            "device-kept",
-            "the free-tier identity must survive the rename"
-        );
-
-        // ...and the settings have to survive *readable*: a rename that left
-        // the file intact but unparseable would be as bad as losing it.
-        let adopted: Config = toml::from_str(
-            &std::fs::read_to_string(dir.join("config.toml")).expect("config.toml came across"),
-        )
-        .expect("the adopted config still loads");
-        assert_eq!(adopted.llm.model, "kept");
-        assert_eq!(adopted.llm.api_key, "sk-kept");
+            for key in ["COVEXCODE_ENDPOINT", "COVEXCODE_MODEL", "COVEXCODE_API_KEY"] {
+                std::env::remove_var(key);
+            }
+            let loaded = Config::load().expect("the adopted config still loads");
+            assert_eq!(loaded.llm.model, "kept");
+            assert_eq!(loaded.llm.api_key, "sk-kept");
+        });
     }
 
     /// Adopting must never clobber a directory this install already has.

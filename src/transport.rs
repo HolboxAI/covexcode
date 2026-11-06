@@ -31,10 +31,10 @@
 //! isn't unit tested for the same reason `main`'s own top-level loop isn't.
 
 use crate::config::Config;
-use crate::domain::ApprovalResolution;
+use crate::domain::{ApprovalResolution, SessionEvent, SessionStatus};
 use crate::headless::{
-    ApprovalHandle, BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk, BrowserInteractResult,
-    CancelHandle, HeadlessSession, PermissionAsk,
+    ApprovalHandle, AskHandle, BrowserCheckAsk, BrowserCheckResult, BrowserInteractAsk,
+    BrowserInteractResult, CancelHandle, HeadlessSession, PermissionAsk,
 };
 use crate::protocol::{
     CheckInBrowserOutcome, CheckInBrowserRequest, Implementation, InitializeRequest,
@@ -42,11 +42,12 @@ use crate::protocol::{
     ListChangesRequest, ListChangesResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
     PromptResponse, RequestId, RequestPermissionOutcome, RollbackRequest,
     RollbackResponse, RpcError, RpcErrorObject, RpcRequest, RpcResponse, SessionId,
-    SessionNotification, PROTOCOL_VERSION,
+    SessionNotification, SessionUpdate, PROTOCOL_VERSION,
 };
 use crate::workspace::Workspace;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -122,6 +123,28 @@ fn classify(value: &serde_json::Value) -> Incoming {
     }
 }
 
+/// The custom session methods that take one id: attach and close.
+#[derive(serde::Deserialize)]
+struct SessionIdRequest {
+    #[serde(rename = "sessionId")]
+    session_id: SessionId,
+}
+
+/// `session/recordings`: list what can be resumed for a workspace.
+#[derive(serde::Deserialize)]
+struct WorkspaceRequest {
+    cwd: String,
+}
+
+/// `session/resume`: a path from `session/recordings`, plus the workspace it
+/// must belong to. The workspace check is deliberate -- resuming a recording
+/// into a project it was never about would silently mix two histories.
+#[derive(serde::Deserialize)]
+struct ResumeSessionRequest {
+    cwd: String,
+    path: std::path::PathBuf,
+}
+
 /// A message sent to one session's own task.
 enum SessionMsg {
     Prompt {
@@ -151,12 +174,113 @@ enum SessionMsg {
 /// asynchronously, outside of `Router::handle`'s own synchronous return
 /// value -- see this module's own docs for why `session/prompt`'s response
 /// has to travel this way rather than being returned directly.
+#[derive(Clone)]
 enum Outgoing {
     /// A `session/update` notification, still needing its envelope built.
     Update(SessionNotification),
     /// An already-serialized JSON-RPC line (a deferred request's response),
     /// ready to write as-is.
     Line(String),
+}
+
+/// Broadcasts one session's ACP updates to every connection attached to it.
+///
+/// Backpressure is deliberate: `send` awaits each connection's bounded
+/// outgoing queue, and the actor answers `session/prompt` only after its
+/// per-turn drain has pushed every update, so no client sees the response
+/// before the updates that belong to it.
+#[derive(Clone)]
+struct UpdateHub {
+    session_id: SessionId,
+    subscribers: Arc<tokio::sync::Mutex<Vec<mpsc::Sender<Outgoing>>>>,
+}
+
+impl UpdateHub {
+    fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn subscribe(&self, outgoing: mpsc::Sender<Outgoing>) {
+        self.subscribers.lock().await.push(outgoing);
+    }
+
+    async fn send(&self, update: SessionUpdate) {
+        let message = Outgoing::Update(SessionNotification {
+            session_id: self.session_id.clone(),
+            update,
+        });
+        let mut subscribers = self.subscribers.lock().await;
+        let mut index = 0;
+        while index < subscribers.len() {
+            if subscribers[index].send(message.clone()).await.is_err() {
+                // A closed connection: drop it rather than failing the turn
+                // for every other subscriber.
+                subscribers.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+/// Broadcasts one kind of engine ask to every attached connection. Each
+/// connection sends its own ACP request; the ask's handle makes the first
+/// answer win and the rest no-ops.
+#[derive(Clone)]
+struct RelayHub<T> {
+    subscribers: Arc<tokio::sync::Mutex<Vec<mpsc::Sender<T>>>>,
+}
+
+impl<T: Clone + Send> RelayHub<T> {
+    fn new() -> Self {
+        Self {
+            subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn subscribe(&self, relay: mpsc::Sender<T>) {
+        self.subscribers.lock().await.push(relay);
+    }
+
+    async fn send(&self, item: T) {
+        let mut subscribers = self.subscribers.lock().await;
+        let mut index = 0;
+        while index < subscribers.len() {
+            if subscribers[index].send(item.clone()).await.is_err() {
+                subscribers.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+
+type ApprovalHub = RelayHub<PermissionAsk>;
+type BrowserCheckHub = RelayHub<BrowserCheckAsk>;
+type BrowserInteractHub = RelayHub<BrowserInteractAsk>;
+
+/// Everything a session fans out to the connections attached to it. Grouped
+/// so the registry carries one field, not four parallel ones.
+#[derive(Clone)]
+struct SessionChannels {
+    updates: UpdateHub,
+    approvals: ApprovalHub,
+    browser_checks: BrowserCheckHub,
+    browser_interactions: BrowserInteractHub,
+}
+
+impl SessionChannels {
+    fn new(session_id: SessionId) -> Self {
+        Self {
+            updates: UpdateHub::new(session_id),
+            approvals: ApprovalHub::new(),
+            browser_checks: BrowserCheckHub::new(),
+            browser_interactions: BrowserInteractHub::new(),
+        }
+    }
 }
 
 /// Owns one [`HeadlessSession`] and processes its `session/prompt` calls
@@ -167,12 +291,8 @@ struct SessionActor;
 impl SessionActor {
     fn spawn(
         mut session: HeadlessSession,
-        outgoing_tx: mpsc::Sender<Outgoing>,
-        permission_relay: mpsc::Sender<PermissionAsk>,
-        browser_relay: mpsc::Sender<BrowserCheckAsk>,
-        browser_interact_relay: mpsc::Sender<BrowserInteractAsk>,
+        channels: SessionChannels,
         mcp_configs: Vec<crate::mcp::McpServerConfig>,
-        session_id: SessionId,
     ) -> mpsc::Sender<SessionMsg> {
         let (tx, mut rx) = mpsc::channel::<SessionMsg>(8);
         tokio::spawn(async move {
@@ -204,20 +324,38 @@ impl SessionActor {
                         // one from three turns ago.
                         let (updates_tx, mut updates_rx) = mpsc::channel(64);
                         // Drain this prompt's own update channel into the
-                        // shared outgoing one, tagged with this session's
-                        // id -- HeadlessSession itself doesn't know about
-                        // the wire, only about SessionUpdate values (see
+                        // session's hub, which fans it out to every attached
+                        // connection. HeadlessSession itself does not know
+                        // about the wire, only about SessionUpdate values (see
                         // headless.rs's own module docs).
-                        let session_id = session_id.clone();
-                        let outgoing_tx = outgoing_tx.clone();
-                        let drain = tokio::spawn(async move {
+                        let hub = channels.updates.clone();
+                        let update_drain = tokio::spawn(async move {
                             while let Some(update) = updates_rx.recv().await {
-                                let _ = outgoing_tx
-                                    .send(Outgoing::Update(SessionNotification {
-                                        session_id: session_id.clone(),
-                                        update,
-                                    }))
-                                    .await;
+                                hub.send(update).await;
+                            }
+                        });
+                        // The three ask kinds follow the same pattern: a fresh
+                        // channel per prompt, drained into its hub so every
+                        // attached connection sees the ask.
+                        let (permissions_tx, mut permissions_rx) = mpsc::channel(16);
+                        let approval_hub = channels.approvals.clone();
+                        let approval_drain = tokio::spawn(async move {
+                            while let Some(ask) = permissions_rx.recv().await {
+                                approval_hub.send(ask).await;
+                            }
+                        });
+                        let (browser_tx, mut browser_rx) = mpsc::channel(16);
+                        let browser_hub = channels.browser_checks.clone();
+                        let browser_drain = tokio::spawn(async move {
+                            while let Some(ask) = browser_rx.recv().await {
+                                browser_hub.send(ask).await;
+                            }
+                        });
+                        let (browser_interact_tx, mut browser_interact_rx) = mpsc::channel(16);
+                        let browser_interact_hub = channels.browser_interactions.clone();
+                        let browser_interact_drain = tokio::spawn(async move {
+                            while let Some(ask) = browser_interact_rx.recv().await {
+                                browser_interact_hub.send(ask).await;
                             }
                         });
                         let stop_reason = session
@@ -226,13 +364,19 @@ impl SessionActor {
                                 images,
                                 mode,
                                 &updates_tx,
-                                &permission_relay,
-                                &browser_relay,
-                                &browser_interact_relay,
+                                &permissions_tx,
+                                &browser_tx,
+                                &browser_interact_tx,
                             )
                             .await;
                         drop(updates_tx); // let the drain task see the channel close
-                        let _ = drain.await;
+                        let _ = update_drain.await;
+                        drop(permissions_tx);
+                        let _ = approval_drain.await;
+                        drop(browser_tx);
+                        let _ = browser_drain.await;
+                        drop(browser_interact_tx);
+                        let _ = browser_interact_drain.await;
                         let _ = respond.send(PromptResponse {
                             stop_reason,
                             turn: session.current_turn(),
@@ -253,9 +397,15 @@ impl SessionActor {
 
 /// One live session on this connection: the queue its actor reads and the
 /// handle that can stop the turn it is currently awaiting.
+#[derive(Clone)]
 struct SessionHandle {
     commands: mpsc::Sender<SessionMsg>,
     cancel: CancelHandle,
+    /// Where another connection subscribes when it attaches to this session.
+    channels: SessionChannels,
+    /// Last status the engine reported. Starts `Idle`; a tracker task keeps
+    /// it current from `SessionEvent::StatusChanged`.
+    status: SessionStatus,
 }
 
 /// The sessions one connection owns.
@@ -281,8 +431,22 @@ impl SessionRegistry {
         SessionId(format!("sess_{}", self.next_id))
     }
 
-    fn insert(&mut self, id: SessionId, commands: mpsc::Sender<SessionMsg>, cancel: CancelHandle) {
-        self.sessions.insert(id, SessionHandle { commands, cancel });
+    fn insert(
+        &mut self,
+        id: SessionId,
+        commands: mpsc::Sender<SessionMsg>,
+        cancel: CancelHandle,
+        channels: SessionChannels,
+    ) {
+        self.sessions.insert(
+            id,
+            SessionHandle {
+                commands,
+                cancel,
+                channels,
+                status: SessionStatus::Idle,
+            },
+        );
     }
 
     fn get(&self, id: &SessionId) -> Option<&SessionHandle> {
@@ -296,6 +460,52 @@ impl SessionRegistry {
             handle.cancel.cancel();
         }
     }
+
+    /// Every live session with its last reported status, sorted so a client's
+    /// list is stable between calls.
+    fn list(&self) -> Vec<(SessionId, SessionStatus)> {
+        let mut entries: Vec<(SessionId, SessionStatus)> = self
+            .sessions
+            .iter()
+            .map(|(id, handle)| (id.clone(), handle.status))
+            .collect();
+        entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        entries
+    }
+
+    fn set_status(&mut self, id: &SessionId, status: SessionStatus) {
+        if let Some(handle) = self.sessions.get_mut(id) {
+            handle.status = status;
+        }
+    }
+
+    /// Remove a session and hand its handle to the caller. Dropping the handle
+    /// closes the actor's command channel, which ends the actor once its
+    /// current turn finishes.
+    fn remove(&mut self, id: &SessionId) -> Option<SessionHandle> {
+        self.sessions.remove(id)
+    }
+}
+
+/// The session table shared by every connection a server accepts. A plain
+/// stdio run gets its own private one; `serve` creates a single table and
+/// hands clones to each connection.
+type SharedSessions = Arc<tokio::sync::Mutex<SessionRegistry>>;
+
+/// Keeps the registry's status for one session current. The engine's event hub
+/// closes when the actor ends, which ends this task too.
+fn spawn_status_tracker(
+    sessions: SharedSessions,
+    session_id: SessionId,
+    mut events: mpsc::UnboundedReceiver<SessionEvent>,
+) {
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let SessionEvent::StatusChanged { status, .. } = event {
+                sessions.lock().await.set_status(&session_id, status);
+            }
+        }
+    });
 }
 
 /// Owns everything the read loop needs across the life of the connection:
@@ -307,13 +517,15 @@ impl SessionRegistry {
 /// `PermissionAsk`/`BrowserCheckAsk`/`BrowserInteractAsk` split: a small,
 /// explicit type (and table) per real use.
 struct Router {
-    sessions: SessionRegistry,
+    sessions: SharedSessions,
     /// ACP request id -> the engine-local id and handle that answer it. The
     /// engine waits on the handle, so the transport never owns a oneshot for
     /// a permission ask.
     pending_permission_responses: HashMap<RequestId, (u64, ApprovalHandle)>,
-    pending_browser_responses: HashMap<RequestId, oneshot::Sender<BrowserCheckResult>>,
-    pending_browser_interact_responses: HashMap<RequestId, oneshot::Sender<BrowserInteractResult>>,
+    /// Same shape as the permission table: the engine id and the cloneable
+    /// answer handle for that ask.
+    pending_browser_responses: HashMap<RequestId, (u64, AskHandle<BrowserCheckResult>)>,
+    pending_browser_interact_responses: HashMap<RequestId, (u64, AskHandle<BrowserInteractResult>)>,
     next_outgoing_id: i64,
     outgoing_tx: mpsc::Sender<Outgoing>,
     permission_relay_in: mpsc::Receiver<PermissionAsk>,
@@ -330,11 +542,23 @@ struct Router {
 
 impl Router {
     fn new(config: Config, outgoing_tx: mpsc::Sender<Outgoing>) -> Self {
+        Self::with_sessions(
+            config,
+            outgoing_tx,
+            Arc::new(tokio::sync::Mutex::new(SessionRegistry::new())),
+        )
+    }
+
+    fn with_sessions(
+        config: Config,
+        outgoing_tx: mpsc::Sender<Outgoing>,
+        sessions: SharedSessions,
+    ) -> Self {
         let (permission_relay_tx, permission_relay_in) = mpsc::channel(64);
         let (browser_relay_tx, browser_relay_in) = mpsc::channel(64);
         let (browser_interact_relay_tx, browser_interact_relay_in) = mpsc::channel(64);
         Self {
-            sessions: SessionRegistry::new(),
+            sessions,
             pending_permission_responses: HashMap::new(),
             pending_browser_responses: HashMap::new(),
             pending_browser_interact_responses: HashMap::new(),
@@ -348,6 +572,65 @@ impl Router {
             browser_interact_relay_tx,
             config,
         }
+    }
+
+    /// Create one engine, wire it to this connection's hubs, register it, and
+    /// start its actor. Shared by `session/new` and `session/resume`; the
+    /// caller has already validated the workspace and any MCP configs, and
+    /// `restore` carries a recorded history when resuming.
+    async fn spawn_session(
+        &self,
+        workspace: Workspace,
+        mcp_configs: Vec<crate::mcp::McpServerConfig>,
+        restore: Option<Vec<crate::llm::ChatMessage>>,
+    ) -> SessionId {
+        let session_id = self.sessions.lock().await.allocate_id();
+        let channels = SessionChannels::new(session_id.clone());
+        // The creating connection is the first subscriber to every hub;
+        // attach adds another.
+        channels
+            .updates
+            .subscribe(self.outgoing_tx.clone())
+            .await;
+        channels
+            .approvals
+            .subscribe(self.permission_relay_tx.clone())
+            .await;
+        channels
+            .browser_checks
+            .subscribe(self.browser_relay_tx.clone())
+            .await;
+        channels
+            .browser_interactions
+            .subscribe(self.browser_interact_relay_tx.clone())
+            .await;
+        let mut session =
+            HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
+        if let Some(messages) = restore {
+            session.restore(messages);
+        }
+        let events = session.subscribe_events();
+        let cancel = session.cancel_handle();
+        let handle = SessionActor::spawn(session, channels.clone(), mcp_configs.clone());
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), handle, cancel, channels);
+        spawn_status_tracker(self.sessions.clone(), session_id.clone(), events);
+
+        // Configs are validated by the caller; the handshake itself happens in
+        // SessionActor::spawn, which calls session.connect_mcp() off the
+        // request path. That is deliberate: connecting takes seconds, so the
+        // response must not wait for the servers to be up.
+        if !mcp_configs.is_empty() {
+            tracing::info!(
+                target: "mcp",
+                session = %session_id.0,
+                count = mcp_configs.len(),
+                "mcp servers validated; connecting off the request path"
+            );
+        }
+        session_id
     }
 
     /// Handles one classified incoming line, returning zero or more lines
@@ -390,7 +673,10 @@ impl Router {
                     if let Ok(notification) =
                         serde_json::from_value::<crate::protocol::CancelNotification>(params)
                     {
-                        self.sessions.cancel(&notification.session_id);
+                        self.sessions
+                            .lock()
+                            .await
+                            .cancel(&notification.session_id);
                     }
                 }
                 None
@@ -402,14 +688,18 @@ impl Router {
                     {
                         approvals.respond(request_id, outcome.into());
                     }
-                } else if let Some(respond) = self.pending_browser_responses.remove(&id) {
+                } else if let Some((request_id, answers)) =
+                    self.pending_browser_responses.remove(&id)
+                {
                     if let Ok(outcome) = serde_json::from_value::<CheckInBrowserOutcome>(result) {
-                        let _ = respond.send(outcome.into());
+                        answers.respond(request_id, outcome.into());
                     }
-                } else if let Some(respond) = self.pending_browser_interact_responses.remove(&id) {
+                } else if let Some((request_id, answers)) =
+                    self.pending_browser_interact_responses.remove(&id)
+                {
                     if let Ok(outcome) = serde_json::from_value::<InteractInBrowserOutcome>(result)
                     {
-                        let _ = respond.send(outcome.into());
+                        answers.respond(request_id, outcome.into());
                     }
                 }
                 None
@@ -418,14 +708,24 @@ impl Router {
                 if let Some((request_id, approvals)) = self.pending_permission_responses.remove(&id)
                 {
                     approvals.respond(request_id, ApprovalResolution::Cancelled);
-                } else if let Some(respond) = self.pending_browser_responses.remove(&id) {
-                    let _ = respond.send(BrowserCheckResult::Failed(
-                        "the client returned an error instead of a result".to_string(),
-                    ));
-                } else if let Some(respond) = self.pending_browser_interact_responses.remove(&id) {
-                    let _ = respond.send(BrowserInteractResult::Failed(
-                        "the client returned an error instead of a result".to_string(),
-                    ));
+                } else if let Some((request_id, answers)) =
+                    self.pending_browser_responses.remove(&id)
+                {
+                    answers.respond(
+                        request_id,
+                        BrowserCheckResult::Failed(
+                            "the client returned an error instead of a result".to_string(),
+                        ),
+                    );
+                } else if let Some((request_id, answers)) =
+                    self.pending_browser_interact_responses.remove(&id)
+                {
+                    answers.respond(
+                        request_id,
+                        BrowserInteractResult::Failed(
+                            "the client returned an error instead of a result".to_string(),
+                        ),
+                    );
                 }
                 None
             }
@@ -488,33 +788,7 @@ impl Router {
                 let mcp_configs = crate::mcp::parse_server_configs(&req.mcp_servers)
                     .map_err(|e| (-32602, format!("invalid mcpServers: {e}")))?;
 
-                let session_id = self.sessions.allocate_id();
-                let session =
-                    HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
-                let cancel = session.cancel_handle();
-                let handle = SessionActor::spawn(
-                    session,
-                    self.outgoing_tx.clone(),
-                    self.permission_relay_tx.clone(),
-                    self.browser_relay_tx.clone(),
-                    self.browser_interact_relay_tx.clone(),
-                    mcp_configs.clone(),
-                    session_id.clone(),
-                );
-                self.sessions.insert(session_id.clone(), handle, cancel);
-
-                // Configs are validated here; the handshake itself happens in
-                // SessionActor::spawn, which calls session.connect_mcp() off the
-                // request path. That is deliberate: connecting takes seconds, so
-                // session/new must reply before the servers are up.
-                if !mcp_configs.is_empty() {
-                    tracing::info!(
-                        target: "mcp",
-                        session = %session_id.0,
-                        count = mcp_configs.len(),
-                        "mcp servers validated; connecting off the request path"
-                    );
-                }
+                let session_id = self.spawn_session(workspace, mcp_configs, None).await;
 
                 Ok(serde_json::to_value(NewSessionResponse { session_id }).expect("serializes"))
             }
@@ -523,11 +797,118 @@ impl Router {
             // trip, so there's no risk of the deadlock class that makes
             // session/prompt's own response need deferring (see that
             // method's own doc comment).
+            //
+            // Custom (not ACP v1): every live session on this server.
+            "session/list" => {
+                let entries = self.sessions.lock().await.list();
+                let sessions: Vec<serde_json::Value> = entries
+                    .into_iter()
+                    .map(|(id, status)| serde_json::json!({ "sessionId": id, "status": status }))
+                    .collect();
+                Ok(serde_json::json!({ "sessions": sessions }))
+            }
+            // Custom (not ACP v1): the workspace's recorded conversations --
+            // the same files `/sessions` shows in the TUI, including headless
+            // conversations this server wrote (see `HeadlessSession::persist`).
+            // The cwd is canonicalized the same way `session/new` canonicalizes
+            // it, so the store lookup matches the header the engine wrote.
+            "session/recordings" => {
+                let req: WorkspaceRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let root = workspace.root().to_string_lossy().into_owned();
+                let recordings: Vec<serde_json::Value> = crate::session::list_for(&root)
+                    .into_iter()
+                    .map(|saved| {
+                        serde_json::json!({
+                            "path": saved.path,
+                            "stamp": saved.stamp as u64,
+                            "date": saved.date,
+                            "preview": saved.preview,
+                            "messages": saved.messages,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "recordings": recordings }))
+            }
+            // Custom: stop the turn and end the session's actor. Dropping the
+            // handle closes the last command sender, which ends the actor once
+            // its current turn unwinds.
+            "session/close" => {
+                let req: SessionIdRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let removed = self.sessions.lock().await.remove(&req.session_id);
+                let Some(handle) = removed else {
+                    return Err((-32001, "no such session".to_string()));
+                };
+                handle.cancel.cancel();
+                drop(handle);
+                Ok(serde_json::json!({}))
+            }
+            // Custom (not ACP v1): attach this connection to a session that
+            // another connection owns. It starts receiving that session's
+            // updates immediately; history is not replayed.
+            "session/attach" => {
+                let req: SessionIdRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let channels = {
+                    let sessions = self.sessions.lock().await;
+                    sessions
+                        .get(&req.session_id)
+                        .map(|handle| handle.channels.clone())
+                };
+                let Some(channels) = channels else {
+                    return Err((-32001, "no such session".to_string()));
+                };
+                channels
+                    .updates
+                    .subscribe(self.outgoing_tx.clone())
+                    .await;
+                channels
+                    .approvals
+                    .subscribe(self.permission_relay_tx.clone())
+                    .await;
+                channels
+                    .browser_checks
+                    .subscribe(self.browser_relay_tx.clone())
+                    .await;
+                channels
+                    .browser_interactions
+                    .subscribe(self.browser_interact_relay_tx.clone())
+                    .await;
+                Ok(serde_json::json!({}))
+            }
+            // Custom (not ACP v1): load a recording from `session/recordings`
+            // into a new live session. The recording is never appended to --
+            // `restore` rotates the log -- so resuming twice is safe.
+            "session/resume" => {
+                let req: ResumeSessionRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let root = workspace.root().to_string_lossy().into_owned();
+                let recorded_for = crate::session::workspace_of(&req.path)
+                    .ok_or_else(|| (-32002, "not a covexcode session recording".to_string()))?;
+                if recorded_for != root {
+                    return Err((
+                        -32002,
+                        "that recording belongs to another workspace".to_string(),
+                    ));
+                }
+                let messages = crate::session::load_chat(&req.path);
+                if messages.is_empty() {
+                    return Err((-32002, "that recording is empty or unreadable".to_string()));
+                }
+                let count = messages.len();
+                let session_id = self.spawn_session(workspace, Vec::new(), Some(messages)).await;
+                Ok(serde_json::json!({ "sessionId": session_id, "messages": count }))
+            }
             "session/rollback" => {
                 let req: RollbackRequest = serde_json::from_value(params)
                     .map_err(|e| (-32602, format!("invalid params: {e}")))?;
                 let handle = self
                     .sessions
+                    .lock()
+                    .await
                     .get(&req.session_id)
                     .ok_or_else(|| (-32001, "no such session".to_string()))?
                     .commands
@@ -550,6 +931,8 @@ impl Router {
                     .map_err(|e| (-32602, format!("invalid params: {e}")))?;
                 let handle = self
                     .sessions
+                    .lock()
+                    .await
                     .get(&req.session_id)
                     .ok_or_else(|| (-32001, "no such session".to_string()))?
                     .commands
@@ -605,6 +988,8 @@ impl Router {
         };
         let Some(commands) = self
             .sessions
+            .lock()
+            .await
             .get(&req.session_id)
             .map(|handle| handle.commands.clone())
         else {
@@ -703,7 +1088,7 @@ impl Router {
             }
             Ready::Browser(ask) => {
                 self.pending_browser_responses
-                    .insert(id.clone(), ask.respond);
+                    .insert(id.clone(), (ask.request_id, ask.answers));
                 RpcRequest {
                     jsonrpc: JsonRpcVersion,
                     id,
@@ -719,7 +1104,7 @@ impl Router {
             }
             Ready::BrowserInteract(ask) => {
                 self.pending_browser_interact_responses
-                    .insert(id.clone(), ask.respond);
+                    .insert(id.clone(), (ask.request_id, ask.answers));
                 RpcRequest {
                     jsonrpc: JsonRpcVersion,
                     id,
@@ -758,11 +1143,27 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let sessions = Arc::new(tokio::sync::Mutex::new(SessionRegistry::new()));
+    run_stream_with_sessions(config, reader, writer, sessions).await
+}
+
+/// The same loop with a session table supplied by the caller. `serve` uses
+/// this so every accepted connection sees the same sessions.
+async fn run_stream_with_sessions<R, W>(
+    config: Config,
+    reader: R,
+    writer: W,
+    sessions: SharedSessions,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut lines = BufReader::new(reader).lines();
     let mut writer = writer;
 
     let (outgoing_tx, mut outgoing_in) = mpsc::channel::<Outgoing>(256);
-    let mut router = Router::new(config, outgoing_tx);
+    let mut router = Router::with_sessions(config, outgoing_tx, sessions);
 
     loop {
         tokio::select! {
@@ -802,10 +1203,11 @@ where
     Ok(())
 }
 
-/// Serve ACP over TCP on `addr`, one [`Router`] and one session set per
-/// connection. Refuses a non-loopback bind: this process can run shell
-/// commands and there is no transport authentication yet, so it must not be
-/// reachable from the network.
+/// Serve ACP over TCP on `addr`, one [`Router`] per connection but one shared
+/// session table, so a connection can attach to a session created on another.
+/// Refuses a non-loopback bind: this process can run shell commands and there
+/// is no transport authentication yet, so it must not be reachable from the
+/// network.
 pub async fn serve(config: Config, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
@@ -817,12 +1219,14 @@ pub async fn serve(config: Config, addr: &str) -> Result<(), Box<dyn std::error:
         .into());
     }
     eprintln!("covexcode-agent: listening on {local}");
+    let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(SessionRegistry::new()));
     loop {
         let (stream, _) = listener.accept().await?;
         let config = config.clone();
+        let sessions = sessions.clone();
         tokio::spawn(async move {
             let (reader, writer) = stream.into_split();
-            if let Err(error) = run_stream(config, reader, writer).await {
+            if let Err(error) = run_stream_with_sessions(config, reader, writer, sessions).await {
                 eprintln!("covexcode-agent: connection ended: {error}");
             }
         });
@@ -1443,6 +1847,447 @@ mod tests {
             .expect("the stream loop ends cleanly on EOF");
     }
 
+    /// The shared-session milestone: a session created on one connection can
+    /// be attached from another, and the second connection receives its live
+    /// updates.
+    #[tokio::test]
+    async fn a_second_connection_can_attach_and_see_updates() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+                      data: {\"choices\":[{\"delta\":{\"content\":\"hello from A\"}}]}\n\ndata: [DONE]\n\n",
+                )
+                .await;
+            let _ = socket.shutdown().await;
+        });
+
+        let mut config = Config::default();
+        config.llm.endpoint = format!("http://{addr}");
+        config.llm.model = "test-model".to_string();
+        config.llm.api_key = "sk-test".to_string();
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(SessionRegistry::new()));
+        let (out_a, _in_a) = mpsc::channel(64);
+        let mut a = Router::with_sessions(config.clone(), out_a, sessions.clone());
+        let (out_b, mut in_b) = mpsc::channel(64);
+        let mut b = Router::with_sessions(config, out_b, sessions);
+
+        a.handle(classify(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": 1 }
+        })))
+        .await;
+        let created = a
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "session/new",
+                "params": { "cwd": dir.path().display().to_string(), "mcpServers": [] }
+            })))
+            .await
+            .expect("session/new answers");
+        assert!(created.contains("sess_1"), "{created}");
+
+        let attached = b
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "session/attach",
+                "params": { "sessionId": "sess_1" }
+            })))
+            .await
+            .expect("attach answers synchronously");
+        assert!(attached.contains("\"result\""), "{attached}");
+
+        let prompt_ack = a
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+                "params": { "sessionId": "sess_1", "prompt": [{ "type": "text", "text": "hi" }] }
+            })))
+            .await;
+        assert_eq!(prompt_ack, None);
+
+        let notification = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match in_b.recv().await.expect("the attached connection stays open") {
+                    Outgoing::Update(notification) => break notification,
+                    Outgoing::Line(_) => continue,
+                }
+            }
+        })
+        .await
+        .expect("the attached connection must receive live updates");
+        let value = serde_json::to_value(&notification).expect("serializes");
+        assert_eq!(value["sessionId"], "sess_1");
+    }
+
+    /// Custom lifecycle methods: a client can discover live sessions and end
+    /// one. Closing drops the last command sender, so a later attach/close
+    /// reports "no such session".
+    #[tokio::test]
+    async fn sessions_can_be_listed_and_closed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (outgoing_tx, _outgoing_in) = mpsc::channel(64);
+        let mut router = Router::new(Config::default(), outgoing_tx);
+
+        router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": 1 }
+            })))
+            .await;
+        let created = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "session/new",
+                "params": { "cwd": dir.path().display().to_string(), "mcpServers": [] }
+            })))
+            .await
+            .expect("session/new answers");
+        assert!(created.contains("sess_1"), "{created}");
+
+        let listed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "session/list", "params": {}
+            })))
+            .await
+            .expect("session/list answers");
+        let value: serde_json::Value = serde_json::from_str(listed.trim()).unwrap();
+        assert_eq!(value["result"]["sessions"][0]["sessionId"], "sess_1");
+        assert_eq!(value["result"]["sessions"][0]["status"], "idle");
+
+        let closed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 4, "method": "session/close",
+                "params": { "sessionId": "sess_1" }
+            })))
+            .await
+            .expect("session/close answers");
+        assert!(closed.contains("\"result\""), "{closed}");
+
+        let listed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 5, "method": "session/list", "params": {}
+            })))
+            .await
+            .expect("session/list answers");
+        let value: serde_json::Value = serde_json::from_str(listed.trim()).unwrap();
+        assert_eq!(
+            value["result"]["sessions"].as_array().unwrap().len(),
+            0,
+            "the closed session is gone"
+        );
+
+        let attach = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 6, "method": "session/attach",
+                "params": { "sessionId": "sess_1" }
+            })))
+            .await
+            .expect("attach answers with an error line");
+        assert!(attach.contains("no such session"), "{attach}");
+    }
+
+    /// A recording listed by `session/recordings` can be resumed into a live
+    /// session, and the model actually receives the restored history on the
+    /// next prompt -- not just a session id that claims it has one.
+    #[tokio::test]
+    async fn a_recording_can_be_listed_resumed_and_used() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fake_home = tempfile::tempdir().expect("temp home");
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home.path());
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir
+            .path()
+            .canonicalize()
+            .expect("canonical")
+            .to_string_lossy()
+            .into_owned();
+        let mut log = crate::session::ChatLog::new(&root);
+        log.append(&[
+            crate::llm::ChatMessage::text("user", "earlier question"),
+            crate::llm::ChatMessage::text("assistant", "earlier answer"),
+        ]);
+        let recording = crate::session::latest_for(&root).expect("recorded");
+
+        // The model server captures the next request body, then answers, so
+        // the test can prove the restored messages went out on the wire.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if buf.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let _ = body_tx.send(String::from_utf8_lossy(&buf).to_string());
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                            Connection: close\r\n\r\n\
+                            data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                            data: [DONE]\n\n";
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+
+        let mut config = Config::default();
+        config.llm.endpoint = format!("http://{addr}");
+        config.llm.model = "test-model".to_string();
+        config.llm.api_key = "sk-test".to_string();
+        let (outgoing_tx, _outgoing_in) = mpsc::channel(64);
+        let mut router = Router::new(config, outgoing_tx);
+
+        let listed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "session/recordings",
+                "params": { "cwd": dir.path().display().to_string() }
+            })))
+            .await
+            .expect("session/recordings answers");
+        let listed: serde_json::Value = serde_json::from_str(listed.trim()).unwrap();
+        let recordings = listed["result"]["recordings"].as_array().unwrap();
+        assert_eq!(recordings.len(), 1);
+        assert_eq!(recordings[0]["preview"], "earlier question");
+        assert_eq!(recordings[0]["messages"], 2);
+
+        let resumed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "session/resume",
+                "params": {
+                    "cwd": dir.path().display().to_string(),
+                    "path": recording.display().to_string()
+                }
+            })))
+            .await
+            .expect("session/resume answers");
+        let resumed: serde_json::Value = serde_json::from_str(resumed.trim()).unwrap();
+        assert_eq!(resumed["result"]["sessionId"], "sess_1");
+        assert_eq!(resumed["result"]["messages"], 2);
+
+        let prompt_ack = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                "params": {
+                    "sessionId": "sess_1",
+                    "prompt": [{ "type": "text", "text": "follow up" }]
+                }
+            })))
+            .await;
+        assert_eq!(prompt_ack, None);
+
+        let body = body_rx.await.expect("the model request arrived");
+
+        router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 4, "method": "session/close",
+                "params": { "sessionId": "sess_1" }
+            })))
+            .await
+            .expect("session/close answers");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert!(body.contains("earlier question"), "{body}");
+        assert!(body.contains("earlier answer"), "{body}");
+        assert!(body.contains("follow up"), "{body}");
+    }
+
+    /// A recording from another project is refused rather than mixed in.
+    #[tokio::test]
+    async fn resuming_another_workspaces_recording_is_refused() {
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fake_home = tempfile::tempdir().expect("temp home");
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home.path());
+
+        let recorded_in = tempfile::tempdir().expect("recorded dir");
+        let requested = tempfile::tempdir().expect("requested dir");
+        let root = recorded_in
+            .path()
+            .canonicalize()
+            .expect("canonical")
+            .to_string_lossy()
+            .into_owned();
+        let mut log = crate::session::ChatLog::new(&root);
+        log.append(&[crate::llm::ChatMessage::text("user", "hi")]);
+        let recording = crate::session::latest_for(&root).expect("recorded");
+
+        let (outgoing_tx, _outgoing_in) = mpsc::channel(64);
+        let mut router = Router::new(Config::default(), outgoing_tx);
+        let refused = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "session/resume",
+                "params": {
+                    "cwd": requested.path().display().to_string(),
+                    "path": recording.display().to_string()
+                }
+            })))
+            .await
+            .expect("resume answers with an error line");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        assert!(refused.contains("another workspace"), "{refused}");
+    }
+
+    /// The engine's status events must reach the shared registry; that is what
+    /// `session/list` reports to a client.
+    #[tokio::test]
+    async fn the_status_tracker_updates_the_registry() {
+        use std::time::Duration;
+
+        let sessions: SharedSessions = Arc::new(tokio::sync::Mutex::new(SessionRegistry::new()));
+        let id = {
+            let mut registry = sessions.lock().await;
+            let id = registry.allocate_id();
+            let (commands, _rx) = mpsc::channel(1);
+            registry.insert(
+                id.clone(),
+                commands,
+                CancelHandle::default(),
+                SessionChannels::new(id.clone()),
+            );
+            id
+        };
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        spawn_status_tracker(sessions.clone(), id.clone(), events_rx);
+        events_tx
+            .send(SessionEvent::StatusChanged {
+                session_id: id.clone(),
+                status: SessionStatus::Running,
+            })
+            .unwrap();
+
+        let status = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let status = sessions.lock().await.list()[0].1;
+                if status == SessionStatus::Running {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the tracker must apply the event");
+        assert_eq!(status, SessionStatus::Running);
+    }
+
+    /// Every attached connection gets its own copy of an approval ask, so any
+    /// of them can answer and the engine's handle makes the first one win.
+    #[tokio::test]
+    async fn approval_asks_reach_every_attached_connection() {
+        let hub = ApprovalHub::new();
+        let (tx_a, mut rx_a) = mpsc::channel(4);
+        let (tx_b, mut rx_b) = mpsc::channel(4);
+        hub.subscribe(tx_a).await;
+        hub.subscribe(tx_b).await;
+
+        hub.send(PermissionAsk {
+            request: crate::protocol::RequestPermissionRequest {
+                session_id: SessionId("sess_1".to_string()),
+                tool_call: crate::protocol::ToolCallUpdate {
+                    tool_call_id: crate::protocol::ToolCallId("call_1".to_string()),
+                    title: Some("write a.txt".to_string()),
+                    kind: None,
+                    status: Some(crate::protocol::ToolCallStatus::Pending),
+                    content: None,
+                },
+                options: Vec::new(),
+            },
+            request_id: 1,
+            approvals: ApprovalHandle::default(),
+        })
+        .await;
+
+        let first = rx_a.recv().await.expect("first attachment");
+        let second = rx_b.recv().await.expect("second attachment");
+        assert_eq!(first.request_id, 1);
+        assert_eq!(second.request_id, 1);
+    }
+
+    /// Same fan-out as approvals, for both browser ask kinds: every attached
+    /// connection sees the ask (each carrying a clone of the one answer
+    /// handle). Answering through a clone is covered in `headless`'s own
+    /// tests, where the engine registers the waiter.
+    #[tokio::test]
+    async fn browser_asks_reach_every_attached_connection() {
+        let checks = BrowserCheckHub::new();
+        let interactions = BrowserInteractHub::new();
+        let (check_tx_a, mut check_rx_a) = mpsc::channel(4);
+        let (check_tx_b, mut check_rx_b) = mpsc::channel(4);
+        let (interact_tx, mut interact_rx) = mpsc::channel(4);
+        checks.subscribe(check_tx_a).await;
+        checks.subscribe(check_tx_b).await;
+        interactions.subscribe(interact_tx).await;
+
+        let check = BrowserCheckAsk {
+            session_id: SessionId("sess_1".to_string()),
+            request_id: 7,
+            url: "http://localhost:3000".to_string(),
+            answers: AskHandle::<BrowserCheckResult>::default(),
+        };
+        checks.send(check.clone()).await;
+
+        let first = check_rx_a.recv().await.expect("first attachment");
+        let second = check_rx_b.recv().await.expect("second attachment");
+        assert_eq!(first.request_id, 7);
+        assert_eq!(second.request_id, 7);
+        assert_eq!(first.url, "http://localhost:3000");
+        assert_eq!(second.url, "http://localhost:3000");
+
+        interactions
+            .send(BrowserInteractAsk {
+                session_id: SessionId("sess_1".to_string()),
+                request_id: 8,
+                url: "http://localhost:3000".to_string(),
+                interaction: crate::tools::BrowserInteraction::Click { x: 1.0, y: 2.0 },
+                answers: AskHandle::<BrowserInteractResult>::default(),
+            })
+            .await;
+        let seen = interact_rx.recv().await.expect("interaction ask");
+        assert_eq!(seen.request_id, 8);
+        assert!(matches!(
+            seen.interaction,
+            crate::tools::BrowserInteraction::Click { .. }
+        ));
+    }
+
     /// The registry is the one place ids and cancellation are owned now:
     /// allocation is monotonic, and a cancel reaches only the session named.
     #[test]
@@ -1457,8 +2302,18 @@ mod tests {
         let (commands_b, _rx_b) = mpsc::channel(1);
         let cancel_a = CancelHandle::default();
         let cancel_b = CancelHandle::default();
-        registry.insert(first.clone(), commands_a, cancel_a.clone());
-        registry.insert(second.clone(), commands_b, cancel_b.clone());
+        registry.insert(
+            first.clone(),
+            commands_a,
+            cancel_a.clone(),
+            SessionChannels::new(first.clone()),
+        );
+        registry.insert(
+            second.clone(),
+            commands_b,
+            cancel_b.clone(),
+            SessionChannels::new(second.clone()),
+        );
 
         registry.cancel(&first);
         assert!(cancel_a.is_cancelled());
