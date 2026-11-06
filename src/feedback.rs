@@ -113,12 +113,12 @@ pub fn build_body(message: &str, version: &str) -> serde_json::Value {
 /// point of view: the runtime loop spawns this and never awaits it on the UI
 /// path.
 ///
-/// The endpoint does not exist yet, so *every* network outcome -- connection
-/// refused, 404, 5xx, a timeout, any transport error -- is treated as success.
 /// The message is already on disk in `log`, which is the part the user cares
-/// about; when the site admin finishes the endpoint it simply starts receiving
-/// 200s and nothing here changes. The `Result` return is kept only so the
-/// channel that carries outcomes stays one shape: this arm always succeeds.
+/// about, so a dead endpoint must not turn into a second error in the
+/// transcript: every network outcome -- connection refused, 404, 5xx, a
+/// timeout, any transport error -- is treated as success here. The `Result`
+/// return is kept only so the channel that carries outcomes stays one shape:
+/// this arm always succeeds.
 pub async fn send(message: &str, version: &str) -> Result<(), String> {
     let body = build_body(message, version).to_string();
 
@@ -141,6 +141,11 @@ pub async fn send(message: &str, version: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_feedback_endpoint_is_the_covexcode_route() {
+        assert_eq!(FEEDBACK_URL, "https://covexcode.com/api/feedback");
+    }
 
     #[test]
     fn the_char_cap_is_exactly_ten_thousand() {
