@@ -2676,6 +2676,47 @@ pub fn plan_mode_block(action: &Action) -> Option<String> {
 /// sent something unusable (unknown tool name, unparseable or empty
 /// arguments), in which case there is nothing to approve -- the runner
 /// reports the malformed arguments back to the model instead.
+/// Ceiling on simultaneous write/edit calls in one scheduler run, for the
+/// same reason as the read fan-out's cap: a model can ask for dozens at once,
+/// and each is a file handle plus a full read-modify-write.
+pub const MAX_CONCURRENT_WRITES: usize = 8;
+
+/// The resolved file a `write_file`/`edit_file` call targets, or `None` for
+/// anything else (or a path the tool itself will refuse). Used by the
+/// schedulers to decide which calls may run at the same time.
+pub fn write_target(workspace: &Workspace, call: &ToolCall) -> Option<PathBuf> {
+    match describe_action(call)? {
+        Action::Write { path, .. } | Action::Edit { path, .. } => {
+            resolve_in_workspace(workspace, &path).ok()
+        }
+        _ => None,
+    }
+}
+
+/// The maximal run starting at `start` of write/edit calls whose resolved
+/// targets are all distinct. Running this slice concurrently is safe: no
+/// call can observe another's half-written file. A non-write call fences the
+/// run, and so does a repeat of an earlier target -- a second write to the
+/// same file is ordered after the first rather than racing it.
+pub fn parallel_write_run(
+    workspace: &Workspace,
+    calls: &[ToolCall],
+    start: usize,
+) -> std::ops::Range<usize> {
+    let mut seen = std::collections::HashSet::new();
+    let mut end = start;
+    while end < calls.len() {
+        let Some(target) = write_target(workspace, &calls[end]) else {
+            break;
+        };
+        if !seen.insert(target) {
+            break;
+        }
+        end += 1;
+    }
+    start..end
+}
+
 pub fn describe_action(call: &ToolCall) -> Option<Action> {
     // Checked before the name match: MCP tool names are dynamic and cannot be
     // listed as constants.
@@ -7148,6 +7189,34 @@ mod tests {
                 arguments: json!({ "path": path, "content": content }).to_string(),
             },
         }
+    }
+
+    #[test]
+    fn parallel_write_runs_group_distinct_files_and_fence_repeats() {
+        let (_dir, ws, _) = fixture();
+        let calls = vec![
+            write_call("a.rs", "a"),
+            write_call("b.rs", "b"),
+            write_call("a.rs", "again"),
+            write_call("c.rs", "c"),
+            call("echo hi"),
+            write_call("d.rs", "d"),
+        ];
+
+        assert_eq!(parallel_write_run(&ws, &calls, 0), 0..2);
+        assert_eq!(
+            parallel_write_run(&ws, &calls, 2),
+            2..4,
+            "the repeat starts a fresh run, which may still include later distinct files"
+        );
+        assert_eq!(parallel_write_run(&ws, &calls, 3), 3..4);
+        assert_eq!(parallel_write_run(&ws, &calls, 5), 5..6);
+        assert!(
+            parallel_write_run(&ws, &calls, 4).is_empty(),
+            "a command is not part of a write run"
+        );
+        assert_eq!(write_target(&ws, &calls[0]), Some(ws.root().join("a.rs")));
+        assert!(write_target(&ws, &calls[4]).is_none());
     }
 
     /// `dir` on Windows, `ls` elsewhere -- the tests have to be as

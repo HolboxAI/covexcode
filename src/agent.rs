@@ -250,12 +250,14 @@ const MAX_CONCURRENT_READS: usize = 16;
 /// stretch of [`is_pure_read_call`] calls is dispatched concurrently (capped
 /// at [`MAX_CONCURRENT_READS`] in flight), a contiguous stretch of `agent`
 /// calls is dispatched concurrently up to
-/// `config.tools.subagent_concurrency`, and everything else -- writes, edits and
-/// other commands -- still runs one at a time exactly as before. The runs are
-/// stitched back together in the order they occurred, so a
-/// `read, read, write, read` turn becomes "two reads concurrently, then the
-/// write, then the last read" rather than reordering anything the model or
-/// the transcript would notice.
+/// `config.tools.subagent_concurrency`, and a contiguous stretch of
+/// writes/edits to *distinct* files runs concurrently (capped at
+/// [`tools::MAX_CONCURRENT_WRITES`]). A repeat of an already-targeted file,
+/// and anything else -- shell commands, deploy, MCP -- fences the run and
+/// still runs one at a time. The runs are stitched back together in the order
+/// they occurred, so a `read, read, write, read` turn becomes "two reads
+/// concurrently, then the write, then the last read" rather than reordering
+/// anything the model or the transcript would notice.
 ///
 /// Order within a concurrent run is preserved by `join_all`: each chunk is
 /// polled together but its results are yielded in submission order, i.e. the
@@ -303,6 +305,23 @@ async fn run_calls(
                             tools::execute_truncated(&call, &ws, &tools_config, truncated).await
                         }
                     });
+                outcomes.extend(futures::future::join_all(futures).await);
+            }
+        } else if tools::write_target(ws, &calls[i]).is_some() {
+            // Independent file writes: different files share no state, so a
+            // contiguous run of them can run together. The run ends at a
+            // non-write call or at a repeat of a file already in it, which is
+            // what keeps two writes to the same path ordered.
+            let range = tools::parallel_write_run(ws, calls, i);
+            let run = &calls[range.clone()];
+            i = range.end;
+            for chunk in run.chunks(tools::MAX_CONCURRENT_WRITES) {
+                let futures = chunk.iter().map(|call| {
+                    let call = call.clone();
+                    let ws = ws.clone();
+                    let tools_config = config.tools.clone();
+                    async move { tools::execute_truncated(&call, &ws, &tools_config, truncated).await }
+                });
                 outcomes.extend(futures::future::join_all(futures).await);
             }
         } else if calls[i].function.name == tools::AGENT {
@@ -882,6 +901,31 @@ mod tests {
             "second",
             "sequential writes still apply in call order, exactly as before Phase 1"
         );
+    }
+
+    /// Writes to different files form one concurrent run: each outcome keeps
+    /// its call's place, and every file is written.
+    #[tokio::test]
+    async fn writes_to_distinct_files_run_as_one_batch() {
+        let (dir, ws) = workspace_with_files(&[]);
+        let config = Config::default();
+        let calls = vec![
+            write_call("1", "a.txt", "one"),
+            write_call("2", "b.txt", "two"),
+            write_call("3", "c.txt", "three"),
+        ];
+
+        let outcomes = run_calls(&calls, &ws, &config, false, None).await;
+
+        let ids: Vec<&str> = outcomes.iter().map(|o| o.call_id.as_str()).collect();
+        assert_eq!(ids, vec!["1", "2", "3"]);
+        for (name, content) in [("a.txt", "one"), ("b.txt", "two"), ("c.txt", "three")] {
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(name)).unwrap(),
+                content,
+                "{name} was written"
+            );
+        }
     }
 
     /// Two independent `agent` calls in one response must overlap, not add

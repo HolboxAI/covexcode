@@ -1604,6 +1604,74 @@ impl HeadlessSession {
                 continue;
             }
 
+            // Independent file writes: same fan-out as reads, except a file
+            // may appear at most once in the run. A repeat ends the run so
+            // the second write is ordered after the first rather than racing
+            // its read-modify-write.
+            if matches!(&verdict, Verdict::AutoApprove)
+                && tools::write_target(&self.workspace, &calls[i]).is_some()
+            {
+                let start = i;
+                let mut seen = std::collections::HashSet::new();
+                while i < calls.len() {
+                    if !matches!(
+                        verdict_for(
+                            &calls[i],
+                            Path::new(self.workspace.root()),
+                            self.mode,
+                            self.config.tools.approval,
+                        ),
+                        Verdict::AutoApprove
+                    ) {
+                        break;
+                    }
+                    let Some(target) = tools::write_target(&self.workspace, &calls[i]) else {
+                        break;
+                    };
+                    if !seen.insert(target) {
+                        break;
+                    }
+                    i += 1;
+                }
+                let run = &calls[start..i];
+
+                for call in run {
+                    let action = tools::describe_action(call);
+                    let _ = updates
+                        .send(SessionUpdate::ToolCall(AcpToolCall {
+                            tool_call_id: ToolCallId(call.id.clone()),
+                            title: action
+                                .map(|a| a.label())
+                                .unwrap_or_else(|| call.function.name.clone()),
+                            kind: ToolKind::Edit,
+                            status: ToolCallStatus::InProgress,
+                        }))
+                        .await;
+                }
+
+                let mut outcomes = Vec::with_capacity(run.len());
+                for chunk in run.chunks(tools::MAX_CONCURRENT_WRITES) {
+                    let futures = chunk.iter().map(|call| {
+                        let call = call.clone();
+                        let workspace = self.workspace.clone();
+                        let tools_config = self.config.tools.clone();
+                        async move { tools::execute(&call, &workspace, &tools_config).await }
+                    });
+                    outcomes.extend(futures::future::join_all(futures).await);
+                }
+
+                for (call, mut outcome) in run.iter().zip(outcomes) {
+                    if let Some(record) = outcome.rollback.take() {
+                        self.rollback.record_turn(record, self.turn);
+                    }
+                    let _ = updates
+                        .send(SessionUpdate::ToolCallUpdate((&outcome).into()))
+                        .await;
+                    results.push((call.id.clone(), outcome.content, Vec::new()));
+                }
+                continue;
+            }
+
             // Independent read-only research tasks: run a contiguous run of
             // auto-approved `agent` calls concurrently. Inline-edit mode
             // already refused them above, and plan mode allows them. Judging
@@ -3052,6 +3120,64 @@ mod tests {
                 ..
             } if tool_call_id == "call_1"
         )));
+    }
+
+    /// Two auto-approved writes to different files run as one batch: both
+    /// files are written and both results come back to the client.
+    #[tokio::test]
+    async fn auto_approved_writes_to_distinct_files_run_together() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![
+            two_tool_call_round(
+                (
+                    tools::WRITE_FILE,
+                    r#"{"path":"a.txt","content":"one"}"#,
+                ),
+                (
+                    tools::WRITE_FILE,
+                    r#"{"path":"b.txt","content":"two"}"#,
+                ),
+            ),
+            text_round("done"),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "write both".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(
+            std::fs::read_to_string(session.workspace.root().join("a.txt")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(session.workspace.root().join("b.txt")).unwrap(),
+            "two"
+        );
+        let mut completed = 0;
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::ToolCallUpdate(update) = update {
+                if update.status == Some(ToolCallStatus::Completed) {
+                    completed += 1;
+                }
+            }
+        }
+        assert_eq!(completed, 2, "both results reach the client");
     }
 
     /// Two independent agent calls in one response both run, and both
