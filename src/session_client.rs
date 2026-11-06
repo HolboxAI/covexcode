@@ -59,6 +59,11 @@ enum ClientMsg {
         restore_before_turn: Option<u64>,
         respond: oneshot::Sender<crate::protocol::RollbackResponse>,
     },
+    /// `/diff`: the journal plan with before-content, which the ACP-shaped
+    /// `ChangeEntry` deliberately does not carry.
+    ChangeSteps {
+        respond: oneshot::Sender<Vec<crate::rollback::Step>>,
+    },
 }
 
 /// A frontend's handle to one running engine. Dropping it ends the actor
@@ -132,6 +137,9 @@ impl EngineClient {
                             restore_before_turn,
                         };
                         let _ = respond.send(session.rollback(&req));
+                    }
+                    ClientMsg::ChangeSteps { respond } => {
+                        let _ = respond.send(session.changes());
                     }
                 }
             }
@@ -234,6 +242,16 @@ impl EngineClient {
                 restore_before_turn,
                 respond,
             })
+            .await
+            .ok()?;
+        receive.await.ok()
+    }
+
+    /// The engine's journal plan including before-content, for `/diff`.
+    pub async fn change_steps(&self) -> Option<Vec<crate::rollback::Step>> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ClientMsg::ChangeSteps { respond })
             .await
             .ok()?;
         receive.await.ok()
@@ -652,6 +670,13 @@ mod tests {
         assert_eq!(changes.changes.len(), 1);
         assert_eq!(changes.changes[0].path, "a.txt");
         assert_eq!(changes.changes[0].action, "restore");
+
+        let steps = client.change_steps().await.expect("snapshots answered");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].action {
+            crate::rollback::Action::Restore(before) => assert_eq!(before, "before\n"),
+            other => panic!("expected a restore snapshot, got {other:?}"),
+        }
 
         let response = client.rollback(None).await.expect("rollback answered");
         assert!(!response.summary.is_empty());

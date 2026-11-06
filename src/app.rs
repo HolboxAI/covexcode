@@ -654,6 +654,9 @@ pub struct App {
     /// `main.rs` fetches the engine's journal and calls
     /// [`App::show_core_rollback`], then applies the confirmed filter.
     pub core_rollback_query: Option<u64>,
+    /// `/diff` in core mode: `main.rs` fetches the engine's journal
+    /// snapshots and calls [`App::show_core_diff`].
+    pub core_diff_query: bool,
     /// How many of `messages` have already been printed into the terminal's own
     /// scrollback. Everything below this index is the terminal's to keep and
     /// must never be drawn again; everything at or above it still belongs to
@@ -959,6 +962,7 @@ impl App {
             pending_resume: None,
             core_session: false,
             core_rollback_query: None,
+            core_diff_query: false,
             flushed: 0,
             welcome_flushed: false,
             stream_printed: 0,
@@ -3602,7 +3606,28 @@ impl App {
     fn show_diff(&mut self) {
         self.follow_tail = true;
 
-        if self.rollback.is_empty() {
+        // The engine owns the journal in core mode; `main.rs` fetches its
+        // snapshots and calls `show_core_diff`.
+        if self.core_session {
+            self.core_diff_query = true;
+            return;
+        }
+
+        self.render_diff(self.rollback.plan());
+    }
+
+    /// `/diff` from the engine's journal: the same renderer, fed the
+    /// snapshots the engine holds.
+    pub fn show_core_diff(&mut self, steps: Vec<crate::rollback::Step>) {
+        self.render_diff(steps);
+    }
+
+    /// Draw one journal plan as transcript diffs. Shared by App's own journal
+    /// and the engine's so the two modes cannot drift in wording or layout.
+    fn render_diff(&mut self, steps: Vec<crate::rollback::Step>) {
+        self.follow_tail = true;
+
+        if steps.is_empty() {
             self.messages.push(Message::new(
                 Role::System,
                 "No changes yet this session — no file has been written or edited.",
@@ -3611,7 +3636,7 @@ impl App {
         }
 
         let mut shown = 0usize;
-        for step in self.rollback.plan() {
+        for step in steps {
             // What the file held before this session touched it. A file
             // this session created has no such state -- diffed against ""
             // it renders as a full addition, same as any other new file.
@@ -12868,6 +12893,52 @@ mod tests {
             .unwrap()
             .content
             .contains("Nothing to roll back"));
+    }
+
+    #[test]
+    fn core_session_diff_asks_the_engine_for_snapshots() {
+        let mut a = app();
+        a.core_session = true;
+        let before = a.messages.len();
+
+        a.run_command("/diff");
+
+        assert!(a.core_diff_query);
+        assert_eq!(a.messages.len(), before, "nothing rendered from App's journal");
+    }
+
+    #[test]
+    fn show_core_diff_renders_engine_snapshots() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "after\n").expect("write");
+
+        let mut a = app();
+        a.show_core_diff(vec![crate::rollback::Step {
+            display: "a.txt".to_string(),
+            path,
+            touches: 1,
+            turn: 1,
+            action: crate::rollback::Action::Restore("before\n".to_string()),
+        }]);
+
+        let message = a.messages.last().expect("the diff message");
+        assert!(message.content.contains("a.txt"), "{}", message.content);
+        let diff = message.diff.as_ref().expect("a rendered diff");
+        assert_eq!(diff.added, 1);
+        assert_eq!(diff.removed, 1);
+    }
+
+    #[test]
+    fn show_core_diff_with_no_changes_says_so() {
+        let mut a = app();
+        a.show_core_diff(Vec::new());
+        assert!(a
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("No changes yet this session"));
     }
 
     #[test]

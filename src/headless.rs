@@ -2563,6 +2563,14 @@ impl HeadlessSession {
             shell_warning: self.rollback.shell_warning(),
         }
     }
+
+    /// The journal's current plan, including each file's before-content --
+    /// what an in-process `/diff` needs (the ACP `ChangeEntry` deliberately
+    /// omits it). Read-only and clone-cheap; the TUI renders it and the
+    /// engine still applies any undo itself.
+    pub fn changes(&self) -> Vec<crate::rollback::Step> {
+        self.rollback.plan()
+    }
 }
 
 enum RoundOutcome {
