@@ -1,7 +1,8 @@
 # Multi-agent CLI architecture
 
-Status: Phase 0 complete; Phase 1 in progress; Phase 2 started  
-Date: 2026-11-04  
+Status: Phase 0 complete; Phase 1 complete except TUI-as-client; Phase 2
+complete (JSONL store); Phase 4 partial  
+Date: 2026-11-05  
 Scope: `HolboxAI/covexcode` (the Rust CLI and agent runtime)
 
 ## Implementation status
@@ -12,16 +13,38 @@ Landed on `main`:
   `COVEXCODE_TRACE` request timing.
 - **Phase 1**: domain identities (`SessionId`, `AgentId`, `TurnId`, `TaskId`,
   statuses); a transport-agnostic `SessionEvent` stream covering text, tool
-  lifecycle and usage; cooperative ACP `session/cancel`.
-- **Phase 2 (early)**: `covexcode-agent --listen` serves ACP over loopback TCP;
-  `/sessions` resumes a recorded conversation from a picker.
+  lifecycle, usage, status, plans/todos, and approvals; cooperative ACP
+  `session/cancel`; `HeadlessSession` is the reusable engine behind both
+  `--acp` and `--listen`, with `SessionCommand` (cancel + approval answers) as
+  its serializable control surface. The TUI still runs its own `App` loop by
+  default; `COVEXCODE_CORE_SESSION=1` opts into driving it through the engine
+  (`session_client` + `core_tui`) for streaming text, tool results, usage,
+  cancel, approval prompts, `/new`, and resuming (`/resume`, `/sessions`,
+  startup `--resume`); `/compact` and `/rollback` remain on the `App` path --
+  full parity is the one Phase 1 item left.
+- **Phase 2**: a `SessionRegistry` with one actor per session, shared by every
+  connection a `--listen` process accepts. `session/list`, `session/attach`,
+  `session/close` and `session/cancel` work across connections, status changes
+  are mirrored into the registry, and approval and browser asks fan out to
+  every attached connection. Conversations are persisted to
+  `~/.covexcode/sessions` at round boundaries, compaction rotates to a fresh
+  file, and `session/recordings` / `session/resume` list and reload them.
 - **Phase 4 (partial)**: the read-only `explore` subagent is shared by the TUI
   and the ACP engine; sibling `agent` calls run concurrently (default 4); the
-  engine forwards each child tool call as live activity on the parent call.
+  engine forwards each child tool call as live activity on the parent call;
+  `tools.subagent_model` routes children to their own model; project-defined
+  read-only agent types load from `.covexcode/agents/*.toml`.
 
-In review at the time of writing: `tools.subagent_model` routing and plan/todo
-checklist updates in the engine. Project-defined read-only agent types are
-implemented on a branch, not yet a PR.
+Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
+SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
+writes survive a crash mid-turn; and the files stay readable with `cat`. A
+database becomes worthwhile when fork/audit/query over events is a real
+requirement, not before.
+
+Remaining, in plan order: Phase 1's TUI-as-client step; Phase 3's tool
+scheduler, per-file locks, persistent shells and sandbox policy; Phase 4's
+write-capable worktree agents, budgets and agent panel; Phase 5's task DAG and
+teams.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.

@@ -48,6 +48,7 @@ use crate::tools::{self, Action, BrowserInteraction, Mode};
 use crate::workspace::Workspace;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -74,22 +75,22 @@ fn images_for_model(
 /// `RequestPermissionRequest` a turn needs answered. The answer comes back
 /// through the same `ApprovalHandle` a non-ACP client uses, keyed by the
 /// engine-local `request_id` -- so there is one answer path, not two.
+#[derive(Clone)]
 pub struct PermissionAsk {
     pub request: RequestPermissionRequest,
     pub request_id: u64,
     pub approvals: ApprovalHandle,
 }
 
-/// What a caller gets sent for each `check_in_browser` call. Paired with a
-/// `oneshot` because a `HeadlessSession` has only one outstanding at a time
-/// (it blocks on the reply before continuing). Permission asks are separate:
-/// they answer through `ApprovalHandle`, since a non-ACP client needs that
-/// path too. This codebase's own convention (see `transport.rs`'s docs) is a
-/// small, explicit type per real use, not a shared abstraction.
+/// What a caller gets sent for each `check_in_browser` call. The answer comes
+/// back through `AskHandle`, keyed by `request_id`, so every attached
+/// connection can receive the ask and the first answer wins.
+#[derive(Clone)]
 pub struct BrowserCheckAsk {
     pub session_id: SessionId,
+    pub request_id: u64,
     pub url: String,
-    pub respond: oneshot::Sender<BrowserCheckResult>,
+    pub answers: AskHandle<BrowserCheckResult>,
 }
 
 /// What the client reports back for one `BrowserCheckAsk`. `Failed` covers
@@ -107,15 +108,16 @@ pub enum BrowserCheckResult {
     Failed(String),
 }
 
-/// One `interact_in_browser` call awaiting the client's answer -- same
-/// shape and reasoning as `BrowserCheckAsk` immediately above (a small,
-/// explicit type per real use, not a shared abstraction), except this one
-/// also carries the interaction to perform before the client screenshots.
+/// One `interact_in_browser` call awaiting a client answer -- same shape and
+/// reasoning as `BrowserCheckAsk`, plus the interaction to perform before the
+/// screenshot.
+#[derive(Clone)]
 pub struct BrowserInteractAsk {
     pub session_id: SessionId,
+    pub request_id: u64,
     pub url: String,
     pub interaction: BrowserInteraction,
-    pub respond: oneshot::Sender<BrowserInteractResult>,
+    pub answers: AskHandle<BrowserInteractResult>,
 }
 
 /// What the client reports back for one `BrowserInteractAsk`. Same
@@ -216,16 +218,63 @@ impl CancelHandle {
     }
 }
 
-/// Answers an outstanding approval without going through the ACP permission
-/// channel. Pending requests are keyed by the engine-local id carried in
-/// `SessionEvent::ApprovalRequested`.
+/// Answers one engine-to-client ask, keyed by an engine-local request id.
+/// The first answer consumes the entry; a later one returns false.
 ///
 /// The map holds only oneshot senders and is never held across an await, so a
 /// plain `std::sync::Mutex` is enough.
-#[derive(Clone, Default)]
-pub struct ApprovalHandle {
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ApprovalResolution>>>>,
+pub struct AskHandle<T> {
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<T>>>>,
 }
+
+// Manual, not `derive(Clone)`: cloning the handle only clones the Arc and must
+// not require the answer type itself to be `Clone`.
+impl<T> Clone for AskHandle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            pending: self.pending.clone(),
+        }
+    }
+}
+
+impl<T> Default for AskHandle<T> {
+    fn default() -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<T> AskHandle<T> {
+    /// Answer one request. Returns false when the id is unknown (already
+    /// answered, wrong session, or never issued).
+    pub fn respond(&self, request_id: u64, result: T) -> bool {
+        let pending = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.remove(&request_id)
+        };
+        match pending {
+            Some(sender) => sender.send(result).is_ok(),
+            None => false,
+        }
+    }
+
+    fn register(&self, request_id: u64) -> oneshot::Receiver<T> {
+        let (sender, receiver) = oneshot::channel();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.insert(request_id, sender);
+        receiver
+    }
+
+    fn remove(&self, request_id: u64) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.remove(&request_id);
+    }
+}
+
+/// Approval answers, as seen by a client. The id comes from
+/// `SessionEvent::ApprovalRequested`.
+pub type ApprovalHandle = AskHandle<ApprovalResolution>;
 
 /// A serializable control handle for one session. Mirrors what a daemon
 /// receives off the wire; applying a command never needs the session actor,
@@ -253,43 +302,48 @@ impl SessionCommandHandle {
     }
 }
 
-/// Removes a pending approval entry when the waiting code leaves its scope,
+/// Removes a pending ask entry when the waiting code leaves its scope,
 /// including when the whole turn is cancelled and this future is dropped.
-struct PendingApproval<'a> {
-    approvals: &'a ApprovalHandle,
+struct PendingAsk<'a, T> {
+    answers: &'a AskHandle<T>,
     request_id: u64,
 }
 
-impl Drop for PendingApproval<'_> {
+impl<T> Drop for PendingAsk<'_, T> {
     fn drop(&mut self) {
-        self.approvals.remove(self.request_id);
+        self.answers.remove(self.request_id);
     }
 }
 
-impl ApprovalHandle {
-    /// Answer one request. Returns false when the id is unknown (already
-    /// answered, wrong session, or never issued).
-    pub fn respond(&self, request_id: u64, resolution: ApprovalResolution) -> bool {
-        let pending = {
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            pending.remove(&request_id)
-        };
-        match pending {
-            Some(sender) => sender.send(resolution).is_ok(),
-            None => false,
-        }
+/// Fan-out for one session's transport-agnostic events. Subscribers start at
+/// the next event; there is no replay, because a manager attaching to a live
+/// session needs the current state (snapshotted separately), not a re-run of
+/// its history.
+#[derive(Clone, Default)]
+pub struct EventHub {
+    subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<SessionEvent>>>>,
+}
+
+impl EventHub {
+    /// Subscribe for events emitted from now on.
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<SessionEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.add(tx);
+        rx
     }
 
-    fn register(&self, request_id: u64) -> oneshot::Receiver<ApprovalResolution> {
-        let (sender, receiver) = oneshot::channel();
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.insert(request_id, sender);
-        receiver
+    fn add(&self, tx: mpsc::UnboundedSender<SessionEvent>) {
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(tx);
     }
 
-    fn remove(&self, request_id: u64) {
-        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.remove(&request_id);
+    fn send(&self, event: SessionEvent) {
+        let mut subscribers = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+        // A closed receiver is a detached client; drop it rather than letting
+        // closed subscribers accumulate for the life of the session.
+        subscribers.retain(|tx| tx.send(event.clone()).is_ok());
     }
 }
 
@@ -297,13 +351,13 @@ impl ApprovalHandle {
 /// transport-agnostic event stream in one place.
 ///
 /// Every `SessionUpdate` still goes to the ACP channel unchanged; the same
-/// update is also mapped to a `SessionEvent` for a subscribed client, so the
+/// update is also mapped to a `SessionEvent` for every subscriber, so the
 /// two views cannot drift and adding an event never means editing the
 /// forty-odd tool sites. Holds clones, not a borrow of the session: the
 /// engine mutates itself while a sink is alive.
 struct UpdateSink<'a> {
     updates: &'a mpsc::Sender<SessionUpdate>,
-    events: Option<mpsc::UnboundedSender<SessionEvent>>,
+    events: EventHub,
     session_id: SessionId,
     turn: TurnId,
 }
@@ -311,17 +365,12 @@ struct UpdateSink<'a> {
 impl<'a> UpdateSink<'a> {
     async fn send(&self, update: SessionUpdate) {
         if let Some(event) = self.event_for(&update) {
-            if let Some(tx) = &self.events {
-                let _ = tx.send(event);
-            }
+            self.events.send(event);
         }
         let _ = self.updates.send(update).await;
     }
 
     fn event_for(&self, update: &SessionUpdate) -> Option<SessionEvent> {
-        if self.events.is_none() {
-            return None;
-        }
         let session_id = self.session_id.clone();
         match update {
             SessionUpdate::AgentMessageChunk {
@@ -512,19 +561,37 @@ pub struct HeadlessSession {
     /// `decide_and_run`/`ask_permission`'s own calls to `.record(...)`) --
     /// not a parallel reimplementation, the same mechanism reused.
     rollback: crate::rollback::Journal,
-    /// Optional transport-agnostic event stream. The ACP transport leaves this
-    /// unset and keeps using `SessionUpdate`; a TUI/daemon client can subscribe
-    /// without changing the ACP path.
-    events: Option<mpsc::UnboundedSender<SessionEvent>>,
+    /// The same per-workspace session record the TUI keeps. Written at round
+    /// boundaries so a completed turn survives a restart even though ACP
+    /// clients have no other persistence of their own.
+    log: crate::session::ChatLog,
+    /// Tests share one process-global `$HOME`, and most engine tests do not
+    /// isolate it; writing every turn into the developer's real session
+    /// directory would pollute it (or another test's temporary home). Off by
+    /// default under `cfg(test)`; the one test that verifies the file opts in
+    /// with `allow_persistence_for_test`. Production always writes.
+    #[cfg(test)]
+    test_persist: bool,
+    /// Transport-agnostic event fan-out. The ACP transport keeps using
+    /// `SessionUpdate`; any number of TUI/daemon subscribers can observe the
+    /// same session without changing the ACP path.
+    events: EventHub,
     /// Cooperative cancellation for the currently running turn. Reset at the
     /// start of every prompt, so a stale cancel cannot kill the next turn.
     cancel: CancelHandle,
     /// Direct answers to outstanding approval requests, from a non-ACP client.
     approvals: ApprovalHandle,
+    /// Monotonic id for browser asks. Separate from approval ids because the
+    /// transport correlates each ask kind independently. Atomic because
+    /// concurrent browser calls may register asks from `&self`.
+    browser_seq: AtomicU64,
+    browser_checks: AskHandle<BrowserCheckResult>,
+    browser_interactions: AskHandle<BrowserInteractResult>,
 }
 
 impl HeadlessSession {
     pub fn new(session_id: SessionId, workspace: Workspace, config: Config) -> Self {
+        let log = crate::session::ChatLog::new(&workspace.root().to_string_lossy());
         Self {
             session_id,
             workspace,
@@ -540,10 +607,16 @@ impl HeadlessSession {
             turn_starts: Vec::new(),
             last_prompt_tokens: None,
             rollback: crate::rollback::Journal::default(),
+            log,
+            #[cfg(test)]
+            test_persist: false,
             mcp: crate::mcp::McpRegistry::default(),
-            events: None,
+            events: EventHub::default(),
             cancel: CancelHandle::default(),
             approvals: ApprovalHandle::default(),
+            browser_seq: AtomicU64::new(0),
+            browser_checks: AskHandle::default(),
+            browser_interactions: AskHandle::default(),
         }
     }
 
@@ -571,13 +644,57 @@ impl HeadlessSession {
     /// Attach the transport-agnostic event sink. ACP does not use it; this is
     /// the seam the TUI/daemon client will consume instead of ACP types.
     pub fn set_event_sink(&mut self, tx: mpsc::UnboundedSender<SessionEvent>) {
-        self.events = Some(tx);
+        self.events.add(tx);
+    }
+
+    /// Subscribe to the transport-agnostic event stream from now on. This is
+    /// the seam a TUI or a session manager uses; the ACP path is unchanged.
+    pub fn subscribe_events(&self) -> mpsc::UnboundedReceiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    /// Replace this session's conversation with a recorded one (see
+    /// `session::load_chat`). Called once, before the session is served.
+    ///
+    /// Turn boundaries are rebuilt the same way `App::resume_path` rebuilds
+    /// them: every `user` message starts a turn. A browser screenshot note is
+    /// also a `user` message, so a resumed session may count one extra turn
+    /// per screenshot -- a rollback still lands on a user-message boundary,
+    /// just possibly a synthetic one.
+    ///
+    /// The log rotates: the recording being read is never appended to, so
+    /// resuming a session and then changing your mind still leaves the
+    /// original intact.
+    pub fn restore(&mut self, messages: Vec<ChatMessage>) {
+        self.turn_starts = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role == "user")
+            .map(|(index, _)| index)
+            .collect();
+        self.turn = self.turn_starts.len() as u64;
+        self.messages = messages;
+        self.log.reset();
+    }
+
+    /// Forget the conversation, matching the TUI's `/new`: transcript, turn
+    /// boundaries, todo list, usage snapshot and rollback journal all reset,
+    /// and the next turn starts a fresh session file. The active plan is
+    /// deliberately kept -- it lives on disk and `/new` in the TUI leaves it
+    /// alone too.
+    pub fn reset(&mut self) {
+        self.messages.clear();
+        self.turn_starts.clear();
+        self.turn = 0;
+        self.tool_steps = 0;
+        self.last_prompt_tokens = None;
+        self.todos.clear();
+        self.rollback = crate::rollback::Journal::default();
+        self.log.reset();
     }
 
     fn emit(&self, event: SessionEvent) {
-        if let Some(tx) = &self.events {
-            let _ = tx.send(event);
-        }
+        self.events.send(event);
     }
 
     fn emit_status(&self, status: SessionStatus) {
@@ -651,6 +768,22 @@ impl HeadlessSession {
             request_id,
             resolution,
         });
+    }
+
+    /// Bring the session file up to date with the engine's history. Called at
+    /// round boundaries, so a crash leaves at most the in-flight round
+    /// unwritten, and a completed turn is always on disk.
+    fn persist(&mut self) {
+        #[cfg(test)]
+        if !self.test_persist {
+            return;
+        }
+        self.log.append(&self.messages);
+    }
+
+    #[cfg(test)]
+    fn allow_persistence_for_test(&mut self) {
+        self.test_persist = true;
     }
 
     fn finish_turn(&self, reason: StopReason) -> StopReason {
@@ -810,6 +943,10 @@ impl HeadlessSession {
         // still hits the ceiling, the error is real and should surface.
         let mut compacted_this_turn = false;
         loop {
+            // Everything pushed since the previous round (the user message,
+            // tool results, a retry after compaction) is on disk before the
+            // next model request goes out.
+            self.persist();
             if self.cancel.is_cancelled() {
                 return self.finish_turn(StopReason::Cancelled);
             }
@@ -857,6 +994,10 @@ impl HeadlessSession {
                     // Same moment as the TUI: only after an ordinary completed
                     // turn, never after a failure or a compaction itself.
                     self.maybe_auto_compact(&updates).await;
+                    // The final assistant message was pushed inside the round;
+                    // the next loop iteration it would have been saved at
+                    // never comes.
+                    self.persist();
                     return self.finish_turn(StopReason::EndTurn);
                 }
                 RoundOutcome::Error(message) => {
@@ -961,6 +1102,7 @@ impl HeadlessSession {
                         }
                     }
                     if !budget_left {
+                        self.persist();
                         return self.finish_turn(StopReason::MaxTurnRequests);
                     }
                     // Loop again: the model gets to react to what just ran.
@@ -1016,9 +1158,12 @@ impl HeadlessSession {
                 self.messages = vec![crate::compact::summary_message(&summary)];
                 // The old turn boundaries index a conversation that no longer
                 // exists. Keep the rollback journal (its file before-states are
-                // still valid), but start the conversation afresh.
+                // still valid), but start the conversation afresh -- including
+                // on disk, so the pre-compaction file stays resumable.
                 self.turn_starts.clear();
                 self.last_prompt_tokens = None;
+                self.log.reset();
+                self.persist();
                 let _ = updates
                     .send(SessionUpdate::AgentMessageChunk {
                         content: ContentBlock::Text {
@@ -1755,8 +1900,8 @@ impl HeadlessSession {
         // Register before announcing: a client that answers the instant it
         // sees the event must find the slot already there.
         let direct = self.approvals.register(approval_request_id);
-        let pending = PendingApproval {
-            approvals: &self.approvals,
+        let pending = PendingAsk {
+            answers: &self.approvals,
             request_id: approval_request_id,
         };
         self.emit_approval_requested(approval_request_id, &request);
@@ -1939,8 +2084,8 @@ impl HeadlessSession {
         // Register before announcing: a client that answers the instant it
         // sees the event must find the slot already there.
         let direct = self.approvals.register(approval_request_id);
-        let pending = PendingApproval {
-            approvals: &self.approvals,
+        let pending = PendingAsk {
+            answers: &self.approvals,
             request_id: approval_request_id,
         };
         self.emit_approval_requested(approval_request_id, &request);
@@ -2059,11 +2204,17 @@ impl HeadlessSession {
             }))
             .await;
 
-        let (respond, receive) = oneshot::channel();
+        let request_id = self.browser_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut answers = self.browser_checks.register(request_id);
+        let pending = PendingAsk {
+            answers: &self.browser_checks,
+            request_id,
+        };
         let ask = BrowserCheckAsk {
             session_id: self.session_id.clone(),
+            request_id,
             url: url.to_string(),
-            respond,
+            answers: self.browser_checks.clone(),
         };
         self.emit_status(SessionStatus::WaitingForApproval);
         if browser.send(ask).await.is_err() {
@@ -2085,7 +2236,7 @@ impl HeadlessSession {
         // `session/prompt` is a blocking ACP call, so that hang reaches
         // all the way out to whatever's waiting on the turn to finish.
         const BROWSER_CHECK_TIMEOUT: Duration = Duration::from_secs(90);
-        let result = match tokio::time::timeout(BROWSER_CHECK_TIMEOUT, receive).await {
+        let result = match tokio::time::timeout(BROWSER_CHECK_TIMEOUT, &mut answers).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
                 BrowserCheckResult::Failed("The client disconnected before responding.".to_string())
@@ -2095,6 +2246,7 @@ impl HeadlessSession {
             ),
         };
         self.emit_status(SessionStatus::Running);
+        drop(pending);
 
         match result {
             BrowserCheckResult::Screenshot {
@@ -2174,12 +2326,18 @@ impl HeadlessSession {
             }))
             .await;
 
-        let (respond, receive) = oneshot::channel();
+        let request_id = self.browser_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut answers = self.browser_interactions.register(request_id);
+        let pending = PendingAsk {
+            answers: &self.browser_interactions,
+            request_id,
+        };
         let ask = BrowserInteractAsk {
             session_id: self.session_id.clone(),
+            request_id,
             url: url.to_string(),
             interaction: interaction.clone(),
-            respond,
+            answers: self.browser_interactions.clone(),
         };
         self.emit_status(SessionStatus::WaitingForApproval);
         if browser_interact.send(ask).await.is_err() {
@@ -2192,7 +2350,7 @@ impl HeadlessSession {
         // Same 90s bound as `check_browser`, same reasoning -- see that
         // method's own doc comment.
         const BROWSER_INTERACT_TIMEOUT: Duration = Duration::from_secs(90);
-        let result = match tokio::time::timeout(BROWSER_INTERACT_TIMEOUT, receive).await {
+        let result = match tokio::time::timeout(BROWSER_INTERACT_TIMEOUT, &mut answers).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => BrowserInteractResult::Failed(
                 "The client disconnected before responding.".to_string(),
@@ -2202,6 +2360,7 @@ impl HeadlessSession {
             ),
         };
         self.emit_status(SessionStatus::Running);
+        drop(pending);
 
         match result {
             BrowserInteractResult::Screenshot {
@@ -2449,6 +2608,14 @@ mod tests {
         format!("http://{addr}")
     }
 
+    fn drain_events(rx: &mut mpsc::UnboundedReceiver<SessionEvent>) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
     fn config_for(endpoint: &str) -> Config {
         let mut config = Config::default();
         config.llm.endpoint = endpoint.to_string();
@@ -2578,6 +2745,115 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A completed headless turn is recorded where `/sessions` and a restart
+    /// can find it -- the same file the TUI writes.
+    #[tokio::test]
+    async fn a_completed_turn_is_recorded_in_the_session_store() {
+        let _guard = crate::config::test_support::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fake_home = tempfile::tempdir().expect("temp home");
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", fake_home.path());
+
+        let (_dir, ws) = workspace();
+        let root = ws.root().to_string_lossy().into_owned();
+        let endpoint = serve_rounds(vec![text_round("Hello!")]).await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        session.allow_persistence_for_test();
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        let recorded = crate::session::latest_for(&root)
+            .map(|path| crate::session::load_chat(&path))
+            .unwrap_or_default();
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert_eq!(recorded.len(), 2, "the whole turn reached the session file");
+        assert_eq!(recorded[0].role, "user");
+        assert_eq!(recorded[0].content.as_deref(), Some("hi"));
+        assert_eq!(recorded[1].role, "assistant");
+        assert_eq!(recorded[1].content.as_deref(), Some("Hello!"));
+    }
+
+    /// Restoring a recording replaces the history and rebuilds turn
+    /// boundaries the same way `App::resume_path` does.
+    #[test]
+    fn restore_rebuilds_turn_boundaries_from_user_messages() {
+        let (_dir, ws) = workspace();
+        let config = config_for("http://127.0.0.1:1");
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        session.restore(vec![
+            ChatMessage::text("user", "one"),
+            ChatMessage::text("assistant", "a"),
+            ChatMessage::text("user", "two"),
+            ChatMessage::text("assistant", "b"),
+        ]);
+
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(session.turn, 2);
+        assert_eq!(session.turn_starts, vec![0, 2]);
+    }
+
+    /// Multiple clients can watch the same session: every subscriber gets its
+    /// own copy of the stream, and a detached one is dropped without
+    /// affecting the rest. This is the foundation for a shared session
+    /// manager serving more than one connection.
+    #[tokio::test]
+    async fn every_event_subscriber_sees_the_same_stream() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![text_round("Hello!")]).await;
+        let config = config_for(&endpoint);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let mut first = session.subscribe_events();
+        let mut second = session.subscribe_events();
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let first_events = drain_events(&mut first);
+        let second_events = drain_events(&mut second);
+        assert!(!first_events.is_empty());
+        assert_eq!(first_events, second_events);
+        assert!(first_events.iter().any(|event| matches!(
+            event,
+            SessionEvent::TextDelta { text, .. } if text == "Hello!"
+        )));
     }
 
     /// The event stream must cover the tool lifecycle too, not just text and
@@ -3904,11 +4180,14 @@ mod tests {
             permissions_rx.try_recv().is_err(),
             "check_in_browser must never ask permission -- it's read-only, like a read"
         );
-        let _ = ask.respond.send(BrowserCheckResult::Screenshot {
-            mime_type: "image/png".to_string(),
-            data: "aGVsbG8=".to_string(),
-            ax_tree: None,
-        });
+        let _ = ask.answers.respond(
+            ask.request_id,
+            BrowserCheckResult::Screenshot {
+                mime_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+                ax_tree: None,
+            },
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -3990,11 +4269,14 @@ mod tests {
         });
 
         let ask = browser_rx.recv().await.expect("a browser check ask");
-        let _ = ask.respond.send(BrowserCheckResult::Screenshot {
-            mime_type: "image/png".to_string(),
-            data: "aGVsbG8=".to_string(),
-            ax_tree: Some("rootwebarea MyApp\n  button Submit".to_string()),
-        });
+        let _ = ask.answers.respond(
+            ask.request_id,
+            BrowserCheckResult::Screenshot {
+                mime_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+                ax_tree: Some("rootwebarea MyApp\n  button Submit".to_string()),
+            },
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);
@@ -4080,13 +4362,14 @@ mod tests {
             browser_rx.try_recv().is_err(),
             "an interaction must go out over browser_interact, not the plain check_in_browser relay"
         );
-        let _ = interact_ask
-            .respond
-            .send(BrowserInteractResult::Screenshot {
+        let _ = interact_ask.answers.respond(
+            interact_ask.request_id,
+            BrowserInteractResult::Screenshot {
                 mime_type: "image/png".to_string(),
                 data: "aGVsbG8=".to_string(),
                 ax_tree: None,
-            });
+            },
+        );
 
         let stop = prompt.await.expect("task joins");
         assert_eq!(stop, StopReason::EndTurn);

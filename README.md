@@ -68,9 +68,13 @@ cargo build --release --no-default-features --bin covexcode-agent
 ```
 
 `--listen [ADDR]` serves the same protocol over TCP for local clients
-(default `127.0.0.1:7422`). Each connection gets its own session set. The
-address must be loopback: this process can run shell commands, and the
-transport has no authentication.
+(default `127.0.0.1:7422`). Every connection shares one live session set:
+`session/list` shows them, `session/attach` subscribes another client to one,
+and `session/close` ends it. Conversations are recorded in the same
+`~/.covexcode/sessions` store the TUI uses, so `session/recordings` and
+`session/resume` can pick one up again after a restart. The address must be
+loopback: this process can run shell commands, and the transport has no
+authentication.
 
 It also supports `--version` and `--providers-json` for the IDE's doctor and
 provider picker. Set `COVEXCODE_CONFIG_DIR` to isolate its config, sessions,

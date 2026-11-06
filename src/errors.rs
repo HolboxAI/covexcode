@@ -288,7 +288,10 @@ mod tests {
             .expect("canonicalize")
             .to_string_lossy()
             .into_owned();
-        let registry_path = fake_home.join(".boxcode").join("artifacts.json");
+        // Write the current config directory directly. Writing `.boxcode` and
+        // relying on legacy adoption races another test's `config_dir` call:
+        // the rename can land between mkdir and write.
+        let registry_path = fake_home.join(".covexcode").join("artifacts.json");
         std::fs::create_dir_all(registry_path.parent().unwrap()).expect("mkdir");
         let published_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

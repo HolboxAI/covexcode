@@ -8,6 +8,7 @@ mod clipboard;
 mod compact;
 mod config;
 mod contrast;
+mod core_tui;
 mod danger;
 mod dateutil;
 mod db;
@@ -32,6 +33,7 @@ mod read_policy;
 mod requests;
 mod rollback;
 mod session;
+mod session_client;
 mod subagent;
 mod telemetry;
 mod theme;
@@ -362,11 +364,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (hosted_tx, mut hosted_rx) = mpsc::channel::<Vec<backend::Mine>>(8);
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<Result<(), String>>(8);
 
+    // Opt-in (`COVEXCODE_CORE_SESSION=1`): drive this TUI through the shared
+    // session engine instead of `App`'s own agent loop. The default path is
+    // untouched; without the variable this is `None` and `run_app` behaves
+    // exactly as before. See `core_tui`'s own docs for what is still partial.
+    let mut core = if core_tui::CoreTui::enabled() {
+        workspace.as_ref().map(|ws| {
+            app.startup_notices.push(
+                "Core-session mode (experimental): the engine owns the turn, approvals, /new and \
+                 resuming (/resume, /sessions, --resume); /compact and /rollback still act on \
+                 the TUI history only."
+                    .to_string(),
+            );
+            // The engine gets the same recording App just loaded (if any),
+            // so a resumed conversation is not one-sided. Taking the marker
+            // also stops the loop below from restoring it a second time.
+            let history = app
+                .pending_resume
+                .take()
+                .map(|path| session::load_chat(&path))
+                .filter(|messages| !messages.is_empty());
+            core_tui::CoreTui::start_with_history(ws.clone(), app.config.clone(), history)
+        })
+    } else {
+        None
+    };
+
     let result = run_app(
         &mut terminal,
         &mut app,
         workspace.as_ref(),
         &mut session_log,
+        &mut core,
         tx,
         &mut rx,
         deploy_tx,
@@ -654,6 +683,7 @@ async fn run_app(
     app: &mut App,
     workspace: Option<&Workspace>,
     session_log: &mut session::SessionLog,
+    core: &mut Option<core_tui::CoreTui>,
     tx: mpsc::Sender<(u64, StreamEvent)>,
     rx: &mut mpsc::Receiver<(u64, StreamEvent)>,
     deploy_tx: mpsc::Sender<deploy::DeployEvent>,
@@ -672,6 +702,7 @@ async fn run_app(
         terminal.draw(|f| ui::render(f, app))?;
 
         // Keyboard / paste input.
+        let was_busy = app.is_busy();
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -693,6 +724,14 @@ async fn run_app(
                 _ => {}
             }
         }
+        // A key that took the app out of a busy state (Esc, a confirmed quit)
+        // must also stop the engine turn: in core mode that task owns the
+        // request, and `App`'s own abort handle is never set.
+        if let Some(core) = core.as_mut() {
+            if was_busy && !app.is_busy() {
+                core.cancel(app);
+            }
+        }
 
         // Drain every token that has arrived; doing only one per frame caps
         // throughput at ~60 tokens/sec and looks like the app is stalling.
@@ -700,6 +739,15 @@ async fn run_app(
         // `agent::handle_event` -- the loop's job is only to pump the channel.
         while let Ok((id, event)) = rx.try_recv() {
             agent::handle_event(app, id, event);
+        }
+
+        // The core-mode equivalent of the drain above: engine events become
+        // App state through the bridge, never through `agent::handle_event`.
+        if let Some(core) = core.as_mut() {
+            core.drain(app);
+            // The user may have answered an approval prompt this tick; App
+            // recorded the choice, the bridge sends it to the engine.
+            core.answer_queued_decision(app);
         }
 
         // Deployment progress. Same shape as the token drain above, and drained
@@ -827,11 +875,40 @@ async fn run_app(
         // The session record, same place as the other files this loop owns.
         // A length comparison almost every tick; messages hit the disk the
         // tick they appear, so a Ctrl-C loses nothing said before it.
-        if app.session_reset {
-            app.session_reset = false;
-            session_log.reset();
+        //
+        // In core mode the engine records its own conversation (see
+        // `HeadlessSession::persist`), so writing App's transcript too would
+        // leave two session files for one conversation. `/new` and a resumed
+        // recording still have to reach the engine, though, or the next
+        // prompt would carry the conversation the user just replaced.
+        let resume_recording = app.pending_resume.take();
+        let reset_log = app.session_reset;
+        app.session_reset = false;
+        match core.as_mut() {
+            Some(core) => {
+                if let Some(path) = resume_recording {
+                    let messages = session::load_chat(&path);
+                    if messages.is_empty() {
+                        core.reset(app);
+                        app.note(
+                            "That recording is empty or unreadable; the engine conversation was \
+                             reset instead."
+                                .to_string(),
+                        );
+                    } else {
+                        core.restore(app, messages);
+                    }
+                } else if reset_log {
+                    core.reset(app);
+                }
+            }
+            None => {
+                if reset_log {
+                    session_log.reset();
+                }
+                session_log.append(&app.messages);
+            }
         }
-        session_log.append(&app.messages);
         // Same reasoning again: `App` marks the plan dirty, this loop writes
         // it. A failed write is reported rather than swallowed -- the whole
         // value of an approved plan is that it is on disk, so silently not
@@ -861,7 +938,14 @@ async fn run_app(
         // and run what the user allowed. Both are no-ops unless `App` is in
         // the matching state, and both live in `agent.rs` -- this loop only
         // decides *when* they get a chance to run, not what they do.
-        agent::fire_request(app, workspace, &tx);
+        //
+        // With `COVEXCODE_CORE_SESSION=1`, firing goes to the engine client
+        // instead; `execute_approved` stays a no-op there because the engine
+        // runs its own tools.
+        match core.as_mut() {
+            Some(core) => core.fire(app),
+            None => agent::fire_request(app, workspace, &tx),
+        }
         agent::execute_approved(app, workspace, &tx);
 
         if app.should_exit {
