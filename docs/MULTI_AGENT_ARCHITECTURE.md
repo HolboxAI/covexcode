@@ -1,8 +1,8 @@
 # Multi-agent CLI architecture
 
-Status: Phase 0 complete; Phase 1 complete except TUI-as-client; Phase 2
-complete (JSONL store); Phase 4 partial  
-Date: 2026-11-05  
+Status: Phase 0 complete; Phase 1 complete; Phase 2 complete (JSONL store);
+Phase 4 partial  
+Date: 2026-11-06  
 Scope: `HolboxAI/covexcode` (the Rust CLI and agent runtime)
 
 ## Implementation status
@@ -17,12 +17,13 @@ Landed on `main`:
   `session/cancel`; `HeadlessSession` is the reusable engine behind both
   `--acp` and `--listen`, with `SessionCommand` (cancel + approval answers) as
   its serializable control surface. The TUI still runs its own `App` loop by
-  default; `COVEXCODE_CORE_SESSION=1` opts into driving it through the engine
-  (`session_client` + `core_tui`) for streaming text, tool results, usage,
-  cancel, approval prompts, `/new`, `/compact`, `/rollback`, `/diff`,
-  `/provider`/`/model` switches, and resuming (`/resume`, `/sessions`,
-  startup `--resume`); `/subagents` still shows only App's trail list --
-  closing that closes Phase 1.
+  default; `COVEXCODE_CORE_SESSION=1` drives it through the engine instead
+  (`session_client` + `core_tui`), with streaming text, tool results, usage,
+  cancel, approval prompts, subagent trails, and every command that changes
+  the conversation or its endpoint: `/new`, `/compact`, `/rollback`, `/diff`,
+  `/subagents`, `/provider`, `/model`, and resuming (`/resume`, `/sessions`,
+  startup `--resume`). Phase 1's TUI-as-client exit criterion is met; the old
+  path stays as the default until the flag is retired.
 - **Phase 2**: a `SessionRegistry` with one actor per session, shared by every
   connection a `--listen` process accepts. `session/list`, `session/attach`,
   `session/close` and `session/cancel` work across connections, status changes
@@ -42,10 +43,11 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 1's TUI-as-client step; Phase 3's tool
-scheduler, per-file locks, persistent shells and sandbox policy; Phase 4's
-write-capable worktree agents, budgets and agent panel; Phase 5's task DAG and
-teams.
+Remaining, in plan order: Phase 3's tool scheduler, per-file locks, persistent
+shells and sandbox policy; Phase 4's write-capable worktree agents, budgets and
+agent panel; Phase 5's task DAG and teams. Phase 1 is complete; retiring the
+`COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
+deleting the old loop) is follow-up cleanup, not parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.

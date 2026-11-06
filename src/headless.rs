@@ -1797,7 +1797,7 @@ impl HeadlessSession {
                         {
                             let _ = updates
                                 .send(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                                    tool_call_id: ToolCallId(call_id),
+                                    tool_call_id: ToolCallId(call_id.clone()),
                                     title: None,
                                     kind: None,
                                     status: Some(ToolCallStatus::InProgress),
@@ -1806,6 +1806,16 @@ impl HeadlessSession {
                                     }),
                                 }))
                                 .await;
+                            // The same fact on the transport-agnostic stream:
+                            // a TUI client shows it in `/subagents`, which
+                            // does not parse ACP-shaped updates.
+                            self.emit(SessionEvent::SubagentActivity {
+                                session_id: self.session_id.clone(),
+                                turn: TurnId::new(self.turn),
+                                call_id,
+                                label,
+                                rounds,
+                            });
                         }
                     }
                 }
@@ -3149,7 +3159,8 @@ mod tests {
     }
 
     /// A long child turn must not look frozen: the engine forwards each child
-    /// tool call as an in-progress update on the parent `agent` row.
+    /// tool call as an in-progress update on the parent `agent` row, and as a
+    /// `SubagentActivity` event for clients that render trails (`/subagents`).
     #[tokio::test]
     async fn engine_streams_subagent_activity_to_the_client() {
         let (_dir, ws) = workspace();
@@ -3165,6 +3176,7 @@ mod tests {
         .await;
         let config = config_for(&endpoint);
         let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let mut events = session.subscribe_events();
         let (updates_tx, mut updates_rx) = mpsc::channel(16);
         let (permissions_tx, _permissions_rx) = mpsc::channel(16);
         let (browser_tx, _browser_rx) = mpsc::channel(16);
@@ -3201,6 +3213,25 @@ mod tests {
         }
         assert!(saw_progress, "the client must see the child working");
         assert!(saw_report, "and still receive the final report");
+
+        let mut activity = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let SessionEvent::SubagentActivity {
+                call_id,
+                label,
+                rounds,
+                ..
+            } = event
+            {
+                activity.push((call_id, label, rounds));
+            }
+        }
+        assert!(
+            activity
+                .iter()
+                .any(|(_, label, rounds)| *rounds == 1 && !label.is_empty()),
+            "the transport-agnostic stream carries the same activity: {activity:?}"
+        );
     }
 
     /// `update_todos` used to be acknowledged and dropped. It now becomes an

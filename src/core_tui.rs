@@ -5,11 +5,9 @@
 //! slice: the engine owns the turn, so text, tool results, usage and approval
 //! prompts are real and stream in normally, and `/new`, `/compact`,
 //! `/rollback`, `/diff`, `/resume`, `/sessions`, startup `--resume`,
-//! `/provider`, `/model`, and login are mirrored into the engine. One surface
-//! remains one-sided:
-//!
-//! - `/subagents` shows App's trail list, which the engine's children do not
-//!   fill yet.
+//! `/provider`, `/model`, login and the `/subagents` trail are mirrored into
+//! the engine. Every TUI surface that touches the agent is engine-backed in
+//! this mode; the old `App` loop remains the default and the rollback.
 //!
 //! The old path stays the default and is untouched; with the variable unset
 //! nothing in this module runs.
@@ -265,6 +263,10 @@ impl CoreTui {
                     ToolStatus::Failed => format!("{title} — failed"),
                     _ => format!("{title} — done"),
                 };
+                app.finish_core_subagent(
+                    &tool_call_id,
+                    display.rsplit(" — ").next().unwrap_or("done").to_string(),
+                );
                 app.push_tool_outcome(crate::tools::ToolOutcome {
                     call_id: tool_call_id,
                     display,
@@ -272,6 +274,22 @@ impl CoreTui {
                     diff: None,
                     rollback: None,
                 });
+            }
+            SessionEvent::SubagentActivity {
+                call_id,
+                label,
+                rounds,
+                ..
+            } => {
+                // The parent call's title is the nearest thing App has to the
+                // task text `/subagents` shows, since the engine kept the raw
+                // tool call.
+                let task = self
+                    .titles
+                    .get(&call_id)
+                    .cloned()
+                    .unwrap_or_else(|| call_id.clone());
+                app.record_core_subagent_activity(&call_id, task, label, rounds);
             }
             SessionEvent::UsageUpdated {
                 used,
@@ -784,6 +802,49 @@ mod tests {
         assert_eq!(app.core_approval, None);
         assert_eq!(app.core_decision, None);
         assert!(core.pending_approvals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn subagent_activity_fills_the_subagents_trail() {
+        let (_dir, mut core, mut app) = core_with_workspace();
+
+        core.apply(
+            &mut app,
+            SessionEvent::ToolCallStarted {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                tool_call_id: "call_1".to_string(),
+                title: r#"agent: "read hello.txt""#.to_string(),
+            },
+        );
+        core.apply(
+            &mut app,
+            SessionEvent::SubagentActivity {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                call_id: "call_1".to_string(),
+                label: "read hello.txt".to_string(),
+                rounds: 1,
+            },
+        );
+
+        let trail = app.subagent_trails.first().expect("a trail");
+        assert_eq!(trail.task, r#"agent: "read hello.txt""#);
+        assert_eq!(trail.steps, vec!["read hello.txt"]);
+        assert_eq!(trail.rounds, 1);
+        assert!(trail.finished.is_none(), "still running");
+
+        core.apply(
+            &mut app,
+            SessionEvent::ToolCallUpdated {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                tool_call_id: "call_1".to_string(),
+                status: Some(ToolStatus::Completed),
+                text: Some("the report".to_string()),
+            },
+        );
+        assert_eq!(app.subagent_trails[0].finished.as_deref(), Some("done"));
     }
 
     #[tokio::test]
