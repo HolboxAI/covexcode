@@ -372,8 +372,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         workspace.as_ref().map(|ws| {
             app.startup_notices.push(
                 "Core-session mode (experimental): the engine owns the turn, approvals, /new, \
-                 /compact, /rollback and resuming (/resume, /sessions, --resume); /diff still \
-                 reads the TUI's journal."
+                 /compact, /rollback, /diff and resuming (/resume, /sessions, --resume); \
+                 /subagents and mid-session /provider or /model changes do not reach the engine \
+                 yet."
                     .to_string(),
             );
             // The engine gets the same recording App just loaded (if any),
@@ -949,6 +950,20 @@ async fn run_app(
                     ),
                     None => app.note(
                         "The engine session is gone; the undo plan is unavailable.".to_string(),
+                    ),
+                }
+            }
+        }
+
+        // `/diff` in core mode: the engine's journal is where the before-
+        // content lives, so fetch its plan and hand it to the same renderer
+        // App's own journal uses.
+        if std::mem::take(&mut app.core_diff_query) {
+            if let Some(core) = core.as_mut() {
+                match core.change_steps().await {
+                    Some(steps) => app.show_core_diff(steps),
+                    None => app.note(
+                        "The engine session is gone; /diff is unavailable.".to_string(),
                     ),
                 }
             }
