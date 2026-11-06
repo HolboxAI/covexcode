@@ -287,6 +287,16 @@ pub enum SessionEvent {
         request_id: u64,
         resolution: ApprovalResolution,
     },
+    /// A manual `/compact` finished. `summary` is present when the history
+    /// was actually replaced; `error` describes why it was not. Auto-
+    /// compaction deliberately does not emit this -- it is not a user
+    /// command and the next request already reflects the new history.
+    Compacted {
+        session_id: SessionId,
+        turn: TurnId,
+        summary: Option<String>,
+        error: Option<String>,
+    },
     TurnFinished {
         session_id: SessionId,
         turn: TurnId,

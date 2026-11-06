@@ -396,9 +396,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut core = if core_tui::CoreTui::enabled() {
         workspace.as_ref().map(|ws| {
             app.startup_notices.push(
-                "Core-session mode (experimental): the engine owns the turn, approvals, /new and \
-                 resuming (/resume, /sessions, --resume); /compact and /rollback still act on \
-                 the TUI history only."
+                "Core-session mode (experimental): the engine owns the turn, approvals, /new, \
+                 /compact and resuming (/resume, /sessions, --resume); /rollback is not \
+                 available in this mode yet."
                     .to_string(),
             );
             // The engine gets the same recording App just loaded (if any),
@@ -414,6 +414,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
+    if core.is_some() {
+        app.core_session = true;
+    }
 
     let result = run_app(
         &mut terminal,

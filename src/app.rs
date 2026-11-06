@@ -626,6 +626,11 @@ pub struct App {
     /// already loaded the transcript; `main.rs` gives the same file to the
     /// engine when core-session mode is on, then clears this.
     pub pending_resume: Option<std::path::PathBuf>,
+    /// True when `main.rs` is driving this app through the session engine
+    /// (`COVEXCODE_CORE_SESSION=1`). Only commands whose implementation has
+    /// not moved yet consult it, to say so instead of acting on a journal the
+    /// engine owns.
+    pub core_session: bool,
     /// How many of `messages` have already been printed into the terminal's own
     /// scrollback. Everything below this index is the terminal's to keep and
     /// must never be drawn again; everything at or above it still belongs to
@@ -897,6 +902,7 @@ impl App {
             core_approval: None,
             core_decision: None,
             pending_resume: None,
+            core_session: false,
             flushed: 0,
             welcome_flushed: false,
             stream_printed: 0,
@@ -2705,6 +2711,14 @@ impl App {
         self.follow_tail = true;
     }
 
+    /// Complete a `/compact` the engine performed: replace the transcript
+    /// with the engine's summary and settle the turn, exactly what
+    /// `finish_stream` does for App's own compaction.
+    pub fn finish_core_compaction(&mut self, summary: String) {
+        self.finish_compaction(summary);
+        self.settle_turn();
+    }
+
     /// Exact counts from the endpoint for the turn in flight. Preferred over
     /// the character estimate wherever both exist -- an estimate is fine for a
     /// history readout and not fine for a spending limit.
@@ -3075,6 +3089,14 @@ impl App {
     }
 
     pub fn start_rollback_command(&mut self, cmd: &str) {
+        if self.core_session {
+            self.messages.push(Message::new(
+                Role::System,
+                "Rollback is not available in core-session mode yet -- the engine keeps its \
+                 own rollback journal, and this TUI cannot see it.",
+            ));
+            return;
+        }
         if self.state != AppState::AwaitingInput {
             self.messages.push(Message::new(
                 Role::System,
@@ -11978,6 +12000,16 @@ mod tests {
                 .content
                 .contains("Resumed the selected session"));
         });
+    }
+
+    #[test]
+    fn rollback_in_core_session_mode_explains_itself() {
+        let mut a = app();
+        a.core_session = true;
+        a.start_rollback_command("/rollback");
+        let last = a.messages.last().expect("a note");
+        assert!(last.content.contains("not available"), "{}", last.content);
+        assert!(last.content.contains("core-session"), "{}", last.content);
     }
 
     #[test]
