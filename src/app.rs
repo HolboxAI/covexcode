@@ -902,6 +902,32 @@ pub enum ClipboardOutcome {
     Empty,
 }
 
+/// Record a refused approval (with a reason) to the feedback endpoint.
+///
+/// Mirrors `/feedback` exactly: append to the local log first so a failed
+/// network call cannot lose it, then -- unless the user has opted out of
+/// outbound calls -- fire a background POST to the same endpoint. A plain
+/// `Deny` carries no reason and records nothing. Nothing here is ever shown to
+/// the user: the rejection is already answered, and a dead server or a local
+/// write failure must not surface a second, unrelated error on top of it.
+fn report_rejection(decision: &crate::approval::Decision) {
+    let Some(reason) = decision.reason() else {
+        return;
+    };
+    let message = format!("rejection: {reason}");
+    let _ = crate::feedback::log(&message);
+    if crate::feedback::is_opted_out() {
+        return;
+    }
+    // `try_current` rather than a bare `tokio::spawn` so tests -- which run
+    // without a runtime -- exercise the log path without panicking.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let _ = crate::feedback::send(&message, env!("CARGO_PKG_VERSION")).await;
+        });
+    }
+}
+
 impl App {
     pub fn new(config: Config) -> Self {
         Self {
@@ -3310,6 +3336,7 @@ impl App {
                 }
                 Some(decision) => {
                     self.overlay = None;
+                    report_rejection(&decision);
                     self.cancel_rollback(decision.reason());
                 }
             }
@@ -3750,6 +3777,11 @@ impl App {
         let Some(call) = self.pending_tools.pop_front() else {
             return;
         };
+
+        // A typed rejection reason is also product feedback: record it silently
+        // (log + background send), exactly like `/feedback`. A plain `Deny` has
+        // no reason and records nothing.
+        report_rejection(&decision);
 
         // A plan is answered here and never queued for the runner: accepting
         // it changes this struct's mode, and the runner is a spawned task with
@@ -5847,9 +5879,9 @@ impl App {
                     self.overlay_input.clear();
                     self.overlay_cursor = 0;
                     let notice = if crate::feedback::is_opted_out() {
-                        "· feedback opt-out active — saved locally to ~/.covexcode/feedback.log"
+                        "· feedback opt-out active — saved locally"
                     } else {
-                        "· feedback sending…"
+                        "· sending feedback…"
                     };
                     self.messages.push(Message::new(Role::System, notice));
                     self.feedback_request = Some(text);
@@ -5871,17 +5903,18 @@ impl App {
         }
     }
 
-    /// Called by the runtime loop when the `/feedback` POST resolves. The
-    /// "sending…" line was pushed on Enter; this replaces it with the outcome.
+    /// Called by the runtime loop when the `/feedback` outcome resolves. The
+    /// "sending feedback…" line was pushed on Enter; this replaces it with the
+    /// outcome -- success, or a local write failure.
     pub fn finish_feedback(&mut self, result: Result<(), String>) {
         match result {
             Ok(()) => self.messages.push(Message::new(
                 Role::System,
-                "✓ feedback sent — thank you",
+                "✓ feedback saved — thank you",
             )),
-            Err(_) => self.messages.push(Message::new(
+            Err(e) => self.messages.push(Message::new(
                 Role::Error,
-                "✗ feedback failed — saved to ~/.covexcode/feedback.log",
+                format!("✗ feedback could not be saved locally — {e}"),
             )),
         }
     }
@@ -6145,6 +6178,38 @@ mod tests {
     /// state, so two tests toggling it concurrently would race (mirrors
     /// config::test_support::HOME_LOCK's reasoning for $HOME).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A typed rejection reason is product feedback: it must reach the same
+    /// local log `/feedback` uses, prefixed with `rejection:`.
+    #[test]
+    fn a_deny_with_feedback_records_the_rejection() {
+        with_isolated_home(|| {
+            report_rejection(&crate::approval::Decision::DenyWithFeedback(
+                "use the helper".to_string(),
+            ));
+
+            let path = Config::config_dir().join("feedback.log");
+            let contents = std::fs::read_to_string(&path).expect("the log must be written");
+            assert!(
+                contents.contains("rejection: use the helper"),
+                "log must contain the rejection message: {contents}"
+            );
+        });
+    }
+
+    /// A plain refusal has no reason, so it must send nothing and log nothing.
+    #[test]
+    fn a_plain_deny_records_nothing() {
+        with_isolated_home(|| {
+            report_rejection(&crate::approval::Decision::Deny);
+
+            let path = Config::config_dir().join("feedback.log");
+            assert!(
+                !path.exists(),
+                "a plain Deny must not create the log: {path:?}"
+            );
+        });
+    }
 
     /// The existing approval-flow tests below use `ls`/`cat`/`pwd` purely as
     /// stand-ins for "some command" and assert every one of them stops for a
@@ -8434,14 +8499,14 @@ mod tests {
     }
 
     #[test]
-    fn feedback_stops_accepting_at_the_two_thousand_char_cap() {
+    fn feedback_stops_accepting_at_the_ten_thousand_char_cap() {
         let mut a = app();
         a.run_command("/feedback");
         a.overlay_input = "x".repeat(crate::feedback::MAX_CHARS);
         a.overlay_cursor = crate::feedback::MAX_CHARS;
         a.handle_key(key(KeyCode::Char('y')));
         assert_eq!(a.overlay_input.chars().count(), crate::feedback::MAX_CHARS);
-        assert!(!a.overlay_input.contains('y'), "the 2001st char is rejected");
+        assert!(!a.overlay_input.contains('y'), "the 10001st char is rejected");
     }
 
     #[test]
