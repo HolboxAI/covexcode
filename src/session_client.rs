@@ -50,6 +50,15 @@ enum ClientMsg {
     /// whether the history was actually replaced; the outcome also arrives as
     /// `SessionEvent::Compacted`.
     Compact { respond: oneshot::Sender<bool> },
+    /// `/rollback`: a read-only peek at the engine's journal.
+    ListChanges {
+        respond: oneshot::Sender<crate::protocol::ListChangesResponse>,
+    },
+    /// `/rollback`: apply the engine's own undo plan.
+    Rollback {
+        restore_before_turn: Option<u64>,
+        respond: oneshot::Sender<crate::protocol::RollbackResponse>,
+    },
 }
 
 /// A frontend's handle to one running engine. Dropping it ends the actor
@@ -108,6 +117,21 @@ impl EngineClient {
                         drop(updates_tx);
                         let _ = drain.await;
                         let _ = respond.send(replaced);
+                    }
+                    ClientMsg::ListChanges { respond } => {
+                        let _ = respond.send(session.list_changes());
+                    }
+                    ClientMsg::Rollback {
+                        restore_before_turn,
+                        respond,
+                    } => {
+                        let req = crate::protocol::RollbackRequest {
+                            session_id: session.session_id().clone(),
+                            files: None,
+                            turn: None,
+                            restore_before_turn,
+                        };
+                        let _ = respond.send(session.rollback(&req));
                     }
                 }
             }
@@ -182,6 +206,34 @@ impl EngineClient {
         let (respond, receive) = oneshot::channel();
         self.commands
             .send(ClientMsg::Compact { respond })
+            .await
+            .ok()?;
+        receive.await.ok()
+    }
+
+    /// The engine's rollback journal, in the shape the TUI's confirmation
+    /// dialog needs (`session/list_changes`'s own type).
+    pub async fn list_changes(&self) -> Option<crate::protocol::ListChangesResponse> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ClientMsg::ListChanges { respond })
+            .await
+            .ok()?;
+        receive.await.ok()
+    }
+
+    /// Undo the engine's recorded changes. `restore_before_turn` selects the
+    /// "restore to before query N" form; `None` undoes the whole session.
+    pub async fn rollback(
+        &self,
+        restore_before_turn: Option<u64>,
+    ) -> Option<crate::protocol::RollbackResponse> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ClientMsg::Rollback {
+                restore_before_turn,
+                respond,
+            })
             .await
             .ok()?;
         receive.await.ok()
@@ -573,5 +625,45 @@ mod tests {
         let body = bodies.recv().await.expect("the follow-up request");
         assert!(body.contains("summary of earlier"), "{body}");
         assert!(!body.contains("earlier question"), "{body}");
+    }
+
+    /// The engine's journal is reachable from the client: a write shows up
+    /// in `list_changes`, and `rollback` puts the file back.
+    #[tokio::test]
+    async fn the_engine_journal_can_be_listed_and_rolled_back() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("a.txt"), "before\n").expect("write");
+        let ws = Workspace::new(dir.path()).expect("workspace");
+        let endpoint = serve_rounds(vec![
+            tool_call_round("write_file", r#"{"path":"a.txt","content":"after\n"}"#),
+            text_round("done"),
+        ])
+        .await;
+        let SpawnedSession { client, .. } = EngineClient::spawn(ws, config_for(&endpoint));
+
+        let stop = client.prompt("write it", Vec::new(), None).await;
+        assert_eq!(stop, Some(StopReason::EndTurn));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "after\n"
+        );
+
+        let changes = client.list_changes().await.expect("the journal answered");
+        assert_eq!(changes.changes.len(), 1);
+        assert_eq!(changes.changes[0].path, "a.txt");
+        assert_eq!(changes.changes[0].action, "restore");
+
+        let response = client.rollback(None).await.expect("rollback answered");
+        assert!(!response.summary.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(client
+            .list_changes()
+            .await
+            .expect("the journal answered")
+            .changes
+            .is_empty());
     }
 }
