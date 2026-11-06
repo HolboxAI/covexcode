@@ -372,9 +372,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         workspace.as_ref().map(|ws| {
             app.startup_notices.push(
                 "Core-session mode (experimental): the engine owns the turn, approvals, /new, \
-                 /compact, /rollback, /diff and resuming (/resume, /sessions, --resume); \
-                 /subagents and mid-session /provider or /model changes do not reach the engine \
-                 yet."
+                 /compact, /rollback, /diff, /provider, /model and resuming (/resume, /sessions, \
+                 --resume); /subagents does not show engine children yet."
                     .to_string(),
             );
             // The engine gets the same recording App just loaded (if any),
@@ -997,6 +996,16 @@ async fn run_app(
         // With `COVEXCODE_CORE_SESSION=1`, firing goes to the engine client
         // instead; `execute_approved` stays a no-op there because the engine
         // runs its own tools.
+        //
+        // A provider/model switch or completed login must reach the running
+        // engine before the prompt fired this tick, or that prompt would go
+        // to the endpoint the engine was started with.
+        if app.config_dirty {
+            app.config_dirty = false;
+            if let Some(core) = core.as_mut() {
+                let _ = core.update_config(app.config.clone()).await;
+            }
+        }
         match core.as_mut() {
             Some(core) => core.fire(app),
             None => agent::fire_request(app, workspace, &tx),

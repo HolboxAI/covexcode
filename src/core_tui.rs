@@ -4,13 +4,12 @@
 //! Enabled by `COVEXCODE_CORE_SESSION=1`. Deliberately partial in this first
 //! slice: the engine owns the turn, so text, tool results, usage and approval
 //! prompts are real and stream in normally, and `/new`, `/compact`,
-//! `/rollback`, `/diff`, `/resume`, `/sessions` and startup `--resume` are
-//! mirrored into the engine. Two surfaces remain one-sided:
+//! `/rollback`, `/diff`, `/resume`, `/sessions`, startup `--resume`,
+//! `/provider`, `/model`, and login are mirrored into the engine. One surface
+//! remains one-sided:
 //!
 //! - `/subagents` shows App's trail list, which the engine's children do not
-//!   fill yet;
-//! - `/provider` and `/model` change App's config, but the running engine
-//!   keeps the config it was started with.
+//!   fill yet.
 //!
 //! The old path stays the default and is untouched; with the variable unset
 //! nothing in this module runs.
@@ -145,6 +144,12 @@ impl CoreTui {
     /// The engine's journal snapshots including before-content, for `/diff`.
     pub async fn change_steps(&self) -> Option<Vec<crate::rollback::Step>> {
         self.client.change_steps().await
+    }
+
+    /// `/provider`, `/model` or a completed login: future turns use this
+    /// config. Ordered before any prompt fired later in the same tick.
+    pub async fn update_config(&self, config: crate::config::Config) -> bool {
+        self.client.update_config(config).await
     }
 
     /// Start the turn `App::submit` queued. A no-op unless the app is in

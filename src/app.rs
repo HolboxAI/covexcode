@@ -657,6 +657,10 @@ pub struct App {
     /// `/diff` in core mode: `main.rs` fetches the engine's journal
     /// snapshots and calls [`App::show_core_diff`].
     pub core_diff_query: bool,
+    /// The provider/model/endpoint changed and the running engine has not
+    /// been told yet. `main.rs` drains it in core mode; the default path
+    /// reads `config` directly and ignores the flag.
+    pub config_dirty: bool,
     /// How many of `messages` have already been printed into the terminal's own
     /// scrollback. Everything below this index is the terminal's to keep and
     /// must never be drawn again; everything at or above it still belongs to
@@ -963,6 +967,7 @@ impl App {
             core_session: false,
             core_rollback_query: None,
             core_diff_query: false,
+            config_dirty: false,
             flushed: 0,
             welcome_flushed: false,
             stream_printed: 0,
@@ -1220,6 +1225,9 @@ impl App {
             Ok(()) => {
                 if let Ok(cfg) = crate::config::Config::load() {
                     self.config = cfg;
+                    // Login rewrites the stored key; a running core-session
+                    // engine must switch to it too.
+                    self.config_dirty = true;
                 }
                 let status = crate::login::LoginStatus::load(&self.config);
                 self.messages
@@ -6065,6 +6073,9 @@ impl App {
         self.config.llm.endpoint = endpoint;
         self.config.llm.model = model;
         self.config.llm.api_key = api_key;
+        // A running core-session engine keeps its own config copy; main.rs
+        // sees this flag and hands it the new one before the next prompt.
+        self.config_dirty = true;
 
         let label = if self.config.llm.provider.is_empty() {
             self.config.llm.endpoint.as_str()
@@ -12905,6 +12916,20 @@ mod tests {
 
         assert!(a.core_diff_query);
         assert_eq!(a.messages.len(), before, "nothing rendered from App's journal");
+    }
+
+    #[test]
+    fn switching_the_model_marks_the_config_for_the_engine() {
+        crate::config::test_support::with_isolated_home(|| {
+            let mut a = app();
+            a.apply_llm_config(
+                "deepseek".to_string(),
+                "http://localhost".to_string(),
+                "test-model".to_string(),
+                "sk-test".to_string(),
+            );
+            assert!(a.config_dirty, "main.rs hands the new config to the engine");
+        });
     }
 
     #[test]
