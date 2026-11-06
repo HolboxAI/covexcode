@@ -622,6 +622,10 @@ pub struct App {
     /// to the engine itself -- same mark-and-let-main-act pattern as
     /// `plan_dirty`.
     pub core_decision: Option<(u64, bool)>,
+    /// A recording the user chose to resume (`/resume`, `/sessions`). App has
+    /// already loaded the transcript; `main.rs` gives the same file to the
+    /// engine when core-session mode is on, then clears this.
+    pub pending_resume: Option<std::path::PathBuf>,
     /// How many of `messages` have already been printed into the terminal's own
     /// scrollback. Everything below this index is the terminal's to keep and
     /// must never be drawn again; everything at or above it still belongs to
@@ -892,6 +896,7 @@ impl App {
             approval_selected: true,
             core_approval: None,
             core_decision: None,
+            pending_resume: None,
             flushed: 0,
             welcome_flushed: false,
             stream_printed: 0,
@@ -2494,6 +2499,9 @@ impl App {
         }
         let count = loaded.len();
         self.session_reset = true;
+        // The transcript is restored above; the engine needs the same file,
+        // so `main.rs` can restore its own copy in core-session mode.
+        self.pending_resume = Some(path.to_path_buf());
         self.messages = loaded;
         self.turn = 0;
         self.turn_starts.clear();
@@ -11959,6 +11967,10 @@ mod tests {
             a.handle_key(key(KeyCode::Enter));
             assert!(a.overlay.is_none());
             assert_eq!(a.messages[0].content, "first session");
+            assert!(
+                a.pending_resume.is_some(),
+                "the engine gets the same recording in core-session mode"
+            );
             assert!(a
                 .messages
                 .last()

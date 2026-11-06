@@ -397,19 +397,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         workspace.as_ref().map(|ws| {
             app.startup_notices.push(
                 "Core-session mode (experimental): the engine owns the turn, approvals, /new and \
-                 startup --resume; /compact, /rollback and /sessions still act on the TUI \
-                 history only."
+                 resuming (/resume, /sessions, --resume); /compact and /rollback still act on \
+                 the TUI history only."
                     .to_string(),
             );
-            // The engine gets the same recording App just loaded, so a
-            // resumed conversation is not one-sided.
-            let history = if resume {
-                session::latest_for(&app.workspace_root)
-                    .map(|path| session::load_chat(&path))
-                    .filter(|messages| !messages.is_empty())
-            } else {
-                None
-            };
+            // The engine gets the same recording App just loaded (if any),
+            // so a resumed conversation is not one-sided. Taking the marker
+            // also stops the loop below from restoring it a second time.
+            let history = app
+                .pending_resume
+                .take()
+                .map(|path| session::load_chat(&path))
+                .filter(|messages| !messages.is_empty());
             core_tui::CoreTui::start_with_history(ws.clone(), app.config.clone(), history)
         })
     } else {
@@ -874,14 +873,27 @@ async fn run_app<B: ratatui::backend::Backend>(
         //
         // In core mode the engine records its own conversation (see
         // `HeadlessSession::persist`), so writing App's transcript too would
-        // leave two session files for one conversation. `/new` still has to
-        // reach the engine, though, or the next prompt would carry the
-        // conversation the user just cleared.
+        // leave two session files for one conversation. `/new` and a resumed
+        // recording still have to reach the engine, though, or the next
+        // prompt would carry the conversation the user just replaced.
+        let resume_recording = app.pending_resume.take();
         let reset_log = app.session_reset;
         app.session_reset = false;
         match core.as_mut() {
             Some(core) => {
-                if reset_log {
+                if let Some(path) = resume_recording {
+                    let messages = session::load_chat(&path);
+                    if messages.is_empty() {
+                        core.reset(app);
+                        app.note(
+                            "That recording is empty or unreadable; the engine conversation was \
+                             reset instead."
+                                .to_string(),
+                        );
+                    } else {
+                        core.restore(app, messages);
+                    }
+                } else if reset_log {
                     core.reset(app);
                 }
             }

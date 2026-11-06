@@ -3,14 +3,12 @@
 //!
 //! Enabled by `COVEXCODE_CORE_SESSION=1`. Deliberately partial in this first
 //! slice: the engine owns the turn, so text, tool results, usage and approval
-//! prompts are real and stream in normally, and `/new` and startup
-//! `--resume` are mirrored into the engine, but the TUI's own surfaces that
-//! assume it owns the agent have not all moved yet:
+//! prompts are real and stream in normally, and `/new`, `/resume`,
+//! `/sessions` and startup `--resume` are mirrored into the engine, but the
+//! TUI's own surfaces that assume it owns the agent have not all moved yet:
 //!
 //! - `/compact` and `/rollback` still operate on `App`'s local history, not
-//!   the engine's;
-//! - picking a recording from `/sessions` after launch loads App's transcript
-//!   only, so the engine keeps the conversation it already had.
+//!   the engine's.
 //!
 //! The old path stays the default and is untouched; with the variable unset
 //! nothing in this module runs.
@@ -115,6 +113,15 @@ impl CoreTui {
     pub fn reset(&mut self, app: &mut App) {
         self.cancel(app);
         let _ = self.client.reset();
+    }
+
+    /// Resume a recording the user picked in the TUI (`/resume`,
+    /// `/sessions`). App has already replaced its transcript; this replaces
+    /// the engine's history with the same conversation. Any in-flight turn is
+    /// stopped first, for the same reason as [`CoreTui::reset`].
+    pub fn restore(&mut self, app: &mut App, messages: Vec<crate::llm::ChatMessage>) {
+        self.cancel(app);
+        let _ = self.client.restore(messages);
     }
 
     /// Start the turn `App::submit` queued. A no-op unless the app is in
@@ -720,6 +727,23 @@ mod tests {
         assert!(!core.active, "an in-flight turn is stopped");
         assert_eq!(app.core_approval, None);
         assert_eq!(app.core_decision, None);
+        assert!(core.pending_approvals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resuming_stops_the_turn_and_clears_the_prompt() {
+        let (_dir, mut core, mut app) = core_with_workspace();
+        core.active = true;
+        core.pending_approvals.insert(4, ApprovalChoice::default());
+        app.core_approval = Some(4);
+
+        core.restore(
+            &mut app,
+            vec![crate::llm::ChatMessage::text("user", "earlier")],
+        );
+
+        assert!(!core.active, "an in-flight turn is stopped");
+        assert_eq!(app.core_approval, None);
         assert!(core.pending_approvals.is_empty());
     }
 }
