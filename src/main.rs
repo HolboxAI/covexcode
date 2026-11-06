@@ -371,9 +371,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut core = if core_tui::CoreTui::enabled() {
         workspace.as_ref().map(|ws| {
             app.startup_notices.push(
-                "Core-session mode (experimental): the engine owns the turn, approvals, /new, \
-                 /compact, /rollback, /diff, /provider, /model and resuming (/resume, /sessions, \
-                 --resume); /subagents does not show engine children yet."
+                "Core-session mode (experimental): the engine owns the turn, approvals, and every \
+                 command that changes the conversation, including /subagents and /diff."
                     .to_string(),
             );
             // The engine gets the same recording App just loaded (if any),

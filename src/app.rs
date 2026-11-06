@@ -4243,6 +4243,49 @@ impl App {
             .find(|t| t.call_id == call_id && t.finished.is_none())
     }
 
+    /// `/subagents` for a core-session engine: the same trail record, with
+    /// the task name carried in from the parent call's title. The engine owns
+    /// the calls, so the `running_tools` lookup `record_subagent_activity`
+    /// uses is not available here.
+    pub fn record_core_subagent_activity(
+        &mut self,
+        call_id: &str,
+        task: String,
+        label: String,
+        rounds: usize,
+    ) {
+        if let Some(trail) = self
+            .subagent_trails
+            .iter_mut()
+            .find(|t| t.call_id == call_id && t.finished.is_none())
+        {
+            trail.steps.push(label);
+            trail.rounds = rounds;
+            return;
+        }
+        if self.subagent_trails.len() >= MAX_SUBAGENT_TRAILS {
+            self.subagent_trails.remove(0);
+        }
+        self.subagent_trails.push(SubagentTrail {
+            call_id: call_id.to_string(),
+            task,
+            steps: vec![label],
+            rounds,
+            finished: None,
+        });
+    }
+
+    /// Close a core-session subagent's trail when its parent call finishes.
+    pub fn finish_core_subagent(&mut self, call_id: &str, status: String) {
+        if let Some(trail) = self
+            .subagent_trails
+            .iter_mut()
+            .find(|t| t.call_id == call_id && t.finished.is_none())
+        {
+            trail.finished = Some(status);
+        }
+    }
+
     /// `/subagents`: replay what each child did, step by step -- the
     /// expansion of the collapsed one-line entries in the transcript. Local
     /// commentary, never sent to the model.

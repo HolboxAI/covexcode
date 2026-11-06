@@ -262,6 +262,18 @@ pub enum SessionEvent {
         /// client gets the change through the approval request.
         text: Option<String>,
     },
+    /// One tool call a child agent made, reported against the parent `agent`
+    /// call. A frontend can show live subagent progress (`/subagents`)
+    /// without waiting for the child's final report.
+    SubagentActivity {
+        session_id: SessionId,
+        turn: TurnId,
+        /// The parent `agent` call.
+        call_id: String,
+        /// One `Action::label()`-style line for the child's call.
+        label: String,
+        rounds: usize,
+    },
     UsageUpdated {
         session_id: SessionId,
         turn: TurnId,
