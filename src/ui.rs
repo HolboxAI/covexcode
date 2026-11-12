@@ -19,7 +19,7 @@ const MAX_INPUT_HEIGHT: u16 = 10;
 const MAX_APPROVAL_HEIGHT: u16 = 24;
 /// Tall enough for every command in `app::COMMANDS` plus its border. There is
 /// a test.
-const MAX_COMMAND_MENU_HEIGHT: u16 = 29;
+const MAX_COMMAND_MENU_HEIGHT: u16 = 30;
 /// The deployment panel is allowed to be taller than the approval prompt: it
 /// carries a checklist, a menu and a live log at the same time, and clipping
 /// the log is what makes a failed build undiagnosable.
@@ -1580,6 +1580,9 @@ fn render_overlay(f: &mut Frame, area: Rect, app: &App) {
         }) => render_prompt_picker(f, area, items, filter, *selected),
         Some(Overlay::SessionsPicker { items, selected }) => {
             render_sessions_picker(f, area, items, *selected)
+        }
+        Some(Overlay::AgentPanel { selected }) => {
+            render_agent_panel(f, area, &app.subagent_trails, *selected)
         }
         Some(Overlay::QueryRollbackPicker { queries, selected }) => {
             render_query_rollback_picker(f, area, queries, *selected)
@@ -3474,6 +3477,99 @@ fn render_sessions_picker(
         })
         .collect();
     f.render_widget(Paragraph::new(bar), scrollbar_rect);
+}
+
+/// `/agents`: one row per subagent trail -- running or finished -- with its
+/// last tool call. Read-only and live: the rows come from the same trail list
+/// the transcript's live area uses, so it updates as children work.
+fn render_agent_panel(
+    f: &mut Frame,
+    area: Rect,
+    trails: &[crate::app::SubagentTrail],
+    selected: usize,
+) {
+    let running = trails.iter().filter(|trail| trail.finished.is_none()).count();
+    let rows: Vec<String> = trails
+        .iter()
+        .map(|trail| {
+            let status = trail.finished.as_deref().unwrap_or("running…");
+            let rounds = trail.rounds;
+            let steps = trail.steps.len();
+            let last = trail
+                .steps
+                .last()
+                .map(|step| format!("  ·  last: {step}"))
+                .unwrap_or_default();
+            format!(
+                "\"{}\" — {status}  ·  {rounds} round{}  ·  {steps} step{}{last}",
+                trail.task,
+                if rounds == 1 { "" } else { "s" },
+                if steps == 1 { "" } else { "s" },
+            )
+        })
+        .collect();
+
+    let height = FIXED_PICKER_HEIGHT.clamp(MIN_POPUP_HEIGHT, area.height);
+    let popup = centered_rect(84, height, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::p().accent))
+        .title(Span::styled(
+            format!(" Subagents — {running} running / {} total ", trails.len()),
+            theme::accent_bold(),
+        ));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let hint = Line::from(vec![
+        Span::styled("↑↓", theme::key()),
+        Span::styled(" move  ", theme::faint()),
+        Span::styled("esc", theme::key()),
+        Span::styled(" close", theme::faint()),
+    ]);
+    f.render_widget(Paragraph::new(hint), inner);
+
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+    if rows.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "No subagents have run in this session.",
+                theme::faint(),
+            ))),
+            list_area,
+        );
+        return;
+    }
+
+    let visible = list_area.height as usize;
+    let start = selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(rows.len().saturating_sub(visible.max(1)));
+    let list_items: Vec<ListItem> = rows
+        .iter()
+        .skip(start)
+        .take(visible.max(1))
+        .map(|row| ListItem::new(row.clone()))
+        .collect();
+    let list = List::new(list_items)
+        .style(theme::text())
+        .highlight_style(
+            Style::default()
+                .fg(theme::p().accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        )
+        .highlight_symbol("❯ ");
+    let mut state = ListState::default();
+    state.select(Some(selected.saturating_sub(start)));
+    f.render_stateful_widget(list, list_area, &mut state);
 }
 
 fn render_query_rollback_picker(

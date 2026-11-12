@@ -51,8 +51,9 @@ Landed on `main`:
   `writes = true` runs in an isolated git worktree and returns a patch. A
   clean patch is applied to the requester's checkout serially (one `git apply`
   at a time); a conflict is reported with the patch and the retained worktree
-  path, and writes nothing. The agent panel and a richer merge/verify policy
-  are not built.
+  path, and writes nothing. `/agents` renders a live panel over the same
+  trails (task, status, rounds, steps) and `/subagents` replays them in the
+  transcript.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -60,11 +61,11 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 4's richer merge/verify policy,
-implementation/test/review worktree pipelines and the agent panel; Phase 5's
-task DAG and teams. Phase 1 is complete; retiring the `COVEXCODE_CORE_SESSION`
-flag (making the engine the TUI's only path and deleting the old loop) is
-follow-up cleanup, not parity work.
+Remaining, in plan order: Phase 4's implementation/test/review worktree
+pipelines and a richer merge/verify policy; Phase 5's task DAG and teams.
+Phase 1 is complete; retiring the `COVEXCODE_CORE_SESSION` flag (making the
+engine the TUI's only path and deleting the old loop) is follow-up cleanup,
+not parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.
