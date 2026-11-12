@@ -65,6 +65,8 @@ mod requests;
 mod rollback;
 #[path = "../session.rs"]
 mod session;
+#[path = "../shell.rs"]
+mod shell;
 #[path = "../subagent.rs"]
 mod subagent;
 #[cfg(feature = "cli")]

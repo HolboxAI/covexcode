@@ -3424,6 +3424,32 @@ async fn execute_run_command(
         };
     }
 
+    // Optional fast path: a shell kept alive per workspace. It is leased for
+    // one command at a time; a parallel call that finds it busy falls through
+    // to the one-shot path below rather than waiting behind it. Failure to
+    // start also falls through, so the error the model sees is the same one
+    // this function has always produced.
+    if config.persistent_shell {
+        let timeout = Duration::from_secs(config.command_timeout_secs);
+        match crate::shell::try_run(workspace.root(), &command, timeout).await {
+            crate::shell::ShellRun::Finished(output) => {
+                return finish_command_output(
+                    call,
+                    command,
+                    &output.output,
+                    "",
+                    output.status,
+                    config,
+                    true,
+                );
+            }
+            crate::shell::ShellRun::TimedOut => {
+                return command_timeout_outcome(call, &command, config.command_timeout_secs);
+            }
+            crate::shell::ShellRun::Unavailable => {}
+        }
+    }
+
     let mut cmd = tokio::process::Command::new(shell_name);
     cmd.arg(shell_flag)
         .arg(&command)
@@ -3448,17 +3474,7 @@ async fn execute_run_command(
             )
         }
         Err(_) => {
-            return outcome(
-                &call.id,
-                format!("$ {} — timed out", clip(&command, 50)),
-                format!(
-                    "Error: killed after {}s. It was probably waiting for input or would not \
-                     terminate. Try a non-interactive form of the command. If this starts a \
-                     server or watcher, rerun with background=true or start it in a separate \
-                     terminal; do not foreground it.",
-                    config.command_timeout_secs
-                ),
-            )
+            return command_timeout_outcome(call, &command, config.command_timeout_secs);
         }
     };
 
@@ -3468,13 +3484,49 @@ async fn execute_run_command(
     let stderr = String::from_utf8_lossy(&output.stderr);
     let code = output.status.code();
 
+    finish_command_output(call, command, &stdout, &stderr, code, config, false)
+}
+
+/// The one timeout message, shared by the one-shot and persistent-shell paths
+/// so they cannot drift.
+fn command_timeout_outcome(call: &ToolCall, command: &str, timeout_secs: u64) -> ToolOutcome {
+    outcome(
+        &call.id,
+        format!("$ {} — timed out", clip(command, 50)),
+        format!(
+            "Error: killed after {timeout_secs}s. It was probably waiting for input or would not \
+             terminate. Try a non-interactive form of the command. If this starts a \
+             server or watcher, rerun with background=true or start it in a separate \
+             terminal; do not foreground it."
+        ),
+    )
+}
+
+/// Render one finished command's output the way `run_command` always has.
+/// Shared by both execution paths; `command` is consumed for the rollback
+/// record.
+fn finish_command_output(
+    call: &ToolCall,
+    command: String,
+    stdout: &str,
+    stderr: &str,
+    code: Option<i32>,
+    config: &ToolsConfig,
+    // The persistent shell merges both streams into `stdout`; label it
+    // honestly instead of claiming stderr output is stdout.
+    merged: bool,
+) -> ToolOutcome {
     let mut content = match code {
         Some(code) => format!("exit code: {code}\n"),
         None => "exit code: killed by a signal\n".to_string(),
     };
     let budget = config.max_output_bytes;
     if !stdout.trim().is_empty() {
-        content.push_str("--- stdout ---\n");
+        content.push_str(if merged {
+            "--- output ---\n"
+        } else {
+            "--- stdout ---\n"
+        });
         content.push_str(&clip_output(&stdout, budget));
         content.push('\n');
     }
@@ -7254,6 +7306,26 @@ mod tests {
         let (_dir, ws, cfg) = fixture();
         let out = execute(&call(list_command()), &ws, &cfg).await;
         assert!(out.content.contains("hello.txt"), "{}", out.content);
+    }
+
+    /// The persistent shell is opt-in; when on, `cd` and exports persist
+    /// between calls, and the merged stream is labelled honestly.
+    #[tokio::test]
+    async fn a_persistent_shell_keeps_state_between_commands() {
+        let (dir, ws, mut cfg) = fixture();
+        cfg.persistent_shell = true;
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let first = execute(&call("cd sub"), &ws, &cfg).await;
+        assert!(first.content.contains("exit code: 0"), "{}", first.content);
+
+        let second = execute(&call("pwd"), &ws, &cfg).await;
+        assert!(second.content.contains("/sub"), "{}", second.content);
+        assert!(
+            second.content.contains("--- output ---"),
+            "merged streams are labelled as output: {}",
+            second.content
+        );
     }
 
     /// A non-zero exit is information for the model, not a failure of the tool.

@@ -541,6 +541,15 @@ pub struct ToolsConfig {
     /// either way.
     #[serde(default)]
     pub attach_browser_screenshots: bool,
+    /// Reuse one long-lived `sh` per workspace for `run_command` instead of
+    /// spawning a process per call. Off by default: it is an optimization, and
+    /// the one-shot path is the reference behavior. State (`cd`, exported
+    /// variables) persists between calls while the shell lives; a timeout
+    /// kills it, so the next call starts clean. Unix only; Windows keeps the
+    /// one-shot path. A parallel call that finds the shell busy falls back to
+    /// one-shot rather than serializing behind it.
+    #[serde(default)]
+    pub persistent_shell: bool,
 }
 
 fn yes() -> bool {
@@ -667,6 +676,7 @@ impl Default for ToolsConfig {
             subagent_concurrency: default_subagent_concurrency(),
             subagent_model: None,
             attach_browser_screenshots: false,
+            persistent_shell: false,
         }
     }
 }
