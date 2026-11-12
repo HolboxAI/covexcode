@@ -105,6 +105,59 @@ fn valid_agent_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Built-in agent types beyond `explore` (which is the absence of a
+/// definition -- the original read-only child). A project definition with the
+/// same name overrides these, the same way it overrides another definition.
+///
+/// `worker` and `tester` write in an isolated worktree; `reviewer` reads. The
+/// tester does not run the suite itself -- its tool surface is read-only for
+/// commands -- so its prompt asks for the command the parent should verify
+/// with, and a project can add `verify = "..."` to a definition when it wants
+/// the check run automatically.
+pub fn builtin(name: &str) -> Option<AgentDefinition> {
+    let definition = |name: &str, description: &str, prompt: &str, writes: bool| AgentDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        prompt: prompt.to_string(),
+        writes,
+        verify: None,
+    };
+    match name {
+        "worker" => Some(definition(
+            "worker",
+            "implements one scoped change in an isolated worktree",
+            "Implement exactly the requested change. Read the files and their callers first. \
+             Keep the diff scoped; do not refactor unrelated code. Read back everything you \
+             wrote before reporting. Your changes are captured as a patch and applied to the \
+             requester's checkout if they apply cleanly.",
+            true,
+        )),
+        "tester" => Some(definition(
+            "tester",
+            "adds or updates tests in an isolated worktree",
+            "Add or update the tests the task needs. Follow the project's existing test \
+             layout and style. Production code changes are allowed only when a test cannot be \
+             written without them; say so in your report. Do not run the test suite -- it is \
+             not available here -- and name the exact command the requester should run to \
+             verify it.",
+            true,
+        )),
+        "reviewer" => Some(definition(
+            "reviewer",
+            "reviews a change for correctness, read-only",
+            "Review the change described in the task against the real files. Look for \
+             correctness bugs, broken callers, missing error handling and tests that do not \
+             exercise the change. Report concrete findings with file paths and line numbers, \
+             most severe first. If nothing is wrong, say so plainly. Do not modify anything.",
+            false,
+        )),
+        _ => None,
+    }
+}
+
+/// Every type `agent` can be given without a project definition.
+pub const BUILTIN_AGENTS: &[&str] = &["explore", "worker", "tester", "reviewer"];
+
 /// Run one read-only subagent to completion and return its report as the
 /// tool outcome. Phase 4 of `upgrade-plan.md`: a subagent is an agent loop
 /// whose "user" is the parent model.
@@ -155,21 +208,27 @@ pub async fn run_subagent(
             .position(|definition| definition.name == agent_type)
         {
             Some(index) => Some(available.swap_remove(index)),
-            None => {
-                let mut names = vec!["explore".to_string()];
-                names.extend(available.into_iter().map(|definition| definition.name));
-                return ToolOutcome {
-                    call_id: call.id.clone(),
-                    display: format!("agent — no such type '{agent_type}'"),
-                    content: format!(
-                        "Error: there is no '{agent_type}' subagent. Available types: {}. \
-                         Omit agent_type for 'explore', and do any writing yourself.",
-                        names.join(", ")
-                    ),
-                    diff: None,
-                    rollback: None,
-                };
-            }
+            None => match builtin(&agent_type) {
+                Some(definition) => Some(definition),
+                None => {
+                    let mut names: Vec<String> = BUILTIN_AGENTS
+                        .iter()
+                        .map(|name| (*name).to_string())
+                        .collect();
+                    names.extend(available.into_iter().map(|definition| definition.name));
+                    return ToolOutcome {
+                        call_id: call.id.clone(),
+                        display: format!("agent — no such type '{agent_type}'"),
+                        content: format!(
+                            "Error: there is no '{agent_type}' subagent. Available types: {}. \
+                             Omit agent_type for 'explore'.",
+                            names.join(", ")
+                        ),
+                        diff: None,
+                        rollback: None,
+                    };
+                }
+            },
         }
     };
 
@@ -682,6 +741,18 @@ mod tests {
             assert_eq!(definitions[0].prompt, "project prompt");
             assert_eq!(definitions[1].prompt, "test prompt");
         });
+    }
+
+    #[test]
+    fn builtin_agent_types_have_the_expected_write_posture() {
+        assert!(builtin("worker").expect("worker").writes);
+        assert!(builtin("tester").expect("tester").writes);
+        assert!(!builtin("reviewer").expect("reviewer").writes);
+        assert!(
+            builtin("explore").is_none(),
+            "explore is the absence of a definition, not a builtin record"
+        );
+        assert_eq!(BUILTIN_AGENTS, &["explore", "worker", "tester", "reviewer"]);
     }
 
     #[test]
