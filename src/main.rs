@@ -34,6 +34,7 @@ mod requests;
 mod rollback;
 mod session;
 mod session_client;
+mod shell;
 mod subagent;
 mod telemetry;
 mod theme;
