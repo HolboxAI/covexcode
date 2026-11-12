@@ -158,6 +158,29 @@ pub fn builtin(name: &str) -> Option<AgentDefinition> {
 /// Every type `agent` can be given without a project definition.
 pub const BUILTIN_AGENTS: &[&str] = &["explore", "worker", "tester", "reviewer"];
 
+/// The per-call fence for a child. Factored out of the loop so the one
+/// intentional widening -- a writing child may run its definition's verify
+/// command -- is testable without a model or a worktree.
+fn child_call_allowed(
+    call: &ToolCall,
+    write_mode: bool,
+    verify: Option<&str>,
+) -> Result<(), String> {
+    let allowed = if write_mode {
+        tools::subagent_write_call_allowed(call)
+    } else {
+        tools::subagent_call_allowed(call)
+    };
+    if write_mode && allowed.is_err() {
+        if let Some(command) = verify {
+            if tools::is_verify_command(call, command) {
+                return Ok(());
+            }
+        }
+    }
+    allowed
+}
+
 /// Run one read-only subagent to completion and return its report as the
 /// tool outcome. Phase 4 of `upgrade-plan.md`: a subagent is an agent loop
 /// whose "user" is the parent model.
@@ -356,6 +379,16 @@ pub async fn run_subagent(
              mailbox {{action: \"inbox\", owner: \"{agent_type}\"}}. Use it only for \
              coordination -- your final message must still stand alone."
         ));
+        // The definition's verify command is allowed while the child works,
+        // not just after it finishes -- otherwise a failing check arrives too
+        // late for the child to fix its own work.
+        if let Some((command, _)) = verify {
+            system.push_str(&format!(
+                "\n\nVerification: `{command}` is this agent's verify command, the one \
+                 command allowed beyond the read-only list. Run it after your changes, read \
+                 the failures, and fix them before writing your report."
+            ));
+        }
         history[0] = ChatMessage::text("system", system);
         let schemas = if budget_left {
             if write_mode {
@@ -517,10 +550,8 @@ pub async fn run_subagent(
                     "Your budget is spent. Write your report now, from what you have seen."
                         .to_string(),
                 )
-            } else if write_mode {
-                tools::subagent_write_call_allowed(c)
             } else {
-                tools::subagent_call_allowed(c)
+                child_call_allowed(c, write_mode, verify.map(|(command, _)| command))
             };
             if let Some((id, tx)) = progress {
                 let mut label = tools::describe_action(c)
@@ -764,6 +795,42 @@ mod tests {
             "explore is the absence of a definition, not a builtin record"
         );
         assert_eq!(BUILTIN_AGENTS, &["explore", "worker", "tester", "reviewer"]);
+    }
+
+    #[test]
+    fn a_writing_child_may_run_only_its_exact_verify_command() {
+        let call = |command: &str, background: bool| {
+            let mut call = ToolCall::default();
+            call.function.name = tools::RUN_COMMAND.to_string();
+            call.function.arguments =
+                format!(r#"{{"command":"{command}","background":{background}}}"#);
+            call
+        };
+        let test = call("cargo test --all", false);
+        assert!(child_call_allowed(&test, true, Some("cargo test --all")).is_ok());
+        assert!(
+            child_call_allowed(&test, true, Some("cargo check")).is_err(),
+            "a different verify command does not widen the fence"
+        );
+        assert!(
+            child_call_allowed(&test, false, Some("cargo test --all")).is_err(),
+            "read-only children have no verify exemption"
+        );
+        assert!(
+            child_call_allowed(
+                &call("cargo test --all", true),
+                true,
+                Some("cargo test --all")
+            )
+            .is_err(),
+            "a background command would not verify anything"
+        );
+        assert!(child_call_allowed(
+            &call("cargo test --all; rm -rf src", false),
+            true,
+            Some("cargo test --all")
+        )
+        .is_err());
     }
 
     #[test]

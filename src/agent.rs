@@ -1087,6 +1087,55 @@ mod tests {
         );
     }
 
+    /// The child may run its own verify command while it works -- the one
+    /// command beyond the read-only list -- so a failure can be fixed in the
+    /// same turn instead of being discovered only after the report.
+    #[tokio::test]
+    async fn a_writing_subagent_can_run_its_verify_command_while_working() {
+        let _home = crate::config::test_support::IsolatedHome::new();
+        let (dir, ws) = committed_workspace();
+        worker_definition(dir.path(), Some("test -f created.txt"));
+
+        let (endpoint, bodies) = serve_rounds(vec![
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"created.txt","content":"hello\n"}"#,
+            ),
+            tool_call_round(tools::RUN_COMMAND, r#"{"command":"test -f created.txt"}"#),
+            text_round("Created and verified."),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+
+        let outcome = run_worker(&ws, &config).await;
+
+        assert!(
+            outcome.content.contains("applied cleanly"),
+            "{}",
+            outcome.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("created.txt")).unwrap(),
+            "hello\n"
+        );
+        let bodies = bodies.await.expect("three rounds served");
+        assert!(
+            bodies[0].contains("Verification") && bodies[0].contains("test -f created.txt"),
+            "the child must be told which command it may run: {}",
+            bodies[0]
+        );
+        assert!(
+            bodies[2].contains("exit code: 0"),
+            "the verify command must have actually run, not been refused: {}",
+            bodies[2]
+        );
+        assert!(
+            !bodies[2].contains("may only run commands"),
+            "a refusal would carry the allowlist message: {}",
+            bodies[2]
+        );
+    }
+
     /// A failing verify command stops the patch: the requester's checkout is
     /// untouched and the failure output is in the result.
     #[tokio::test]
