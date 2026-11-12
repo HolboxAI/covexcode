@@ -285,6 +285,14 @@ The list is stored per workspace under the config directory and guarded by a
 file lock, so a daemon and several CLI processes see and claim from the same
 DAG.
 
+The `mailbox` tool is the message side of the same coordination: `send` a note
+to `lead` (the parent session's default name), to a named teammate, or to `*`
+as a broadcast; `inbox` lists unread messages for a name; `read` returns one in
+full and marks it read. Messages persist per project under the config
+directory -- a writing subagent's worktree shares its requester's mailbox --
+so notes survive a turn and are visible to another covexcode process in the
+same repository. Subagents are told their agent type as their mailbox name.
+
 A definition may set `writes = true`. That child runs in an isolated git
 worktree at HEAD (the repository needs at least one commit), may call
 `write_file`/`edit_file`, and returns its changes as a patch after its report.
