@@ -48,9 +48,11 @@ Landed on `main`:
   engine forwards each child tool call as live activity on the parent call;
   `tools.subagent_model` routes children to their own model; project-defined
   agent types load from `.covexcode/agents/*.toml`, and a definition with
-  `writes = true` runs in an isolated git worktree and returns a patch.
-  Applying that patch is still a manual/parent decision; auto-merge and the
-  agent panel are not built.
+  `writes = true` runs in an isolated git worktree and returns a patch. A
+  clean patch is applied to the requester's checkout serially (one `git apply`
+  at a time); a conflict is reported with the patch and the retained worktree
+  path, and writes nothing. The agent panel and a richer merge/verify policy
+  are not built.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -58,7 +60,7 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 4's automatic patch application/merge,
+Remaining, in plan order: Phase 4's richer merge/verify policy,
 implementation/test/review worktree pipelines and the agent panel; Phase 5's
 task DAG and teams. Phase 1 is complete; retiring the `COVEXCODE_CORE_SESSION`
 flag (making the engine the TUI's only path and deleting the old loop) is
