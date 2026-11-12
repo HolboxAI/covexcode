@@ -37,6 +37,7 @@ mod session;
 mod session_client;
 mod shell;
 mod subagent;
+mod tasks;
 mod telemetry;
 mod theme;
 mod tools;
