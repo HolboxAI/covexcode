@@ -70,6 +70,7 @@ pub const EXIT_PLAN_MODE: &str = "exit_plan_mode";
 pub const PLAN_PROGRESS: &str = "plan_progress";
 pub const AGENT: &str = "agent";
 pub const UPDATE_TODOS: &str = "update_todos";
+pub const TASKS: &str = "tasks";
 pub const CHECK_IN_BROWSER: &str = "check_in_browser";
 pub const INTERACT_IN_BROWSER: &str = "interact_in_browser";
 
@@ -1023,7 +1024,10 @@ pub fn schemas_for(
                  work', 'which tests cover Y'. Its transcript never enters yours -- you pay \
                  one tool result for work that would otherwise fill your context. Give it a \
                  self-contained task: it cannot see this conversation and cannot ask you \
-                 questions. Not for writing or running builds -- do those yourself."
+                 questions. explore and reviewer cannot change anything; worker and tester \
+                 work in an isolated git worktree and return a patch that is applied when it \
+                 is clean. Use worker for a scoped change, tester for tests, reviewer for a \
+                 read-only review."
             ),
             "parameters": {
                 "type": "object",
@@ -1046,6 +1050,60 @@ pub fn schemas_for(
                     }
                 },
                 "required": ["task"]
+            }
+        }
+    }));
+
+    schemas.push(json!({
+        "type": "function",
+        "function": {
+            "name": TASKS,
+            "description": "Shared task list for multi-step work, especially when several \
+                            subagents are involved. Create tasks with depends_on to form a \
+                            DAG; claim a task before working on it (claims are atomic -- a \
+                            second claim fails with the current owner) and complete it when \
+                            done. Completing a task reports which dependents are now \
+                            unblocked. Use `list` to see the current state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "claim", "complete", "list"],
+                        "description": "What to do."
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Task id for claim/complete; optional on create (generated when omitted)."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "One-line task title, required for create."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "What the task covers, for create."
+                    },
+                    "depends_on": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Ids of tasks that must be done before this one can be claimed."
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Files or directories this task owns, so overlapping work is visible."
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "Who is claiming/completing the task. Defaults to 'agent'."
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Short completion note."
+                    }
+                },
+                "required": ["action"]
             }
         }
     }));
@@ -1963,6 +2021,25 @@ struct AgentArgs {
 }
 
 #[derive(Deserialize)]
+struct TaskArgs {
+    action: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct CheckInBrowserArgs {
     url: String,
 }
@@ -2468,6 +2545,10 @@ pub enum Action {
     /// `app.rs` for the same reason `Progress` is (nothing to protect, and
     /// asking permission to update a to-do list would make it unusable).
     Todos(Vec<TodoItem>),
+    /// `tasks`: the shared task DAG. Pure in-memory coordination (claims,
+    /// dependencies, completion) -- no file, process or network -- so it is
+    /// allowed in plan mode and under a read-only sandbox, like `Todos`.
+    Tasks,
     /// `check_in_browser`: asks the client to capture a screenshot of `url`
     /// -- covexcode itself has no browser tab, only an ACP client (boxcode-ide's
     /// chat participant, for one) does, so this is fulfilled entirely on the
@@ -2596,6 +2677,7 @@ impl Action {
                     .count();
                 format!("todos — {done}/{}", items.len())
             }
+            Action::Tasks => "tasks".to_string(),
             Action::CheckInBrowser { url } => format!("check in browser — {url}"),
             Action::InteractInBrowser { url, interaction } => {
                 format!("interact in browser — {url} ({})", interaction.describe())
@@ -2694,7 +2776,8 @@ pub fn is_read_only_action(action: &Action) -> bool {
         | Action::CheckInBrowser { .. }
         | Action::Plan(_)
         | Action::Progress { .. }
-        | Action::Todos(_) => true,
+        | Action::Todos(_)
+        | Action::Tasks => true,
         Action::Command { command, .. } => is_read_only(command),
         _ => false,
     }
@@ -2724,7 +2807,8 @@ pub fn plan_mode_block(action: &Action) -> Option<String> {
         | Action::Progress { .. }
         // Pure in-memory bookkeeping, like `Progress` -- it writes to no
         // file and touches nothing plan mode exists to guard.
-        | Action::Todos(_) => None,
+        | Action::Todos(_)
+        | Action::Tasks => None,
         Action::Command { command, .. } if is_read_only(command) => None,
         Action::Write { path, .. } => Some(format!(
             "Plan mode is read-only, so nothing was written to {path}. Describe this file and \
@@ -3141,6 +3225,9 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
                 .collect();
             Some(Action::Todos(items))
         }
+        // Known regardless of its arguments: a malformed `tasks` call is a
+        // caller error the executor reports, not an unknown tool.
+        TASKS => Some(Action::Tasks),
         _ => None,
     }
 }
@@ -3465,6 +3552,7 @@ pub async fn execute_truncated(
              steps you have finished."
                 .to_string(),
         ),
+        TASKS => execute_tasks(call, workspace),
         // Never reached: `app::advance_approvals` resolves this itself, for
         // the same reason it resolves `PLAN_PROGRESS` -- it is in-memory
         // bookkeeping on `App`, and the runner has no access to `App`.
@@ -5695,6 +5783,127 @@ pub fn progress_failed(call: &ToolCall, reason: &str) -> ToolOutcome {
 /// the counts and reminds the model of the one-in-progress convention rather
 /// than restating the whole list back (it just sent that list; echoing it
 /// would only spend tokens).
+/// The shared task DAG. Synchronous and in-memory: every action is a mutex
+/// critical section over the workspace's task map, so an approval loop that
+/// failed to ask could not make it dangerous anyway.
+fn execute_tasks(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
+    let Ok(args) = serde_json::from_str::<TaskArgs>(&call.function.arguments) else {
+        return outcome(
+            &call.id,
+            "tasks — unusable arguments".to_string(),
+            format!(
+                "Error: could not read the arguments. Expected {{\"action\": \"list\"}} or \
+                 {{\"action\": \"create\", \"title\": \"...\"}}, got: {}",
+                clip(&call.function.arguments, 200)
+            ),
+        );
+    };
+    let action = args.action.trim();
+    let owner = args
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+        .unwrap_or("agent");
+    match action {
+        "create" => {
+            let Some(title) = args.title else {
+                return outcome(
+                    &call.id,
+                    "tasks — create needs a title".to_string(),
+                    "Error: `create` needs a `title`.".to_string(),
+                );
+            };
+            match crate::tasks::create(
+                workspace.root(),
+                args.id,
+                title,
+                args.description.unwrap_or_default(),
+                args.depends_on,
+                args.paths,
+            ) {
+                Ok(task) => outcome(
+                    &call.id,
+                    format!("tasks — created {}", task.id),
+                    format!(
+                        "Created {}. Claim it before starting work.\n\n{}",
+                        task.id,
+                        crate::tasks::render(workspace.root())
+                    ),
+                ),
+                Err(e) => outcome(
+                    &call.id,
+                    "tasks — create refused".to_string(),
+                    format!("Error: {e}"),
+                ),
+            }
+        }
+        "claim" => {
+            let Some(id) = args.id else {
+                return outcome(
+                    &call.id,
+                    "tasks — claim needs an id".to_string(),
+                    "Error: `claim` needs an `id`.".to_string(),
+                );
+            };
+            let id = id.trim().to_string();
+            match crate::tasks::claim(workspace.root(), &id, owner) {
+                Ok(task) => outcome(
+                    &call.id,
+                    format!("tasks — claimed {}", task.id),
+                    format!(
+                        "Claimed '{}' ({}).\n\n{}",
+                        task.id,
+                        task.title,
+                        crate::tasks::render(workspace.root())
+                    ),
+                ),
+                Err(e) => outcome(
+                    &call.id,
+                    format!("tasks — {id} not claimed"),
+                    format!("Error: {e}"),
+                ),
+            }
+        }
+        "complete" => {
+            let Some(id) = args.id else {
+                return outcome(
+                    &call.id,
+                    "tasks — complete needs an id".to_string(),
+                    "Error: `complete` needs an `id`.".to_string(),
+                );
+            };
+            let id = id.trim().to_string();
+            match crate::tasks::complete(workspace.root(), &id, Some(owner), args.note) {
+                Ok((task, unblocked)) => {
+                    let mut content = format!("Completed '{}'.", task.id);
+                    if !unblocked.is_empty() {
+                        content.push_str(&format!("\nUnblocked: {}.", unblocked.join(", ")));
+                    }
+                    content.push_str("\n\n");
+                    content.push_str(&crate::tasks::render(workspace.root()));
+                    outcome(&call.id, format!("tasks — completed {}", task.id), content)
+                }
+                Err(e) => outcome(
+                    &call.id,
+                    format!("tasks — {id} not completed"),
+                    format!("Error: {e}"),
+                ),
+            }
+        }
+        "list" => outcome(
+            &call.id,
+            "tasks — list".to_string(),
+            crate::tasks::render(workspace.root()),
+        ),
+        other => outcome(
+            &call.id,
+            format!("tasks — unknown action '{other}'"),
+            "Error: action must be one of create, claim, complete, list.".to_string(),
+        ),
+    }
+}
+
 pub fn todos_recorded(call: &ToolCall, items: &[TodoItem]) -> ToolOutcome {
     let total = items.len();
     let done = items
@@ -7511,6 +7720,95 @@ mod tests {
     /// The read-only sandbox is a dispatcher-level floor: mutations are
     /// refused before execution and nothing lands on disk, while reads and
     /// read-only commands keep working.
+    #[test]
+    fn the_tasks_tool_is_offered_and_is_bookkeeping() {
+        let names: Vec<String> = schemas(Mode::Normal, false, false, false)
+            .iter()
+            .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.contains(&TASKS.to_string()), "{names:?}");
+
+        let call = tool_call(TASKS, json!({ "action": "list" }));
+        assert!(matches!(describe_action(&call), Some(Action::Tasks)));
+        assert!(is_read_only_action(&Action::Tasks));
+        assert!(
+            plan_mode_block(&Action::Tasks).is_none(),
+            "plan mode allows in-memory coordination"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_tasks_tool_creates_claims_and_completes_a_dag() {
+        let (_dir, ws, cfg) = fixture();
+        let create = execute(
+            &tool_call(
+                TASKS,
+                json!({ "action": "create", "id": "first", "title": "first task" }),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(create.content.contains("Created first"), "{}", create.content);
+
+        let second = execute(
+            &tool_call(
+                TASKS,
+                json!({
+                    "action": "create",
+                    "id": "second",
+                    "title": "second task",
+                    "depends_on": ["first"]
+                }),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(second.content.contains("Created second"), "{}", second.content);
+
+        let blocked = execute(
+            &tool_call(
+                TASKS,
+                json!({ "action": "claim", "id": "second", "owner": "agent-b" }),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(blocked.content.contains("blocked"), "{}", blocked.content);
+
+        let claim = execute(
+            &tool_call(
+                TASKS,
+                json!({ "action": "claim", "id": "first", "owner": "agent-a" }),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(claim.content.contains("Claimed 'first'"), "{}", claim.content);
+
+        let complete = execute(
+            &tool_call(
+                TASKS,
+                json!({ "action": "complete", "id": "first", "owner": "agent-a" }),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(
+            complete.content.contains("Unblocked: second"),
+            "{}",
+            complete.content
+        );
+
+        let list = execute(&tool_call(TASKS, json!({ "action": "list" })), &ws, &cfg).await;
+        assert!(list.content.contains("[x] first"), "{}", list.content);
+        assert!(list.content.contains("[ ] second"), "{}", list.content);
+    }
+
     #[tokio::test]
     async fn a_read_only_sandbox_refuses_mutations_and_allows_reads() {
         let (dir, ws, mut cfg) = fixture();
@@ -8388,7 +8686,8 @@ mod tests {
                 RESOLVE_CHANGE_REQUEST,
                 WEB_SEARCH,
                 DEPLOY_PROJECT,
-                AGENT
+                AGENT,
+                TASKS
             ]
         );
     }

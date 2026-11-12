@@ -1,7 +1,7 @@
 # Multi-agent CLI architecture
 
 Status: Phase 0 complete; Phase 1 complete; Phase 2 complete (JSONL store);
-Phase 3 complete (tool-level sandbox); Phase 4 complete  
+Phase 3 complete (tool-level sandbox); Phase 4 complete; Phase 5 started  
 Date: 2026-11-12  
 Scope: `HolboxAI/covexcode` (the Rust CLI and agent runtime)
 
@@ -61,6 +61,13 @@ Landed on `main`:
   replays them in the transcript. The implement → test → review pipeline is
   model-driven through the existing `agent` tool rather than a hardcoded
   orchestrator.
+- **Phase 5 (early)**: a shared task DAG backs the `tasks` tool: tasks carry
+  dependencies and owned paths, `claim` is atomic under one mutex (a second
+  claimant gets the current owner), `complete` reports newly unblocked
+  dependents, and `list` renders the DAG. It is in-memory and scoped to one
+  workspace in one process -- coordination state for work in flight, not a
+  second event store. Cross-process claims (a daemon or several CLI
+  processes), a lead/mailbox team mode, and a verifier/merge agent remain.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -68,10 +75,11 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's task DAG, lead/mailbox teammates and the
-verifier/merge agent. Phase 1 is complete; retiring the
-`COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
-deleting the old loop) is follow-up cleanup, not parity work.
+Remaining, in plan order: Phase 5's cross-process task claims (a daemon or
+several CLI processes), lead/mailbox teammate mode, and the verifier/merge
+agent. Phase 1 is complete; retiring the `COVEXCODE_CORE_SESSION` flag
+(making the engine the TUI's only path and deleting the old loop) is
+follow-up cleanup, not parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.

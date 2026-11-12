@@ -2362,6 +2362,14 @@ fn tool_approval_parts(
             )));
             (" Update the checklist? ", "update", "skip")
         }
+        // Never prompted either: the task DAG is in-memory coordination.
+        Action::Tasks => {
+            lines.push(Line::from(Span::styled(
+                "task list update",
+                theme::text(),
+            )));
+            (" Update the task list? ", "update", "skip")
+        }
     };
 
     lines.push(Line::from(""));

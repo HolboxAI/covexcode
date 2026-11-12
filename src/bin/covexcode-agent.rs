@@ -71,6 +71,8 @@ mod session;
 mod shell;
 #[path = "../subagent.rs"]
 mod subagent;
+#[path = "../tasks.rs"]
+mod tasks;
 #[cfg(feature = "cli")]
 #[path = "../theme.rs"]
 mod theme;
