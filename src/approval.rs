@@ -261,6 +261,16 @@ pub fn verdict_for(
             if let Some(reason) = crate::tools::plan_mode_block(a) {
                 return Verdict::PlanRefused(reason);
             }
+            // `Action::Agent` is read-only by default, but a definition with
+            // `writes = true` changes files through its child. Plan mode must
+            // refuse it the same way it refuses a direct write.
+            if writing_agent(workspace_root, a) {
+                return Verdict::PlanRefused(
+                    "Plan mode is read-only, so a writing subagent was not started. Describe \
+                     the work in your plan, then call exit_plan_mode."
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -286,6 +296,10 @@ pub fn verdict_for(
         Some(ref a) => {
             risk.is_dangerous()
                 || matches!(a, crate::tools::Action::Plan(_))
+                // A writing child is a write by proxy; under the default
+                // Destructive posture an `agent` call is normally silent, and
+                // that must not become a way around the approval prompt.
+                || writing_agent(workspace_root, a)
                 || match approval_mode {
                     crate::config::ApprovalMode::Destructive => false,
                     crate::config::ApprovalMode::Always => {
@@ -304,6 +318,19 @@ pub fn verdict_for(
     // 6. Everything else stops and asks. `action` is `Some` here: the
     // `None` branch above always sets `needs_approval` false.
     Verdict::Ask(action.expect("needs_approval only true when action is Some"))
+}
+
+/// Whether an `agent` call names a definition declared `writes = true`.
+/// Such a call changes files through its child, so it has to be asked about
+/// like a write even though the `agent` tool is normally read-only.
+fn writing_agent(workspace_root: &std::path::Path, action: &crate::tools::Action) -> bool {
+    let crate::tools::Action::Agent { agent_type, .. } = action else {
+        return false;
+    };
+    !agent_type.is_empty()
+        && crate::subagent::definitions(workspace_root)
+            .iter()
+            .any(|definition| definition.name == agent_type.as_str() && definition.writes)
 }
 
 
@@ -440,5 +467,65 @@ mod tests {
         assert_eq!(Decision::Allow.reason(), None);
         assert_eq!(Decision::Deny.reason(), None);
         assert_eq!(Decision::DenyWithFeedback("no".to_string()).reason(), Some("no"));
+    }
+
+    fn agent_call(agent_type: &str) -> crate::llm::ToolCall {
+        crate::llm::ToolCall {
+            id: "call_agent".to_string(),
+            kind: "function".to_string(),
+            function: crate::llm::FunctionCall {
+                name: crate::tools::AGENT.to_string(),
+                arguments: serde_json::json!({ "task": "do it", "agent_type": agent_type })
+                    .to_string(),
+            },
+        }
+    }
+
+    /// An agent call is normally silent, but a definition that writes must be
+    /// asked about -- otherwise the default posture would let a child change
+    /// files without a prompt -- and plan mode must refuse it.
+    #[test]
+    fn a_writing_agent_call_is_asked_about_and_refused_in_plan_mode() {
+        crate::config::test_support::with_isolated_home(|| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let agents = workspace.path().join(".covexcode").join("agents");
+            std::fs::create_dir_all(&agents).unwrap();
+            std::fs::write(
+                agents.join("worker.toml"),
+                "name = \"worker\"\nwrites = true\nprompt = \"do it\"\n",
+            )
+            .unwrap();
+
+            let writing = agent_call("worker");
+            assert!(matches!(
+                verdict_for(
+                    &writing,
+                    workspace.path(),
+                    crate::tools::Mode::Normal,
+                    crate::config::ApprovalMode::Destructive,
+                ),
+                Verdict::Ask(_)
+            ));
+            assert!(matches!(
+                verdict_for(
+                    &writing,
+                    workspace.path(),
+                    crate::tools::Mode::Plan,
+                    crate::config::ApprovalMode::Destructive,
+                ),
+                Verdict::PlanRefused(_)
+            ));
+
+            let research = agent_call("explore");
+            assert!(matches!(
+                verdict_for(
+                    &research,
+                    workspace.path(),
+                    crate::tools::Mode::Normal,
+                    crate::config::ApprovalMode::Destructive,
+                ),
+                Verdict::AutoApprove
+            ));
+        });
     }
 }
