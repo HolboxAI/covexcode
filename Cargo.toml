@@ -1,6 +1,6 @@
 [package]
 name = "covexcode"
-version = "1.11.96"
+version = "1.11.97"
 edition = "2021"
 # Two binaries exist (src/main.rs + src/bin/mcp-fake-server.rs); without this,
 # a bare `cargo run` fails with "could not determine which binary to run".

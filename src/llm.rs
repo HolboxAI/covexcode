@@ -463,6 +463,10 @@ fn legacy_proxy_url(url: &str) -> Option<String> {
 /// Where a request goes and how it is bounded. Grouped so the two entry points
 /// below take a handful of arguments rather than a dozen positional strings
 /// that are trivial to transpose.
+///
+/// `Copy` because a request that fails before producing anything is retried
+/// with the same target; see `stream_chat`.
+#[derive(Clone, Copy)]
 pub struct Target<'a> {
     pub endpoint: &'a str,
     pub model: &'a str,
@@ -528,12 +532,75 @@ pub async fn stream_chat(
     request_id: u64,
     tx: mpsc::Sender<(u64, StreamEvent)>,
 ) {
-    let result = run(target, messages, tools, request_id, &tx).await;
-    let event = match result {
-        Ok(()) => StreamEvent::Done,
-        Err(e) => StreamEvent::Error(e),
-    };
-    let _ = tx.send((request_id, event)).await;
+    // One silent retry is safe exactly when the attempt failed before
+    // producing anything: no token, reasoning or tool call reached the app,
+    // so replaying the request cannot duplicate text the user already saw.
+    // This is the case that used to end a long turn with "Request to
+    // llm.covexcode.com failed." -- a dropped request or a stream that died
+    // before its first byte is transient far more often than it is a real
+    // refusal.
+    //
+    // A completed-but-empty answer is deliberately *not* retried: that is a
+    // real model outcome, and the app already reports it with a retry action.
+    // Once anything has been emitted the stream is never replayed either; a
+    // partial answer followed by an error is surfaced as an error, because a
+    // second copy of the start of the reply would be worse than the failure.
+    const MAX_STREAM_ATTEMPTS: u32 = 2;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let mut emitted = false;
+        let result = run(
+            target,
+            messages.clone(),
+            tools.clone(),
+            request_id,
+            &tx,
+            &mut emitted,
+        )
+        .await;
+
+        if tx.is_closed() {
+            return; // app is shutting down; nobody is listening
+        }
+
+        let retryable = !emitted
+            && matches!(&result, Err(e) if is_retryable_stream_failure(e));
+        if retryable && attempt < MAX_STREAM_ATTEMPTS {
+            continue;
+        }
+
+        let event = match result {
+            Ok(()) => StreamEvent::Done,
+            Err(e) => StreamEvent::Error(e),
+        };
+        let _ = tx.send((request_id, event)).await;
+        return;
+    }
+}
+
+/// Whether a failed attempt is worth replaying. Only failures that can be
+/// caused by a dropped request or an interrupted stream qualify; a 400, a
+/// context-length refusal or a spent account will fail the same way again and
+/// must reach the user on the first try.
+fn is_retryable_stream_failure(message: &str) -> bool {
+    message.starts_with("Could not reach ")
+        || message.starts_with("Request to ")
+        || message.starts_with("Lost the connection")
+        || message.starts_with("Could not read response body")
+        || message.starts_with("HTTP 5")
+}
+
+/// Whether one delta carries anything the user would see. Empty deltas (role
+/// announcements, usage-only chunks) do not count, so they never block the
+/// retry above.
+fn delta_has_output(delta: &Delta) -> bool {
+    delta.content.as_deref().is_some_and(|text| !text.is_empty())
+        || delta
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|text| !text.is_empty())
+        || !delta.tool_calls.is_empty()
 }
 
 async fn run(
@@ -542,6 +609,7 @@ async fn run(
     tools: Vec<Value>,
     request_id: u64,
     tx: &mpsc::Sender<(u64, StreamEvent)>,
+    emitted: &mut bool,
 ) -> Result<(), String> {
     let Target {
         endpoint,
@@ -748,10 +816,12 @@ async fn run(
             let truncated = choice.finish_reason.as_deref() == Some("length");
             if let Some(message) = choice.message {
                 if let Some(text) = message.content.filter(|t| !t.is_empty()) {
+                    *emitted = true;
                     let _ = tx.send((request_id, StreamEvent::Token(text))).await;
                 }
                 let calls = finalize_tool_calls(message.tool_calls);
                 if !calls.is_empty() {
+                    *emitted = true;
                     let _ = tx
                         .send((request_id, StreamEvent::ToolCalls(calls, truncated)))
                         .await;
@@ -809,6 +879,9 @@ async fn run(
                     if reason.is_some() {
                         finish_reason = reason;
                     }
+                    if delta_has_output(&delta) {
+                        *emitted = true;
+                    }
                     if !apply_delta(delta, &mut pending, request_id, tx).await {
                         return Ok(()); // receiver gone; app is shutting down
                     }
@@ -829,6 +902,9 @@ async fn run(
             if reason.is_some() {
                 finish_reason = reason;
             }
+            if delta_has_output(&delta) {
+                *emitted = true;
+            }
             apply_delta(delta, &mut pending, request_id, tx).await;
         }
     }
@@ -846,6 +922,7 @@ async fn run(
     // such before anything downstream sees it.
     let calls = finalize_tool_calls(pending);
     if !calls.is_empty() {
+        *emitted = true;
         let truncated = finish_reason.as_deref() == Some("length");
         let _ = tx
             .send((request_id, StreamEvent::ToolCalls(calls, truncated)))
@@ -1926,6 +2003,75 @@ mod tests {
         let addr = serve(response.into_bytes(), 4096).await;
 
         assert_eq!(truncated_flag_of(&collect(&addr).await), Some(true));
+    }
+
+    /// A completed-but-empty answer is a real model outcome, not a network
+    /// failure: it must reach the app (which offers a retry) rather than be
+    /// replayed behind its back.
+    #[tokio::test]
+    async fn an_empty_stream_is_not_replayed() {
+        let empty = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+                     data: [DONE]\n\n";
+        let addr = serve_sequence(vec![empty.as_bytes().to_vec()]).await;
+
+        let events = collect(&addr).await;
+        assert_eq!(text_of(&events), "");
+        assert!(matches!(events.last(), Some(StreamEvent::Done)));
+    }
+
+    /// A connection that dies before sending a single byte is safe to replay:
+    /// nothing was shown, so a second attempt cannot duplicate output. The
+    /// declared Content-Length is what turns the early close into a read
+    /// error; a clean EOF with no body looks like an empty answer, which is
+    /// deliberately not replayed.
+    #[tokio::test]
+    async fn a_stream_that_dies_before_any_output_is_retried() {
+        let truncated = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n";
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\
+                    data: [DONE]\n\n";
+        let good = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}"
+        );
+        let addr =
+            serve_sequence(vec![truncated.as_bytes().to_vec(), good.into_bytes()]).await;
+
+        let events = collect(&addr).await;
+        assert_eq!(text_of(&events), "Hello");
+        assert!(matches!(events.last(), Some(StreamEvent::Done)));
+    }
+
+    /// Once a token has reached the app the request is never replayed; the
+    /// truncated stream must surface as an error instead. A declared
+    /// Content-Length the server never satisfies makes reqwest report the
+    /// truncation, rather than a clean EOF that looks like a short answer.
+    #[tokio::test]
+    async fn a_stream_that_dies_after_output_is_not_retried() {
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{body}"
+        );
+        let addr = serve_sequence(vec![response.into_bytes()]).await;
+
+        let events = collect(&addr).await;
+        assert_eq!(text_of(&events), "Hel");
+        match events.last() {
+            Some(StreamEvent::Error(e)) => {
+                assert!(e.contains("Lost the connection"), "{e}")
+            }
+            other => panic!("expected an Error event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_transient_failures_are_retryable() {
+        assert!(is_retryable_stream_failure("Request to llm.covexcode.com failed."));
+        assert!(is_retryable_stream_failure("Could not reach x: timed out."));
+        assert!(is_retryable_stream_failure("Lost the connection to x mid-reply."));
+        assert!(is_retryable_stream_failure("HTTP 502 from x"));
+        assert!(!is_retryable_stream_failure("HTTP 400 from x"));
+        assert!(!is_retryable_stream_failure(
+            "This conversation is too large for m"
+        ));
     }
 
     #[tokio::test]
