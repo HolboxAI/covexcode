@@ -33,6 +33,9 @@ pub struct AgentDefinition {
     /// worktree rules stay in force even for a hand-written definition.
     pub prompt: String,
     pub writes: bool,
+    /// A command run in the worktree after the child finishes and before its
+    /// patch is applied. Non-zero exit means the patch is not applied.
+    pub verify: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +46,8 @@ struct AgentFile {
     prompt: String,
     #[serde(default)]
     writes: bool,
+    #[serde(default)]
+    verify: Option<String>,
 }
 
 /// Every usable definition, project over user, sorted by name. Invalid or
@@ -81,6 +86,10 @@ pub fn definitions(workspace_root: &Path) -> Vec<AgentDefinition> {
                     description: file.description.trim().to_string(),
                     prompt: file.prompt.trim().to_string(),
                     writes: file.writes,
+                    verify: file
+                        .verify
+                        .map(|verify| verify.trim().to_string())
+                        .filter(|verify| !verify.is_empty()),
                 },
             );
         }
@@ -218,6 +227,17 @@ pub async fn run_subagent(
             }
         },
         None => workspace.clone(),
+    };
+    // Only a writing child can produce a patch to verify. The command comes
+    // from the same definition file as the prompt and runs with the user's own
+    // permissions; README documents that trust boundary.
+    let verify = if write_mode {
+        definition
+            .as_ref()
+            .and_then(|definition| definition.verify.as_deref())
+            .map(|command| (command, config.tools.command_timeout_secs))
+    } else {
+        None
     };
 
     let max_steps = config.tools.subagent_max_steps;
@@ -357,7 +377,9 @@ pub async fn run_subagent(
                 ),
                 worktree.as_ref(),
                 config.tools.max_output_bytes,
-            );
+                verify,
+            )
+            .await;
         }
 
         // Exact counts when the endpoint reports them, the same
@@ -387,7 +409,9 @@ pub async fn run_subagent(
                 },
                 worktree.as_ref(),
                 config.tools.max_output_bytes,
-            );
+                verify,
+            )
+            .await;
         }
 
         history.push(ChatMessage {
@@ -408,7 +432,9 @@ pub async fn run_subagent(
                     "The subagent spent its whole budget without writing a report.".to_string(),
                     worktree.as_ref(),
                     config.tools.max_output_bytes,
-                );
+                    verify,
+                )
+                .await;
             }
         }
         steps += 1;
@@ -469,12 +495,13 @@ pub async fn run_subagent(
 /// once the patch is safely in the text. If the patch is too large to include,
 /// or cannot be produced, the worktree is left in place and its path is named
 /// -- losing uncommitted work to cleanup would be worse than a stale dir.
-fn finish_subagent(
+async fn finish_subagent(
     call: &ToolCall,
     display: String,
     mut content: String,
     worktree: Option<&crate::worktree::Worktree>,
     max_patch_bytes: usize,
+    verify: Option<(&str, u64)>,
 ) -> ToolOutcome {
     if let Some(worktree) = worktree {
         match worktree.patch() {
@@ -485,44 +512,79 @@ fn finish_subagent(
             Ok(patch) => {
                 let plural = if patch.files.len() == 1 { "" } else { "s" };
                 let include = patch.diff.chars().count() <= max_patch_bytes;
-                match worktree.apply(&patch.diff) {
-                    Ok(crate::worktree::Applied::Clean) => {
-                        if include {
+                let mut verified = true;
+                if let Some((command, timeout_secs)) = verify {
+                    match worktree
+                        .verify(command, std::time::Duration::from_secs(timeout_secs))
+                        .await
+                    {
+                        Ok(output) => {
+                            content.push_str(&format!("\n\nverify passed (`{command}`)"));
+                            if !output.trim().is_empty() {
+                                content.push('\n');
+                                content.push_str(&clip_verify(&output));
+                            }
+                        }
+                        Err(failure) => {
+                            verified = false;
                             content.push_str(&format!(
-                                "\n\n--- patch ({} file{plural}) — applied cleanly ---\n{}",
-                                patch.files.len(),
-                                patch.diff
-                            ));
-                        } else {
-                            content.push_str(&format!(
-                                "\n\n--- patch ({} file{plural}) — applied cleanly ---\n\
-                                 The diff is too large to include here; the files in the \
-                                 requester's checkout are updated.",
-                                patch.files.len()
+                                "\n\nThe verify command failed (`{command}`), so the patch was \
+                                 NOT applied. The child's worktree is at {} and was left in \
+                                 place.\n--- verify output ---\n{}",
+                                worktree.path().display(),
+                                clip_verify(&failure)
                             ));
                         }
-                        worktree.remove();
                     }
-                    Ok(crate::worktree::Applied::Conflict(reason)) => {
+                }
+                if !verified {
+                    if include {
                         content.push_str(&format!(
-                            "\n\nThe patch was NOT applied because it conflicts with the current \
-                             files: {reason}\nThe child's worktree is at {} and was left in \
-                             place so its work is not lost.",
-                            worktree.path().display()
+                            "\n\n--- patch ({} file{plural}) ---\n{}",
+                            patch.files.len(),
+                            patch.diff
                         ));
-                        if include {
-                            content.push_str(&format!(
-                                "\n\n--- patch ({} file{plural}) ---\n{}",
-                                patch.files.len(),
-                                patch.diff
-                            ));
-                        }
                     }
-                    Err(error) => content.push_str(&format!(
-                        "\n\nThe patch could not be applied ({error}); the child's worktree is \
-                         at {} and was left in place.",
-                        worktree.path().display()
-                    )),
+                } else {
+                    match worktree.apply(&patch.diff) {
+                        Ok(crate::worktree::Applied::Clean) => {
+                            if include {
+                                content.push_str(&format!(
+                                    "\n\n--- patch ({} file{plural}) — applied cleanly ---\n{}",
+                                    patch.files.len(),
+                                    patch.diff
+                                ));
+                            } else {
+                                content.push_str(&format!(
+                                    "\n\n--- patch ({} file{plural}) — applied cleanly ---\n\
+                                     The diff is too large to include here; the files in the \
+                                     requester's checkout are updated.",
+                                    patch.files.len()
+                                ));
+                            }
+                            worktree.remove();
+                        }
+                        Ok(crate::worktree::Applied::Conflict(reason)) => {
+                            content.push_str(&format!(
+                                "\n\nThe patch was NOT applied because it conflicts with the \
+                                 current files: {reason}\nThe child's worktree is at {} and was \
+                                 left in place so its work is not lost.",
+                                worktree.path().display()
+                            ));
+                            if include {
+                                content.push_str(&format!(
+                                    "\n\n--- patch ({} file{plural}) ---\n{}",
+                                    patch.files.len(),
+                                    patch.diff
+                                ));
+                            }
+                        }
+                        Err(error) => content.push_str(&format!(
+                            "\n\nThe patch could not be applied ({error}); the child's worktree \
+                             is at {} and was left in place.",
+                            worktree.path().display()
+                        )),
+                    }
                 }
             }
             Err(error) => content.push_str(&format!(
@@ -537,6 +599,19 @@ fn finish_subagent(
         content,
         diff: None,
         rollback: None,
+    }
+}
+
+/// Verify output is the child's problem report, not a file transfer; the
+/// first few thousand characters carry the failure, and a truncated tail
+/// keeps one noisy command from flooding the parent's context.
+fn clip_verify(text: &str) -> String {
+    const MAX: usize = 4000;
+    if text.chars().count() <= MAX {
+        text.to_string()
+    } else {
+        let kept: String = text.chars().take(MAX).collect();
+        format!("{kept}…")
     }
 }
 
@@ -618,7 +693,7 @@ mod tests {
             std::fs::write(
                 project.join("worker.toml"),
                 "name = \"worker\"\ndescription = \"edit files\"\nprompt = \"do it\"\n\
-                 writes = true\n",
+                 writes = true\nverify = \"cargo check\"\n",
             )
             .unwrap();
 
@@ -626,6 +701,7 @@ mod tests {
             assert_eq!(definitions.len(), 1);
             assert_eq!(definitions[0].name, "worker");
             assert!(definitions[0].writes);
+            assert_eq!(definitions[0].verify.as_deref(), Some("cargo check"));
         });
     }
 }

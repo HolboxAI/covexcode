@@ -48,12 +48,14 @@ Landed on `main`:
   engine forwards each child tool call as live activity on the parent call;
   `tools.subagent_model` routes children to their own model; project-defined
   agent types load from `.covexcode/agents/*.toml`, and a definition with
-  `writes = true` runs in an isolated git worktree and returns a patch. A
-  clean patch is applied to the requester's checkout serially (one `git apply`
-  at a time); a conflict is reported with the patch and the retained worktree
-  path, and writes nothing. `/agents` renders a live panel over the same
-  trails (task, status, rounds, steps) and `/subagents` replays them in the
-  transcript.
+  `writes = true` runs in an isolated git worktree and returns a patch. An
+  optional `verify` command in the definition runs in the worktree before the
+  patch is offered: a non-zero exit leaves the patch unapplied and reports the
+  output. A clean patch is applied to the requester's checkout serially (one
+  `git apply` at a time); a conflict is reported with the patch and the
+  retained worktree path, and writes nothing. `/agents` renders a live panel
+  over the same trails (task, status, rounds, steps) and `/subagents` replays
+  them in the transcript.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -62,10 +64,10 @@ database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
 Remaining, in plan order: Phase 4's implementation/test/review worktree
-pipelines and a richer merge/verify policy; Phase 5's task DAG and teams.
-Phase 1 is complete; retiring the `COVEXCODE_CORE_SESSION` flag (making the
-engine the TUI's only path and deleting the old loop) is follow-up cleanup,
-not parity work.
+pipelines as first-class presets; Phase 5's task DAG and teams. Phase 1 is
+complete; retiring the `COVEXCODE_CORE_SESSION` flag (making the engine the
+TUI's only path and deleting the old loop) is follow-up cleanup, not parity
+work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.
