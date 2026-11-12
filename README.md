@@ -281,7 +281,9 @@ same trail in the transcript.
 For multi-step work, the `tasks` tool keeps a shared DAG: create tasks with
 `depends_on`, claim one before starting (claims are atomic -- a second
 claimant gets the current owner), and complete it to unblock its dependents.
-The list is in-memory and scoped to one workspace in one process.
+The list is stored per workspace under the config directory and guarded by a
+file lock, so a daemon and several CLI processes see and claim from the same
+DAG.
 
 A definition may set `writes = true`. That child runs in an isolated git
 worktree at HEAD (the repository needs at least one commit), may call

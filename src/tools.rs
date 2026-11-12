@@ -3476,8 +3476,7 @@ pub async fn execute_truncated(
         // that failed to ask, or a subagent, cannot get a mutating tool past
         // this. Checked after the danger blocklist so a catastrophic command
         // is still named as blocked rather than merely out of policy.
-        if config.sandbox == crate::config::SandboxPolicy::ReadOnly
-            && !is_read_only_action(&action)
+        if config.sandbox == crate::config::SandboxPolicy::ReadOnly && !is_read_only_action(&action)
         {
             return outcome(
                 &call.id,
@@ -5783,9 +5782,21 @@ pub fn progress_failed(call: &ToolCall, reason: &str) -> ToolOutcome {
 /// the counts and reminds the model of the one-in-progress convention rather
 /// than restating the whole list back (it just sent that list; echoing it
 /// would only spend tokens).
-/// The shared task DAG. Synchronous and in-memory: every action is a mutex
-/// critical section over the workspace's task map, so an approval loop that
-/// failed to ask could not make it dangerous anyway.
+/// Render the store for a tool result. A read failure here is reported as a
+/// note: the mutation that preceded it already happened, so it must not be
+/// turned into an error the model would retry.
+fn render_store(workspace: &Workspace) -> String {
+    match crate::tasks::render(workspace.root()) {
+        Ok(text) => text,
+        Err(e) => format!("(the task store could not be listed: {e})"),
+    }
+}
+
+/// The shared task DAG. Any process working in the same workspace sees the
+/// same list: mutations are file-locked read-modify-writes (see
+/// `crate::tasks`), which is what makes a claim exclusive across a daemon and
+/// several CLI clients. Only coordination state is written -- config dir, not
+/// the workspace -- so the approval surface is unchanged.
 fn execute_tasks(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
     let Ok(args) = serde_json::from_str::<TaskArgs>(&call.function.arguments) else {
         return outcome(
@@ -5828,7 +5839,7 @@ fn execute_tasks(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
                     format!(
                         "Created {}. Claim it before starting work.\n\n{}",
                         task.id,
-                        crate::tasks::render(workspace.root())
+                        render_store(workspace)
                     ),
                 ),
                 Err(e) => outcome(
@@ -5855,7 +5866,7 @@ fn execute_tasks(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
                         "Claimed '{}' ({}).\n\n{}",
                         task.id,
                         task.title,
-                        crate::tasks::render(workspace.root())
+                        render_store(workspace)
                     ),
                 ),
                 Err(e) => outcome(
@@ -5881,7 +5892,7 @@ fn execute_tasks(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
                         content.push_str(&format!("\nUnblocked: {}.", unblocked.join(", ")));
                     }
                     content.push_str("\n\n");
-                    content.push_str(&crate::tasks::render(workspace.root()));
+                    content.push_str(&render_store(workspace));
                     outcome(&call.id, format!("tasks — completed {}", task.id), content)
                 }
                 Err(e) => outcome(
@@ -5891,11 +5902,14 @@ fn execute_tasks(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
                 ),
             }
         }
-        "list" => outcome(
-            &call.id,
-            "tasks — list".to_string(),
-            crate::tasks::render(workspace.root()),
-        ),
+        "list" => match crate::tasks::render(workspace.root()) {
+            Ok(text) => outcome(&call.id, "tasks — list".to_string(), text),
+            Err(e) => outcome(
+                &call.id,
+                "tasks — list failed".to_string(),
+                format!("Error: {e}"),
+            ),
+        },
         other => outcome(
             &call.id,
             format!("tasks — unknown action '{other}'"),
@@ -5978,10 +5992,7 @@ fn plan_declined_inner(call: &ToolCall, reason: Option<&str>) -> ToolOutcome {
     outcome(
         &call.id,
         match reason {
-            Some(reason) => format!(
-                "✗ plan — rejected: \"{}\"",
-                clip_label(reason, 60)
-            ),
+            Some(reason) => format!("✗ plan — rejected: \"{}\"", clip_label(reason, 60)),
             None => "✗ plan — rejected".to_string(),
         },
         content,
@@ -7713,7 +7724,11 @@ mod tests {
 
         drop(guard);
         let out = task.await.expect("the task joins");
-        assert!(!out.content.is_empty(), "the write completed: {}", out.content);
+        assert!(
+            !out.content.is_empty(),
+            "the write completed: {}",
+            out.content
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "content");
     }
 
@@ -7733,12 +7748,15 @@ mod tests {
         assert!(is_read_only_action(&Action::Tasks));
         assert!(
             plan_mode_block(&Action::Tasks).is_none(),
-            "plan mode allows in-memory coordination"
+            "plan mode allows coordination state outside the workspace"
         );
     }
 
     #[tokio::test]
     async fn the_tasks_tool_creates_claims_and_completes_a_dag() {
+        // The store lives under the config dir now, so keep the developer's
+        // own task list out of it.
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws, cfg) = fixture();
         let create = execute(
             &tool_call(
@@ -7749,7 +7767,11 @@ mod tests {
             &cfg,
         )
         .await;
-        assert!(create.content.contains("Created first"), "{}", create.content);
+        assert!(
+            create.content.contains("Created first"),
+            "{}",
+            create.content
+        );
 
         let second = execute(
             &tool_call(
@@ -7765,7 +7787,11 @@ mod tests {
             &cfg,
         )
         .await;
-        assert!(second.content.contains("Created second"), "{}", second.content);
+        assert!(
+            second.content.contains("Created second"),
+            "{}",
+            second.content
+        );
 
         let blocked = execute(
             &tool_call(
@@ -7787,7 +7813,11 @@ mod tests {
             &cfg,
         )
         .await;
-        assert!(claim.content.contains("Claimed 'first'"), "{}", claim.content);
+        assert!(
+            claim.content.contains("Claimed 'first'"),
+            "{}",
+            claim.content
+        );
 
         let complete = execute(
             &tool_call(

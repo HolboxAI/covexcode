@@ -1,25 +1,34 @@
-//! A shared, process-wide task DAG for multi-agent work.
+//! A shared task DAG for multi-agent work, persisted across processes.
 //!
 //! The parent model (or a person) creates tasks with dependencies; an agent
 //! claims one before working on it and completes it when done. Claims are
-//! atomic under one mutex, so two agents looking at the same pending task
+//! atomic under a file lock, so two processes looking at the same pending task
 //! cannot both start it -- the plan's `UPDATE ... WHERE status='pending'`
 //! guarantee, without a database.
 //!
-//! Scope is one workspace in one process. That is where the TUI, the ACP
-//! engine, and every subagent they spawn already live; a cross-process daemon
-//! would need the same claim operation backed by a file lock, which is a
-//! deliberate follow-up rather than a silent second implementation here.
+//! Storage: one JSON file per canonical workspace under
+//! `CONFIG_DIR/tasks/<hash>.json`, guarded by a stable sibling
+//! `<hash>.lock`. The lock file is what makes the pattern correct: a waiter
+//! always locks the same inode, then opens the data file fresh, so replacing
+//! the data file by rename cannot hand a waiter a stale copy. Every operation
+//! is read-modify-write under that lock; the write goes to a temp file and is
+//! renamed into place, so a crash leaves the previous store intact.
 //!
-//! The store is in memory. It is coordination state for work in flight, not
-//! the session transcript: a restart loses the list, and the conversation that
-//! created it is still the record of what was meant.
+//! This is coordination state for work in flight, not the session transcript:
+//! the conversation that created the task list is still the record of what was
+//! meant. A corrupt store is reported rather than silently reset, because
+//! resetting would silently free claims another agent is working under.
 
-use std::collections::{BTreeMap, HashMap};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     Pending,
     InProgress,
@@ -36,7 +45,7 @@ impl Status {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
     pub title: String,
@@ -50,14 +59,19 @@ pub struct Task {
     pub note: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Store {
+    /// The workspace this file belongs to. Checked on load so a hash
+    /// collision cannot silently mix two projects' task lists.
+    workspace: String,
     next_id: u64,
     tasks: BTreeMap<String, Task>,
 }
 
 impl Store {
-    fn new() -> Self {
+    fn new(workspace: String) -> Self {
         Self {
+            workspace,
             next_id: 1,
             tasks: BTreeMap::new(),
         }
@@ -93,20 +107,100 @@ impl Store {
     }
 }
 
-static STORES: OnceLock<Mutex<HashMap<PathBuf, Store>>> = OnceLock::new();
+/// Serializes threads in this process before the OS lock is even attempted.
+/// The OS lock would already exclude a second open file description, but
+/// making the in-process order explicit keeps tests and a busy TUI
+/// deterministic without relying on that detail.
+static PROCESS_LOCK: Mutex<()> = Mutex::new(());
 
-fn stores() -> &'static Mutex<HashMap<PathBuf, Store>> {
-    STORES.get_or_init(|| Mutex::new(HashMap::new()))
+fn store_dir() -> PathBuf {
+    crate::config::Config::config_dir().join("tasks")
 }
 
-fn key(workspace: &Path) -> PathBuf {
-    workspace.to_path_buf()
+fn key(workspace: &Path) -> String {
+    let digest = Sha256::digest(workspace.to_string_lossy().as_bytes());
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()[..16]
+        .to_string()
 }
 
-fn with_store<T>(workspace: &Path, f: impl FnOnce(&mut Store) -> T) -> T {
-    let mut map = stores().lock().unwrap_or_else(|e| e.into_inner());
-    let store = map.entry(key(workspace)).or_insert_with(Store::new);
-    f(store)
+fn data_path(workspace: &Path) -> PathBuf {
+    store_dir().join(format!("{}.json", key(workspace)))
+}
+
+fn lock_path(workspace: &Path) -> PathBuf {
+    store_dir().join(format!("{}.lock", key(workspace)))
+}
+
+fn with_store<T>(
+    workspace: &Path,
+    write: bool,
+    f: impl FnOnce(&mut Store) -> Result<T, String>,
+) -> Result<T, String> {
+    let _process = PROCESS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = store_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path(workspace))
+        .map_err(|e| format!("could not open the task lock: {e}"))?;
+    lock.lock()
+        .map_err(|e| format!("could not lock the task store: {e}"))?;
+
+    let data = data_path(workspace);
+    let workspace_label = workspace.to_string_lossy().into_owned();
+    let mut store = if data.exists() {
+        let mut file = std::fs::File::open(&data)
+            .map_err(|e| format!("could not read {}: {e}", data.display()))?;
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .map_err(|e| format!("could not read {}: {e}", data.display()))?;
+        let mut store: Store = serde_json::from_str(&text).map_err(|e| {
+            format!(
+                "the task store {} is unreadable ({e}); fix or remove it",
+                data.display()
+            )
+        })?;
+        if !store.workspace.is_empty() && store.workspace != workspace_label {
+            return Err(format!(
+                "the task store {} belongs to another workspace ({}); refusing to mix them",
+                data.display(),
+                store.workspace
+            ));
+        }
+        store.workspace = workspace_label;
+        store
+    } else {
+        Store::new(workspace_label)
+    };
+
+    let result = f(&mut store);
+    if result.is_ok() && write {
+        let json = serde_json::to_string_pretty(&store)
+            .map_err(|e| format!("could not serialize the task store: {e}"))?;
+        let tmp = dir.join(format!(
+            "{}.json.tmp.{}",
+            key(workspace),
+            std::process::id()
+        ));
+        std::fs::write(&tmp, json)
+            .map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+        // Replace in one step: Unix rename and Windows `MoveFileEx` with
+        // `MOVEFILE_REPLACE_EXISTING` both swap an existing destination, so a
+        // crash leaves either the old store or the new one, never neither.
+        // Waiters lock the separate `.lock` file and reopen the data path
+        // after acquiring it, so the replaced inode cannot be stale for them.
+        std::fs::rename(&tmp, &data)
+            .map_err(|e| format!("could not replace {}: {e}", data.display()))?;
+    }
+    let _ = lock.unlock();
+    result
 }
 
 fn valid_id(id: &str) -> bool {
@@ -129,7 +223,7 @@ pub fn create(
     if title.is_empty() {
         return Err("a task needs a title".to_string());
     }
-    with_store(workspace, |store| {
+    with_store(workspace, true, |store| {
         let id = match id.map(|id| id.trim().to_string()) {
             Some(id) => {
                 if !valid_id(&id) {
@@ -169,14 +263,15 @@ pub fn create(
     })
 }
 
-/// Claim a pending task. Atomic: only one caller gets `Ok` for a given task
-/// unless it is the same owner re-claiming its own in-progress work.
+/// Claim a pending task. Atomic across processes: only one caller gets `Ok`
+/// for a given task unless it is the same owner re-claiming its own
+/// in-progress work.
 pub fn claim(workspace: &Path, id: &str, owner: &str) -> Result<Task, String> {
     let owner = owner.trim();
     if owner.is_empty() {
         return Err("a claim needs an owner name".to_string());
     }
-    with_store(workspace, |store| {
+    with_store(workspace, true, |store| {
         let task = store
             .tasks
             .get(id)
@@ -198,7 +293,11 @@ pub fn claim(workspace: &Path, id: &str, owner: &str) -> Result<Task, String> {
             return Err(format!(
                 "task '{id}' is blocked by {} until {} done",
                 blocked.join(", "),
-                if blocked.len() == 1 { "it is" } else { "they are" }
+                if blocked.len() == 1 {
+                    "it is"
+                } else {
+                    "they are"
+                }
             ));
         }
         let task = store.tasks.get_mut(id).expect("checked above");
@@ -216,7 +315,7 @@ pub fn complete(
     owner: Option<&str>,
     note: Option<String>,
 ) -> Result<(Task, Vec<String>), String> {
-    with_store(workspace, |store| {
+    with_store(workspace, true, |store| {
         let task = store
             .tasks
             .get(id)
@@ -249,6 +348,9 @@ pub fn complete(
             .tasks
             .values()
             .filter(|candidate| candidate.status == Status::Pending)
+            // Only dependents of this task can be *newly* unblocked; a task
+            // that never had dependencies was already claimable.
+            .filter(|candidate| candidate.depends_on.iter().any(|dep| dep == id))
             .filter(|candidate| store.deps_done(candidate).is_ok())
             .map(|candidate| candidate.id.clone())
             .collect();
@@ -256,15 +358,17 @@ pub fn complete(
     })
 }
 
-pub fn list(workspace: &Path) -> Vec<Task> {
-    with_store(workspace, |store| store.tasks.values().cloned().collect())
+pub fn list(workspace: &Path) -> Result<Vec<Task>, String> {
+    with_store(workspace, false, |store| {
+        Ok(store.tasks.values().cloned().collect())
+    })
 }
 
 /// The text the model sees for `tasks { action: "list" }`.
-pub fn render(workspace: &Path) -> String {
-    let tasks = list(workspace);
+pub fn render(workspace: &Path) -> Result<String, String> {
+    let tasks = list(workspace)?;
     if tasks.is_empty() {
-        return "No tasks yet.".to_string();
+        return Ok("No tasks yet.".to_string());
     }
     let mut out = String::from("Tasks:");
     for task in tasks {
@@ -296,12 +400,13 @@ pub fn render(workspace: &Path) -> String {
             out.push_str(&format!("\n    note: {note}"));
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_support::with_isolated_home;
 
     fn workspace() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -311,77 +416,237 @@ mod tests {
 
     #[test]
     fn a_claim_is_atomic_and_dependencies_block_it() {
-        let (_dir, ws) = workspace();
-        let first = create(&ws, None, "first".into(), String::new(), Vec::new(), Vec::new())
+        with_isolated_home(|| {
+            let (_dir, ws) = workspace();
+            let first = create(
+                &ws,
+                None,
+                "first".into(),
+                String::new(),
+                Vec::new(),
+                Vec::new(),
+            )
             .expect("create");
-        let second = create(
-            &ws,
-            None,
-            "second".into(),
-            String::new(),
-            vec![first.id.clone()],
-            Vec::new(),
-        )
-        .expect("create");
+            let second = create(
+                &ws,
+                None,
+                "second".into(),
+                String::new(),
+                vec![first.id.clone()],
+                Vec::new(),
+            )
+            .expect("create");
 
-        let blocked = claim(&ws, &second.id, "agent-a").expect_err("blocked");
-        assert!(blocked.contains(&first.id), "{blocked}");
+            let blocked = claim(&ws, &second.id, "agent-a").expect_err("blocked");
+            assert!(blocked.contains(&first.id), "{blocked}");
 
-        claim(&ws, &first.id, "agent-a").expect("claim first");
-        let double = claim(&ws, &first.id, "agent-b").expect_err("already claimed");
-        assert!(double.contains("agent-a"), "{double}");
+            claim(&ws, &first.id, "agent-a").expect("claim first");
+            let double = claim(&ws, &first.id, "agent-b").expect_err("already claimed");
+            assert!(double.contains("agent-a"), "{double}");
 
-        let (_, unblocked) = complete(&ws, &first.id, Some("agent-a"), None).expect("complete");
-        assert_eq!(unblocked, vec![second.id.clone()]);
+            let (_, unblocked) = complete(&ws, &first.id, Some("agent-a"), None).expect("complete");
+            assert_eq!(unblocked, vec![second.id.clone()]);
 
-        let claimed = claim(&ws, &second.id, "agent-b").expect("unblocked now");
-        assert_eq!(claimed.status, Status::InProgress);
-        assert_eq!(claimed.owner.as_deref(), Some("agent-b"));
+            let claimed = claim(&ws, &second.id, "agent-b").expect("unblocked now");
+            assert_eq!(claimed.status, Status::InProgress);
+            assert_eq!(claimed.owner.as_deref(), Some("agent-b"));
+        });
     }
 
     #[test]
     fn create_validates_ids_and_dependencies() {
-        let (_dir, ws) = workspace();
-        assert!(create(&ws, Some("bad id".into()), "x".into(), String::new(), Vec::new(), Vec::new()).is_err());
-        assert!(create(&ws, Some("a".into()), "x".into(), String::new(), vec!["missing".into()], Vec::new()).is_err());
+        with_isolated_home(|| {
+            let (_dir, ws) = workspace();
+            assert!(create(
+                &ws,
+                Some("bad id".into()),
+                "x".into(),
+                String::new(),
+                Vec::new(),
+                Vec::new()
+            )
+            .is_err());
+            assert!(create(
+                &ws,
+                Some("a".into()),
+                "x".into(),
+                String::new(),
+                vec!["missing".into()],
+                Vec::new()
+            )
+            .is_err());
 
-        let created = create(&ws, Some("a".into()), "x".into(), String::new(), Vec::new(), Vec::new()).expect("create");
-        assert_eq!(created.id, "a");
-        assert!(create(&ws, Some("a".into()), "again".into(), String::new(), Vec::new(), Vec::new()).is_err());
+            let created = create(
+                &ws,
+                Some("a".into()),
+                "x".into(),
+                String::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("create");
+            assert_eq!(created.id, "a");
+            assert!(create(
+                &ws,
+                Some("a".into()),
+                "again".into(),
+                String::new(),
+                Vec::new(),
+                Vec::new()
+            )
+            .is_err());
+        });
     }
 
     #[test]
     fn completing_requires_a_claim_and_the_right_owner() {
-        let (_dir, ws) = workspace();
-        let task = create(&ws, None, "work".into(), String::new(), Vec::new(), Vec::new()).expect("create");
-        assert!(complete(&ws, &task.id, None, None).is_err(), "not claimed");
-        claim(&ws, &task.id, "agent-a").expect("claim");
-        assert!(complete(&ws, &task.id, Some("agent-b"), None).is_err());
-        let (done, _) = complete(&ws, &task.id, Some("agent-a"), Some("finished".into())).expect("complete");
-        assert_eq!(done.status, Status::Done);
-        assert_eq!(done.note.as_deref(), Some("finished"));
-        assert!(complete(&ws, &task.id, Some("agent-a"), None).is_err(), "already done");
+        with_isolated_home(|| {
+            let (_dir, ws) = workspace();
+            let task = create(
+                &ws,
+                None,
+                "work".into(),
+                String::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("create");
+            assert!(complete(&ws, &task.id, None, None).is_err(), "not claimed");
+            claim(&ws, &task.id, "agent-a").expect("claim");
+            assert!(complete(&ws, &task.id, Some("agent-b"), None).is_err());
+            let (done, _) = complete(&ws, &task.id, Some("agent-a"), Some("finished".into()))
+                .expect("complete");
+            assert_eq!(done.status, Status::Done);
+            assert_eq!(done.note.as_deref(), Some("finished"));
+            assert!(
+                complete(&ws, &task.id, Some("agent-a"), None).is_err(),
+                "already done"
+            );
+        });
     }
 
     #[test]
-    fn stores_are_scoped_to_one_workspace() {
-        let (_a, ws_a) = workspace();
-        let (_b, ws_b) = workspace();
-        create(&ws_a, None, "only a".into(), String::new(), Vec::new(), Vec::new()).expect("create");
-        assert_eq!(list(&ws_a).len(), 1);
-        assert!(list(&ws_b).is_empty());
+    fn stores_are_scoped_to_one_workspace_and_survive_on_disk() {
+        with_isolated_home(|| {
+            let (_a, ws_a) = workspace();
+            let (_b, ws_b) = workspace();
+            create(
+                &ws_a,
+                None,
+                "only a".into(),
+                String::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("create");
+            assert_eq!(list(&ws_a).expect("list").len(), 1);
+            assert!(list(&ws_b).expect("list").is_empty());
+
+            let data = data_path(&ws_a);
+            assert!(data.exists(), "the store is on disk");
+            let raw = std::fs::read_to_string(&data).expect("read");
+            assert!(raw.contains("only a"), "{raw}");
+            assert!(raw.contains(&ws_a.to_string_lossy().to_string()), "{raw}");
+            assert!(
+                !data_path(&ws_b).exists(),
+                "reading another workspace does not create a store"
+            );
+        });
+    }
+
+    #[test]
+    fn a_corrupt_or_foreign_store_is_reported_not_reset() {
+        with_isolated_home(|| {
+            let (_dir, ws) = workspace();
+            create(
+                &ws,
+                None,
+                "work".into(),
+                String::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("create");
+            let data = data_path(&ws);
+
+            std::fs::write(&data, "{not json").expect("corrupt");
+            let err = list(&ws).expect_err("corrupt store");
+            assert!(err.contains("unreadable"), "{err}");
+            assert_eq!(
+                std::fs::read_to_string(&data).expect("read"),
+                "{not json",
+                "a corrupt store is left for the operator, not reset"
+            );
+
+            let foreign = Store {
+                workspace: "/some/other/project".to_string(),
+                next_id: 2,
+                tasks: BTreeMap::new(),
+            };
+            std::fs::write(&data, serde_json::to_string(&foreign).expect("write")).expect("write");
+            let err = list(&ws).expect_err("foreign store");
+            assert!(err.contains("another workspace"), "{err}");
+        });
     }
 
     #[test]
     fn render_lists_status_dependencies_and_owners() {
-        let (_dir, ws) = workspace();
-        let first = create(&ws, None, "first".into(), String::new(), Vec::new(), Vec::new()).expect("create");
-        create(&ws, None, "second".into(), String::new(), vec![first.id.clone()], Vec::new()).expect("create");
-        claim(&ws, &first.id, "agent-a").expect("claim");
-        let text = render(&ws);
-        assert!(text.contains("[~]"), "{text}");
-        assert!(text.contains("[ ]"), "{text}");
-        assert!(text.contains("after task-1"), "{text}");
-        assert!(text.contains("agent-a"), "{text}");
+        with_isolated_home(|| {
+            let (_dir, ws) = workspace();
+            let first = create(
+                &ws,
+                None,
+                "first".into(),
+                String::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("create");
+            create(
+                &ws,
+                None,
+                "second".into(),
+                String::new(),
+                vec![first.id.clone()],
+                Vec::new(),
+            )
+            .expect("create");
+            claim(&ws, &first.id, "agent-a").expect("claim");
+            let text = render(&ws).expect("render");
+            assert!(text.contains("[~]"), "{text}");
+            assert!(text.contains("[ ]"), "{text}");
+            assert!(text.contains("after task-1"), "{text}");
+            assert!(text.contains("agent-a"), "{text}");
+        });
+    }
+
+    /// The OS primitive the store relies on: two handles to one lock file
+    /// exclude each other until the holder unlocks.
+    #[test]
+    fn the_lock_file_excludes_a_second_handle() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("store.lock");
+        let first = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("first");
+        let second = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("second");
+        first.lock().expect("lock first");
+        assert!(
+            second.try_lock().is_err(),
+            "a second handle must not get the lock"
+        );
+        first.unlock().expect("unlock");
+        assert!(
+            second.try_lock().is_ok(),
+            "the lock is available after release"
+        );
     }
 }
