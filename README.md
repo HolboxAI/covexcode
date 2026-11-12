@@ -273,7 +273,9 @@ prompt = "You are a meticulous reviewer. Look for..."
 The definition's prompt is appended to the built-in read-only prompt, so a
 definition changes what the child is asked to do, not what it is able to do.
 Sibling `agent` calls run concurrently (default 4, `tools.subagent_concurrency`),
-and `tools.subagent_model` can route research to a faster model.
+and `tools.subagent_model` can route research to a faster model. `/agents`
+opens a live panel of running and finished children; `/subagents` replays the
+same trail in the transcript.
 
 A definition may set `writes = true`. That child runs in an isolated git
 worktree at HEAD (the repository needs at least one commit), may call

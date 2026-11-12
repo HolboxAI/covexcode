@@ -88,6 +88,10 @@ pub enum Overlay {
         /// away, so a reflexive Enter must be the harmless answer.
         confirmed: bool,
     },
+    /// `/agents`: a live, read-only panel over the same trails the
+    /// transcript's live area and `/subagents` read. `selected` scrolls one
+    /// trail per row; Esc closes.
+    AgentPanel { selected: usize },
     /// Ctrl+P command palette: every `/` command, filterable by name or
     /// description. Unlike the slash-autocomplete menu (which only appears
     /// while a bare `/word` is being typed), this is reachable at any idle
@@ -165,6 +169,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/usage", "what today cost, and the history"),
     ("/quota", "what is left today, and your own limits"),
     ("/subagents", "what each subagent did, step by step"),
+    ("/agents", "live panel of running and finished subagents"),
     (
         "/hosted",
         "projects this machine is hosting, and whether they are live",
@@ -1146,6 +1151,7 @@ impl App {
             "/usage" => self.show_usage(),
             "/quota" => self.show_quota(),
             "/subagents" => self.show_subagents(),
+            "/agents" => self.overlay = Some(Overlay::AgentPanel { selected: 0 }),
             "/hosted" => self.start_hosted(),
             cmd if cmd.starts_with("/rollback") => self.start_rollback_command(cmd),
             cmd if cmd.starts_with("/quota") => self.handle_quota_command(cmd),
@@ -5325,6 +5331,26 @@ impl App {
         }
     }
 
+    fn handle_agent_panel_key(&mut self, key: KeyEvent, selected: usize) {
+        let last = self.subagent_trails.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {}
+            KeyCode::Up => {
+                self.overlay = Some(Overlay::AgentPanel {
+                    selected: selected.saturating_sub(1),
+                });
+            }
+            KeyCode::Down => {
+                self.overlay = Some(Overlay::AgentPanel {
+                    selected: (selected + 1).min(last),
+                });
+            }
+            // Anything else leaves the panel exactly as it was: it is a view,
+            // not a prompt, and a stray key must not dismiss it.
+            _ => self.overlay = Some(Overlay::AgentPanel { selected }),
+        }
+    }
+
     fn handle_query_rollback_picker_key(
         &mut self,
         key: KeyEvent,
@@ -5741,6 +5767,7 @@ impl App {
             Overlay::QueryRollbackPicker { queries, selected } => {
                 self.handle_query_rollback_picker_key(key, queries, selected)
             }
+            Overlay::AgentPanel { selected } => self.handle_agent_panel_key(key, selected),
             // Put back for the same reason: the flow decides for itself when
             // it is over, and it is `close_deploy` that clears this.
             Overlay::Deploy => {
@@ -10740,6 +10767,42 @@ mod tests {
         assert_eq!(trail.steps, vec!["read config.rs", "grep load"]);
         assert_eq!(trail.rounds, 2);
         assert_eq!(trail.finished, None);
+    }
+
+    /// `/agents`: a live panel over the same trails, with a selection that
+    /// clamps at the ends and Esc to close.
+    #[test]
+    fn the_agent_panel_opens_scrolls_and_closes() {
+        let mut a = app();
+        for (call_id, task) in [("call_1", "first task"), ("call_2", "second task")] {
+            a.subagent_trails.push(SubagentTrail {
+                call_id: call_id.to_string(),
+                task: task.to_string(),
+                steps: vec!["read a.rs".to_string()],
+                rounds: 1,
+                finished: None,
+            });
+        }
+
+        a.run_command("/agents");
+        assert!(matches!(
+            a.overlay,
+            Some(Overlay::AgentPanel { selected: 0 })
+        ));
+
+        a.handle_key(key(KeyCode::Down));
+        assert!(matches!(
+            a.overlay,
+            Some(Overlay::AgentPanel { selected: 1 })
+        ));
+        a.handle_key(key(KeyCode::Down));
+        assert!(
+            matches!(a.overlay, Some(Overlay::AgentPanel { selected: 1 })),
+            "the selection clamps at the last trail"
+        );
+
+        a.handle_key(key(KeyCode::Esc));
+        assert!(a.overlay.is_none());
     }
 
     /// An activity event for a call that is not a running subagent is stale
