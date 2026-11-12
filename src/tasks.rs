@@ -7,25 +7,19 @@
 //! guarantee, without a database.
 //!
 //! Storage: one JSON file per canonical workspace under
-//! `CONFIG_DIR/tasks/<hash>.json`, guarded by a stable sibling
-//! `<hash>.lock`. The lock file is what makes the pattern correct: a waiter
-//! always locks the same inode, then opens the data file fresh, so replacing
-//! the data file by rename cannot hand a waiter a stale copy. Every operation
-//! is read-modify-write under that lock; the write goes to a temp file and is
-//! renamed into place, so a crash leaves the previous store intact.
+//! `CONFIG_DIR/tasks/<hash>.json`, mutated only while holding the file lock
+//! described in [`crate::locked_store`]. That module owns the read-modify-
+//! write-under-lock and temp-file-rename mechanics; this one owns the DAG.
 //!
 //! This is coordination state for work in flight, not the session transcript:
 //! the conversation that created the task list is still the record of what was
 //! meant. A corrupt store is reported rather than silently reset, because
 //! resetting would silently free claims another agent is working under.
 
+use crate::locked_store::{self, Document};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +62,16 @@ struct Store {
     tasks: BTreeMap<String, Task>,
 }
 
+impl Document for Store {
+    fn workspace(&self) -> &str {
+        &self.workspace
+    }
+
+    fn set_workspace(&mut self, workspace: String) {
+        self.workspace = workspace;
+    }
+}
+
 impl Store {
     fn new(workspace: String) -> Self {
         Self {
@@ -107,100 +111,16 @@ impl Store {
     }
 }
 
-/// Serializes threads in this process before the OS lock is even attempted.
-/// The OS lock would already exclude a second open file description, but
-/// making the in-process order explicit keeps tests and a busy TUI
-/// deterministic without relying on that detail.
-static PROCESS_LOCK: Mutex<()> = Mutex::new(());
-
-fn store_dir() -> PathBuf {
-    crate::config::Config::config_dir().join("tasks")
-}
-
-fn key(workspace: &Path) -> String {
-    let digest = Sha256::digest(workspace.to_string_lossy().as_bytes());
-    digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()[..16]
-        .to_string()
-}
-
-fn data_path(workspace: &Path) -> PathBuf {
-    store_dir().join(format!("{}.json", key(workspace)))
-}
-
-fn lock_path(workspace: &Path) -> PathBuf {
-    store_dir().join(format!("{}.lock", key(workspace)))
-}
-
 fn with_store<T>(
     workspace: &Path,
     write: bool,
     f: impl FnOnce(&mut Store) -> Result<T, String>,
 ) -> Result<T, String> {
-    let _process = PROCESS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = store_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    locked_store::update("tasks", workspace, write, Store::new, f)
+}
 
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(lock_path(workspace))
-        .map_err(|e| format!("could not open the task lock: {e}"))?;
-    lock.lock()
-        .map_err(|e| format!("could not lock the task store: {e}"))?;
-
-    let data = data_path(workspace);
-    let workspace_label = workspace.to_string_lossy().into_owned();
-    let mut store = if data.exists() {
-        let mut file = std::fs::File::open(&data)
-            .map_err(|e| format!("could not read {}: {e}", data.display()))?;
-        let mut text = String::new();
-        file.read_to_string(&mut text)
-            .map_err(|e| format!("could not read {}: {e}", data.display()))?;
-        let mut store: Store = serde_json::from_str(&text).map_err(|e| {
-            format!(
-                "the task store {} is unreadable ({e}); fix or remove it",
-                data.display()
-            )
-        })?;
-        if !store.workspace.is_empty() && store.workspace != workspace_label {
-            return Err(format!(
-                "the task store {} belongs to another workspace ({}); refusing to mix them",
-                data.display(),
-                store.workspace
-            ));
-        }
-        store.workspace = workspace_label;
-        store
-    } else {
-        Store::new(workspace_label)
-    };
-
-    let result = f(&mut store);
-    if result.is_ok() && write {
-        let json = serde_json::to_string_pretty(&store)
-            .map_err(|e| format!("could not serialize the task store: {e}"))?;
-        let tmp = dir.join(format!(
-            "{}.json.tmp.{}",
-            key(workspace),
-            std::process::id()
-        ));
-        std::fs::write(&tmp, json)
-            .map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-        // Replace in one step: Unix rename and Windows `MoveFileEx` with
-        // `MOVEFILE_REPLACE_EXISTING` both swap an existing destination, so a
-        // crash leaves either the old store or the new one, never neither.
-        // Waiters lock the separate `.lock` file and reopen the data path
-        // after acquiring it, so the replaced inode cannot be stale for them.
-        std::fs::rename(&tmp, &data)
-            .map_err(|e| format!("could not replace {}: {e}", data.display()))?;
-    }
-    let _ = lock.unlock();
-    result
+fn data_path(workspace: &Path) -> PathBuf {
+    locked_store::data_path("tasks", workspace)
 }
 
 fn valid_id(id: &str) -> bool {
@@ -620,33 +540,23 @@ mod tests {
         });
     }
 
-    /// The OS primitive the store relies on: two handles to one lock file
-    /// exclude each other until the holder unlocks.
+    /// The OS primitive the store relies on lives in `locked_store`; what
+    /// matters here is that a claim is one locked read-modify-write.
     #[test]
-    fn the_lock_file_excludes_a_second_handle() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("store.lock");
-        let first = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .expect("first");
-        let second = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .expect("second");
-        first.lock().expect("lock first");
-        assert!(
-            second.try_lock().is_err(),
-            "a second handle must not get the lock"
-        );
-        first.unlock().expect("unlock");
-        assert!(
-            second.try_lock().is_ok(),
-            "the lock is available after release"
-        );
+    fn the_task_store_is_written_to_disk() {
+        with_isolated_home(|| {
+            let (_dir, ws) = workspace();
+            create(
+                &ws,
+                None,
+                "on disk".into(),
+                String::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("create");
+            let raw = std::fs::read_to_string(data_path(&ws)).expect("read");
+            assert!(raw.contains("on disk"), "{raw}");
+        });
     }
 }

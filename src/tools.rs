@@ -71,6 +71,7 @@ pub const PLAN_PROGRESS: &str = "plan_progress";
 pub const AGENT: &str = "agent";
 pub const UPDATE_TODOS: &str = "update_todos";
 pub const TASKS: &str = "tasks";
+pub const MAILBOX: &str = "mailbox";
 pub const CHECK_IN_BROWSER: &str = "check_in_browser";
 pub const INTERACT_IN_BROWSER: &str = "interact_in_browser";
 
@@ -1111,6 +1112,47 @@ pub fn schemas_for(
     schemas.push(json!({
         "type": "function",
         "function": {
+            "name": MAILBOX,
+            "description": "Leave persistent notes for the lead or a named teammate, and read \
+                            replies. Messages are stored per project (a writing subagent's \
+                            worktree shares its requester's mailbox) and stay unread until \
+                            read, so a daemon or a second CLI process can coordinate with this \
+                            one. The parent session is 'lead' unless it passes another owner. \
+                            Send with `to: \"*\"` to broadcast.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["send", "inbox", "read"],
+                        "description": "Send a message, list unread messages, or read one in full."
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "Your mailbox name. Defaults to 'lead'. Use the name \
+                                        the requester gave you."
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient for send; '*' broadcasts."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Message text for send (up to 4000 characters)."
+                    },
+                    "id": {
+                        "type": "integer",
+                        "description": "Message id for read."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    }));
+
+    schemas.push(json!({
+        "type": "function",
+        "function": {
             "name": CHECK_IN_BROWSER,
             "description": "Open a URL in the user's own Integrated Browser and capture a \
                             screenshot back as an image, so you can see what a change actually \
@@ -1355,11 +1397,13 @@ pub fn schemas_for(
 ///
 /// Derived from `schemas()` by filtering rather than written out again, so a
 /// tool's parameters can never drift between the two lists. Read-only by
-/// construction is the entire design: a child that cannot write needs no
-/// approval prompts, which is what makes delegating to it free. `agent`
-/// itself is absent -- children do not spawn children (depth 1 only, until
-/// the plumbing has earned more), and `web_search` too: it sends the query to
-/// a third party, which is the parent's decision to make, not a child's.
+/// construction is the entire design: nothing here can change the workspace,
+/// so a child needs no approval prompts, which is what makes delegating to it
+/// free. `mailbox` writes only coordination state under the config dir.
+/// `agent` itself is absent -- children do not spawn children (depth 1 only,
+/// until the plumbing has earned more), and `web_search` too: it sends the
+/// query to a third party, which is the parent's decision to make, not a
+/// child's.
 pub fn subagent_schemas() -> Vec<Value> {
     let mut schemas = schemas(Mode::Normal, false, false, false);
     schemas.retain(|schema| {
@@ -1370,8 +1414,10 @@ pub fn subagent_schemas() -> Vec<Value> {
 }
 
 /// The tools a subagent is offered -- and, via `subagent_call_allowed`, the
-/// only ones it can execute even if it hallucinates another.
-pub const SUBAGENT_TOOLS: &[&str] = &[RUN_COMMAND, READ_FILE, LIST_DIR, GLOB, GREP_SEARCH];
+/// only ones it can execute even if it hallucinates another. `mailbox` is
+/// here because it is how a teammate speaks to the lead without waiting for
+/// its final report; it writes only coordination state in the config dir.
+pub const SUBAGENT_TOOLS: &[&str] = &[RUN_COMMAND, READ_FILE, LIST_DIR, GLOB, GREP_SEARCH, MAILBOX];
 
 /// Why `call` may not run inside a subagent, or `Ok` if it may.
 ///
@@ -1394,9 +1440,9 @@ pub fn subagent_call_allowed(call: &ToolCall) -> Result<(), String> {
     if !SUBAGENT_TOOLS.contains(&name) {
         return Err(format!(
             "You are a read-only research subagent; '{name}' is not available here. Your \
-             tools are {RUN_COMMAND} (read-only commands), {READ_FILE}, {LIST_DIR}, {GLOB} \
-             and {GREP_SEARCH}. If the task needs anything else, say so in your report and \
-             let the requester decide."
+             tools are {RUN_COMMAND} (read-only commands), {READ_FILE}, {LIST_DIR}, {GLOB}, \
+             {GREP_SEARCH} and {MAILBOX}. If the task needs anything else, say so in your \
+             report and let the requester decide."
         ));
     }
     if name == RUN_COMMAND {
@@ -1418,7 +1464,8 @@ pub fn subagent_call_allowed(call: &ToolCall) -> Result<(), String> {
 /// The tools a *writing* subagent is offered: the read-only set plus the two
 /// file writers. No shell beyond the read-only allowlist: a worktree isolates
 /// source paths, not the process, so a child that can run arbitrary commands
-/// is not isolated at all.
+/// is not isolated at all. `mailbox` stays available: it reaches the lead even
+/// though the child's workspace is a separate worktree.
 pub const SUBAGENT_WRITE_TOOLS: &[&str] = &[
     RUN_COMMAND,
     READ_FILE,
@@ -1427,6 +1474,7 @@ pub const SUBAGENT_WRITE_TOOLS: &[&str] = &[
     GREP_SEARCH,
     WRITE_FILE,
     EDIT_FILE,
+    MAILBOX,
 ];
 
 /// Same construction as [`subagent_schemas`], over the writing allowlist.
@@ -1457,7 +1505,7 @@ pub fn subagent_write_call_allowed(call: &ToolCall) -> Result<(), String> {
         return Err(format!(
             "You are a writing subagent in an isolated worktree; '{name}' is not available \
              here. Your tools are {RUN_COMMAND} (read-only commands), {READ_FILE}, {LIST_DIR}, \
-             {GLOB}, {GREP_SEARCH}, {WRITE_FILE} and {EDIT_FILE}."
+             {GLOB}, {GREP_SEARCH}, {WRITE_FILE}, {EDIT_FILE} and {MAILBOX}."
         ));
     }
     if name == RUN_COMMAND {
@@ -2040,6 +2088,19 @@ struct TaskArgs {
 }
 
 #[derive(Deserialize)]
+struct MailboxArgs {
+    action: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    id: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct CheckInBrowserArgs {
     url: String,
 }
@@ -2545,10 +2606,17 @@ pub enum Action {
     /// `app.rs` for the same reason `Progress` is (nothing to protect, and
     /// asking permission to update a to-do list would make it unusable).
     Todos(Vec<TodoItem>),
-    /// `tasks`: the shared task DAG. Pure in-memory coordination (claims,
-    /// dependencies, completion) -- no file, process or network -- so it is
+    /// `tasks`: the shared task DAG. Coordination state under the config dir
+    /// (claims, dependencies, completion), never the workspace -- so it is
     /// allowed in plan mode and under a read-only sandbox, like `Todos`.
     Tasks,
+    /// `mailbox`: persistent notes between the lead and named teammates.
+    /// Same reasoning as `Tasks`: it writes coordination state outside the
+    /// workspace, changes no file the user owns, and is safe in plan mode.
+    Mailbox {
+        action: String,
+        to: Option<String>,
+    },
     /// `check_in_browser`: asks the client to capture a screenshot of `url`
     /// -- covexcode itself has no browser tab, only an ACP client (boxcode-ide's
     /// chat participant, for one) does, so this is fulfilled entirely on the
@@ -2678,6 +2746,10 @@ impl Action {
                 format!("todos — {done}/{}", items.len())
             }
             Action::Tasks => "tasks".to_string(),
+            Action::Mailbox { action, to } => match to {
+                Some(to) => format!("mailbox — {action} {to}"),
+                None => format!("mailbox — {action}"),
+            },
             Action::CheckInBrowser { url } => format!("check in browser — {url}"),
             Action::InteractInBrowser { url, interaction } => {
                 format!("interact in browser — {url} ({})", interaction.describe())
@@ -2777,7 +2849,8 @@ pub fn is_read_only_action(action: &Action) -> bool {
         | Action::Plan(_)
         | Action::Progress { .. }
         | Action::Todos(_)
-        | Action::Tasks => true,
+        | Action::Tasks
+        | Action::Mailbox { .. } => true,
         Action::Command { command, .. } => is_read_only(command),
         _ => false,
     }
@@ -2805,10 +2878,11 @@ pub fn plan_mode_block(action: &Action) -> Option<String> {
         // rather than by a catch-all arm that would silently allow the next
         // writing tool somebody adds.
         | Action::Progress { .. }
-        // Pure in-memory bookkeeping, like `Progress` -- it writes to no
-        // file and touches nothing plan mode exists to guard.
+        // Coordination state outside the workspace, like `Progress` -- it
+        // writes to the config dir and touches nothing plan mode guards.
         | Action::Todos(_)
-        | Action::Tasks => None,
+        | Action::Tasks
+        | Action::Mailbox { .. } => None,
         Action::Command { command, .. } if is_read_only(command) => None,
         Action::Write { path, .. } => Some(format!(
             "Plan mode is read-only, so nothing was written to {path}. Describe this file and \
@@ -3228,6 +3302,22 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
         // Known regardless of its arguments: a malformed `tasks` call is a
         // caller error the executor reports, not an unknown tool.
         TASKS => Some(Action::Tasks),
+        // Same for `mailbox`: a bad action is reported by the executor, and
+        // the approval layer only needs to know it is coordination state.
+        MAILBOX => {
+            let args: MailboxArgs = serde_json::from_str(&call.function.arguments).ok()?;
+            let action = args.action.trim().to_lowercase();
+            if action.is_empty() {
+                return None;
+            }
+            Some(Action::Mailbox {
+                action,
+                to: args
+                    .to
+                    .map(|to| to.trim().to_string())
+                    .filter(|to| !to.is_empty()),
+            })
+        }
         _ => None,
     }
 }
@@ -3552,6 +3642,7 @@ pub async fn execute_truncated(
                 .to_string(),
         ),
         TASKS => execute_tasks(call, workspace),
+        MAILBOX => execute_mailbox(call, workspace),
         // Never reached: `app::advance_approvals` resolves this itself, for
         // the same reason it resolves `PLAN_PROGRESS` -- it is in-memory
         // bookkeeping on `App`, and the runner has no access to `App`.
@@ -5918,6 +6009,104 @@ fn execute_tasks(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
     }
 }
 
+/// The lead/teammate mailbox. Like `tasks`, this is coordination state in the
+/// config dir, never the workspace; `crate::mailbox` owns the storage and the
+/// worktree-sharing rule. The parent session is `lead` unless it says
+/// otherwise, so a child can address it without being told a name.
+fn execute_mailbox(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
+    let Ok(args) = serde_json::from_str::<MailboxArgs>(&call.function.arguments) else {
+        return outcome(
+            &call.id,
+            "mailbox — unusable arguments".to_string(),
+            format!(
+                "Error: could not read the arguments. Expected {{\"action\": \"inbox\"}} or \
+                 {{\"action\": \"send\", \"to\": \"lead\", \"body\": \"...\"}}, got: {}",
+                clip(&call.function.arguments, 200)
+            ),
+        );
+    };
+    let action = args.action.trim().to_lowercase();
+    let owner = args
+        .owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+        .unwrap_or("lead");
+    match action.as_str() {
+        "send" => {
+            let Some(to) = args
+                .to
+                .as_deref()
+                .map(str::trim)
+                .filter(|to| !to.is_empty())
+            else {
+                return outcome(
+                    &call.id,
+                    "mailbox — send needs a recipient".to_string(),
+                    "Error: `send` needs a `to` name ('*' broadcasts).".to_string(),
+                );
+            };
+            let Some(body) = args.body else {
+                return outcome(
+                    &call.id,
+                    "mailbox — send needs a body".to_string(),
+                    "Error: `send` needs a `body`.".to_string(),
+                );
+            };
+            match crate::mailbox::send(workspace.root(), owner, to, &body) {
+                Ok(message) => outcome(
+                    &call.id,
+                    format!("mailbox — sent to {}", message.to),
+                    format!("Sent message {} to '{}'.", message.id, message.to),
+                ),
+                Err(e) => outcome(
+                    &call.id,
+                    "mailbox — not sent".to_string(),
+                    format!("Error: {e}"),
+                ),
+            }
+        }
+        "inbox" => match crate::mailbox::inbox(workspace.root(), owner) {
+            Ok(messages) => outcome(
+                &call.id,
+                format!("mailbox — {} unread", messages.len()),
+                crate::mailbox::render_inbox(owner, &messages),
+            ),
+            Err(e) => outcome(
+                &call.id,
+                "mailbox — inbox failed".to_string(),
+                format!("Error: {e}"),
+            ),
+        },
+        "read" => {
+            let Some(id) = args.id else {
+                return outcome(
+                    &call.id,
+                    "mailbox — read needs an id".to_string(),
+                    "Error: `read` needs an `id`.".to_string(),
+                );
+            };
+            match crate::mailbox::read(workspace.root(), owner, id) {
+                Ok(message) => outcome(
+                    &call.id,
+                    format!("mailbox — read {}", message.id),
+                    crate::mailbox::render_message(&message),
+                ),
+                Err(e) => outcome(
+                    &call.id,
+                    format!("mailbox — {id} not read"),
+                    format!("Error: {e}"),
+                ),
+            }
+        }
+        other => outcome(
+            &call.id,
+            format!("mailbox — unknown action '{other}'"),
+            "Error: action must be one of send, inbox, read.".to_string(),
+        ),
+    }
+}
+
 pub fn todos_recorded(call: &ToolCall, items: &[TodoItem]) -> ToolOutcome {
     let total = items.len();
     let done = items
@@ -7839,6 +8028,106 @@ mod tests {
         assert!(list.content.contains("[ ] second"), "{}", list.content);
     }
 
+    #[test]
+    fn the_mailbox_tool_is_offered_and_is_coordination_state() {
+        let names: Vec<String> = schemas(Mode::Normal, false, false, false)
+            .iter()
+            .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.contains(&MAILBOX.to_string()), "{names:?}");
+
+        let call = tool_call(MAILBOX, json!({ "action": "inbox", "owner": "worker" }));
+        assert!(matches!(
+            describe_action(&call),
+            Some(Action::Mailbox { .. })
+        ));
+        assert!(is_read_only_action(&Action::Mailbox {
+            action: "send".to_string(),
+            to: Some("lead".to_string()),
+        }));
+        assert!(
+            plan_mode_block(&Action::Mailbox {
+                action: "send".to_string(),
+                to: Some("lead".to_string()),
+            })
+            .is_none(),
+            "plan mode allows coordination state outside the workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_mailbox_tool_sends_lists_and_reads_messages() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
+        let (_dir, ws, cfg) = fixture();
+
+        let sent = execute(
+            &tool_call(
+                MAILBOX,
+                json!({
+                    "action": "send",
+                    "owner": "lead",
+                    "to": "worker",
+                    "body": "run the focused tests"
+                }),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(sent.content.contains("Sent message 1"), "{}", sent.content);
+
+        let inbox = execute(
+            &tool_call(MAILBOX, json!({ "action": "inbox", "owner": "worker" })),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(
+            inbox.content.contains("run the focused tests"),
+            "{}",
+            inbox.content
+        );
+
+        let other = execute(
+            &tool_call(MAILBOX, json!({ "action": "inbox", "owner": "lead" })),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(
+            other.content.contains("No unread messages"),
+            "{}",
+            other.content
+        );
+
+        let read = execute(
+            &tool_call(
+                MAILBOX,
+                json!({ "action": "read", "owner": "worker", "id": 1 }),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(
+            read.content.contains("run the focused tests"),
+            "{}",
+            read.content
+        );
+
+        let empty = execute(
+            &tool_call(MAILBOX, json!({ "action": "inbox", "owner": "worker" })),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(
+            empty.content.contains("No unread messages"),
+            "{}",
+            empty.content
+        );
+    }
+
     #[tokio::test]
     async fn a_read_only_sandbox_refuses_mutations_and_allows_reads() {
         let (dir, ws, mut cfg) = fixture();
@@ -8717,7 +9006,8 @@ mod tests {
                 WEB_SEARCH,
                 DEPLOY_PROJECT,
                 AGENT,
-                TASKS
+                TASKS,
+                MAILBOX
             ]
         );
     }
@@ -8854,6 +9144,13 @@ mod tests {
     fn a_subagent_may_read_but_never_write() {
         assert!(subagent_call_allowed(&tool_call(READ_FILE, json!({ "path": "a.txt" }))).is_ok());
         assert!(subagent_call_allowed(&tool_call(GREP_SEARCH, json!({ "pattern": "x" }))).is_ok());
+        // Mailbox writes coordination state, not workspace files, so a child
+        // can report to the lead even without write tools.
+        assert!(subagent_call_allowed(&tool_call(
+            MAILBOX,
+            json!({ "action": "inbox", "owner": "explore" })
+        ))
+        .is_ok());
         let refusal = subagent_call_allowed(&tool_call(
             WRITE_FILE,
             json!({ "path": "a.txt", "content": "x" }),
@@ -8873,6 +9170,7 @@ mod tests {
             .collect();
         assert!(names.contains(&WRITE_FILE), "{names:?}");
         assert!(names.contains(&EDIT_FILE), "{names:?}");
+        assert!(names.contains(&MAILBOX), "{names:?}");
         assert!(!names.contains(&AGENT), "children do not spawn children");
 
         assert!(subagent_write_call_allowed(&tool_call(

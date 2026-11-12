@@ -2362,13 +2362,23 @@ fn tool_approval_parts(
             )));
             (" Update the checklist? ", "update", "skip")
         }
-        // Never prompted either: the task DAG is in-memory coordination.
+        // Never prompted either: the task DAG is coordination state under the
+        // config dir, not project content.
         Action::Tasks => {
             lines.push(Line::from(Span::styled(
                 "task list update",
                 theme::text(),
             )));
             (" Update the task list? ", "update", "skip")
+        }
+        // Nor is the mailbox: messages are coordination state under the
+        // config dir, not files in the project.
+        Action::Mailbox { action, .. } => {
+            lines.push(Line::from(Span::styled(
+                format!("mailbox {action}"),
+                theme::text(),
+            )));
+            (" Use the mailbox? ", "send", "skip")
         }
     };
 

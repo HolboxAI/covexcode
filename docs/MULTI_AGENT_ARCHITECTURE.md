@@ -1,7 +1,8 @@
 # Multi-agent CLI architecture
 
 Status: Phase 0 complete; Phase 1 complete; Phase 2 complete (JSONL store);
-Phase 3 complete (tool-level sandbox); Phase 4 complete; Phase 5 started  
+Phase 3 complete (tool-level sandbox); Phase 4 complete; Phase 5 in progress
+(task DAG and mailbox)  
 Date: 2026-11-12  
 Scope: `HolboxAI/covexcode` (the Rust CLI and agent runtime)
 
@@ -61,18 +62,24 @@ Landed on `main`:
   replays them in the transcript. The implement → test → review pipeline is
   model-driven through the existing `agent` tool rather than a hardcoded
   orchestrator.
-- **Phase 5 (early)**: a shared task DAG backs the `tasks` tool: tasks carry
-  dependencies and owned paths, `claim` is atomic (a second claimant gets the
-  current owner), `complete` reports newly unblocked dependents, and `list`
-  renders the DAG. The store is a JSON file per canonical workspace under
-  `CONFIG_DIR/tasks/`, mutated only while holding an exclusive lock on a
-  stable sibling `.lock` file (std's `File::lock`) plus an in-process mutex,
-  and replaced by temp-file rename. That makes a claim exclusive across a
-  daemon and several CLI processes, not just across threads: no second
-  process can read the same pending task as claimable. A corrupt or foreign
-  store is reported, never silently reset, because a reset would free claims
-  other agents are working under. This remains coordination state for work in
-  flight, not a second event store. A lead/mailbox team mode and a
+- **Phase 5 (early)**: shared coordination state backs the multi-agent tools.
+  `tasks` is a DAG: tasks carry dependencies and owned paths, `claim` is
+  atomic (a second claimant gets the current owner), `complete` reports newly
+  unblocked dependents, and `list` renders the DAG. `mailbox` adds the message
+  side: `send` to `lead`, a named teammate, or `*` (broadcast); `inbox` lists
+  unread messages; `read` returns one in full and marks it read. Both stores
+  reuse one locked-document implementation (`locked_store`): a JSON file per
+  canonical workspace under `CONFIG_DIR/<kind>/`, mutated only while holding
+  an exclusive lock on a stable sibling `.lock` file (std's `File::lock`)
+  plus an in-process mutex, and replaced by temp-file rename. A claim is
+  therefore exclusive across a daemon and several CLI processes, not just
+  across threads. The mailbox keys on the repository's common git directory,
+  so a writing subagent's worktree shares its requester's mailbox, and
+  subagents are offered `mailbox` alongside their read-only tools. A corrupt
+  or foreign store is reported, never silently reset, because a reset would
+  free claims other agents are working under or drop unread messages. This is
+  coordination state for work in flight, not a second event store. Persistent
+  background teammates (a teammate that outlives one tool call) and a
   verifier/merge agent remain.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
@@ -81,7 +88,7 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's lead/mailbox teammate mode and the
+Remaining, in plan order: Phase 5's persistent teammate runtime and the
 verifier/merge agent. Phase 1 is complete; retiring the
 `COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
 deleting the old loop) is follow-up cleanup, not parity work.
@@ -234,7 +241,9 @@ Build in this order:
    lock a stable `.lock` file, reread, check, mutate, rename.
 3. **Lead and teammates.** A shared task list plus a mailbox, with one lead
    coordinating peers. Make this opt-in and experimental; it has much higher
-   token and coordination cost. Do not start here.
+   token and coordination cost. Do not start here. The shared list and
+   mailbox now exist (Phase 5 status above); the lead is still the parent
+   model driving `agent` calls, not a persistent runtime.
 
 ### 4.1 Isolation and approvals
 

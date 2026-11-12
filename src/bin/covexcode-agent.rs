@@ -43,6 +43,10 @@ mod file_locks;
 mod headless;
 #[path = "../llm.rs"]
 mod llm;
+#[path = "../locked_store.rs"]
+mod locked_store;
+#[path = "../mailbox.rs"]
+mod mailbox;
 #[path = "../mcp.rs"]
 mod mcp;
 #[path = "../message.rs"]

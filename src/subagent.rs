@@ -345,6 +345,17 @@ pub async fn run_subagent(
             system.push_str("\n\n");
             system.push_str(&definition.prompt);
         }
+        // The child knows itself by its agent type. Two concurrent workers of
+        // one type share the name; the lead replies to the `from` field it
+        // sees, so no per-instance registry is needed.
+        system.push_str(&format!(
+            "\n\nMailbox: you are '{agent_type}' on a shared mailbox for this project. \
+             Send the requester a note that should not wait for your report with \
+             mailbox {{action: \"send\", to: \"lead\", owner: \"{agent_type}\", \
+             body: \"...\"}}; check for instructions with \
+             mailbox {{action: \"inbox\", owner: \"{agent_type}\"}}. Use it only for \
+             coordination -- your final message must still stand alone."
+        ));
         history[0] = ChatMessage::text("system", system);
         let schemas = if budget_left {
             if write_mode {
