@@ -1,7 +1,7 @@
 # Multi-agent CLI architecture
 
 Status: Phase 0 complete; Phase 1 complete; Phase 2 complete (JSONL store);
-Phase 3 complete (tool-level sandbox); Phase 4 partial  
+Phase 3 complete (tool-level sandbox); Phase 4 complete  
 Date: 2026-11-12  
 Scope: `HolboxAI/covexcode` (the Rust CLI and agent runtime)
 
@@ -43,19 +43,24 @@ Landed on `main`:
   and subagent is covered, not just the approval loop. Two deliberate limits:
   the shell is persistent but not a PTY, and the sandbox is a tool-level
   policy, not OS-level isolation.
-- **Phase 4 (partial)**: the read-only `explore` subagent is shared by the TUI
+- **Phase 4**: the read-only `explore` subagent is shared by the TUI
   and the ACP engine; sibling `agent` calls run concurrently (default 4); the
   engine forwards each child tool call as live activity on the parent call;
-  `tools.subagent_model` routes children to their own model; project-defined
-  agent types load from `.covexcode/agents/*.toml`, and a definition with
-  `writes = true` runs in an isolated git worktree and returns a patch. An
-  optional `verify` command in the definition runs in the worktree before the
-  patch is offered: a non-zero exit leaves the patch unapplied and reports the
-  output. A clean patch is applied to the requester's checkout serially (one
+  `tools.subagent_model` routes children to their own model. Built-in types
+  are `explore` and `reviewer` (read-only) and `worker`/`tester` (writing in
+  an isolated git worktree); project definitions under
+  `.covexcode/agents/*.toml` extend or override them, and a definition with
+  `writes = true` runs in a worktree and returns a patch. An optional
+  `verify` command in the definition runs in the worktree before the patch is
+  offered: a non-zero exit leaves the patch unapplied and reports the output.
+  A clean patch is applied to the requester's checkout serially (one
   `git apply` at a time); a conflict is reported with the patch and the
-  retained worktree path, and writes nothing. `/agents` renders a live panel
-  over the same trails (task, status, rounds, steps) and `/subagents` replays
-  them in the transcript.
+  retained worktree path, and writes nothing. Step and token budgets and
+  child concurrency are enforced by both loops, `/agents` renders a live
+  panel over the same trails (task, status, rounds, steps), and `/subagents`
+  replays them in the transcript. The implement → test → review pipeline is
+  model-driven through the existing `agent` tool rather than a hardcoded
+  orchestrator.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -63,11 +68,10 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 4's implementation/test/review worktree
-pipelines as first-class presets; Phase 5's task DAG and teams. Phase 1 is
-complete; retiring the `COVEXCODE_CORE_SESSION` flag (making the engine the
-TUI's only path and deleting the old loop) is follow-up cleanup, not parity
-work.
+Remaining, in plan order: Phase 5's task DAG, lead/mailbox teammates and the
+verifier/merge agent. Phase 1 is complete; retiring the
+`COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
+deleting the old loop) is follow-up cleanup, not parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.

@@ -1038,7 +1038,9 @@ pub fn schemas_for(
                     "agent_type": {
                         "type": "string",
                         "description": "What kind of subagent. Defaults to 'explore' \
-                                        (read-only research). A project can define more \
+                                        (read-only research). Built-ins: explore, worker \
+                                        and tester (writing, isolated git worktree) and \
+                                        reviewer (read-only). A project can define more \
                                         under .covexcode/agents; the system prompt lists \
                                         them when it does."
                     }
@@ -1814,20 +1816,29 @@ pub fn system_prompt(
     let custom_agents: Vec<String> = crate::subagent::definitions(workspace.root())
         .into_iter()
         .map(|definition| {
-            if definition.description.is_empty() {
-                definition.name
+            let kind = if definition.writes {
+                "writes in an isolated worktree"
             } else {
-                format!("{} ({})", definition.name, definition.description)
+                "read-only"
+            };
+            if definition.description.is_empty() {
+                format!("{} ({kind})", definition.name)
+            } else {
+                format!("{} ({kind}: {})", definition.name, definition.description)
             }
         })
         .collect();
-    if !custom_agents.is_empty() {
-        prompt.push_str(&format!(
-            "\n\nAdditional read-only subagent types are defined for this project: {}. \
-             Pass one as agent_type to {AGENT}; omit it for the built-in explore agent.",
-            custom_agents.join(", ")
-        ));
-    }
+    let custom = if custom_agents.is_empty() {
+        String::new()
+    } else {
+        format!(" Project-defined types: {}.", custom_agents.join(", "))
+    };
+    prompt.push_str(&format!(
+        "\n\nBuilt-in subagent types: explore (read-only research), worker (implements a \
+         scoped change in an isolated worktree), tester (adds or updates tests in an \
+         isolated worktree), reviewer (read-only review).{custom} Pass one as agent_type to \
+         {AGENT}; omit it for the built-in explore agent."
+    ));
 
     prompt
 }

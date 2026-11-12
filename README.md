@@ -258,9 +258,10 @@ means the destructive tier is now carrying more of that weight on its own.
 
 ### Subagents
 
-`agent` delegates one focused research question to a read-only child and
-returns only its final report. The built-in type is `explore`. A project can
-add named read-only agents under `.covexcode/agents/`, and you can add them
+`agent` delegates one focused task to a child and returns only its final
+report. The built-in types are `explore` (read-only research), `reviewer`
+(read-only review), and `worker`/`tester` (writing in an isolated worktree). A
+project can add named agents under `.covexcode/agents/`, and you can add them
 under `~/.covexcode/agents/`; the project wins on a name collision.
 
 ```toml

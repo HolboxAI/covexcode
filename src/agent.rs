@@ -615,13 +615,14 @@ mod tests {
         let (_dir, ws) = workspace_with_hello();
         let config = config_for("http://127.0.0.1:9"); // never contacted
         let outcome = run_subagent(
-            &agent_call(json!({ "task": "fix the bug", "agent_type": "worker" })),
+            &agent_call(json!({ "task": "fix the bug", "agent_type": "nonsense" })),
             &ws,
             &config,
             None,
         )
         .await;
         assert!(outcome.content.contains("'explore'"), "{}", outcome.content);
+        assert!(outcome.content.contains("worker"), "{}", outcome.content);
         assert!(outcome.content.contains("Error"), "{}", outcome.content);
     }
 
@@ -978,6 +979,24 @@ mod tests {
         assert_eq!(ids, vec!["a1", "a2"], "call order is preserved");
         assert_eq!(outcomes[0].content, "report");
         assert_eq!(outcomes[1].content, "report");
+    }
+
+    /// The built-in types resolve without any `.covexcode/agents` file: the
+    /// reviewer is read-only and reports like explore.
+    #[tokio::test]
+    async fn builtin_agent_types_resolve_without_project_files() {
+        let _home = crate::config::test_support::IsolatedHome::new();
+        let (_dir, ws) = workspace_with_hello();
+        let (endpoint, _bodies) = serve_rounds(vec![text_round("Looked fine.")]).await;
+        let config = config_for(&endpoint);
+        let calls = vec![agent_call(
+            json!({ "task": "review hello.txt", "agent_type": "reviewer" }),
+        )];
+
+        let outcomes = run_calls(&calls, &ws, &config, false, None).await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].content, "Looked fine.");
     }
 
     fn committed_workspace() -> (tempfile::TempDir, Workspace) {
