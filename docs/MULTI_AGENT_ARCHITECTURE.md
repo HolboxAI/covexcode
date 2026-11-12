@@ -62,12 +62,18 @@ Landed on `main`:
   model-driven through the existing `agent` tool rather than a hardcoded
   orchestrator.
 - **Phase 5 (early)**: a shared task DAG backs the `tasks` tool: tasks carry
-  dependencies and owned paths, `claim` is atomic under one mutex (a second
-  claimant gets the current owner), `complete` reports newly unblocked
-  dependents, and `list` renders the DAG. It is in-memory and scoped to one
-  workspace in one process -- coordination state for work in flight, not a
-  second event store. Cross-process claims (a daemon or several CLI
-  processes), a lead/mailbox team mode, and a verifier/merge agent remain.
+  dependencies and owned paths, `claim` is atomic (a second claimant gets the
+  current owner), `complete` reports newly unblocked dependents, and `list`
+  renders the DAG. The store is a JSON file per canonical workspace under
+  `CONFIG_DIR/tasks/`, mutated only while holding an exclusive lock on a
+  stable sibling `.lock` file (std's `File::lock`) plus an in-process mutex,
+  and replaced by temp-file rename. That makes a claim exclusive across a
+  daemon and several CLI processes, not just across threads: no second
+  process can read the same pending task as claimable. A corrupt or foreign
+  store is reported, never silently reset, because a reset would free claims
+  other agents are working under. This remains coordination state for work in
+  flight, not a second event store. A lead/mailbox team mode and a
+  verifier/merge agent remain.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -75,11 +81,10 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's cross-process task claims (a daemon or
-several CLI processes), lead/mailbox teammate mode, and the verifier/merge
-agent. Phase 1 is complete; retiring the `COVEXCODE_CORE_SESSION` flag
-(making the engine the TUI's only path and deleting the old loop) is
-follow-up cleanup, not parity work.
+Remaining, in plan order: Phase 5's lead/mailbox teammate mode and the
+verifier/merge agent. Phase 1 is complete; retiring the
+`COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
+deleting the old loop) is follow-up cleanup, not parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.
@@ -224,7 +229,9 @@ Build in this order:
 2. **Task DAG.** A planner emits tasks with dependencies and owned paths. A
    scheduler claims tasks atomically (`UPDATE ... WHERE status='pending'` in
    SQLite), dispatches them, and unblocks dependents. A verifier/test agent
-   runs after implementation.
+   runs after implementation. The shipped claim path gets the same guarantee
+   from a file-locked JSON store rather than SQLite (Phase 5 status above):
+   lock a stable `.lock` file, reread, check, mutate, rename.
 3. **Lead and teammates.** A shared task list plus a mailbox, with one lead
    coordinating peers. Make this opt-in and experimental; it has much higher
    token and coordination cost. Do not start here.
