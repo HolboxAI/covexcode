@@ -980,11 +980,11 @@ mod tests {
         assert_eq!(outcomes[1].content, "report");
     }
 
-    /// A definition with `writes = true` runs in its own git worktree: the
-    /// child's file lands there, the requester's checkout is untouched, and
-    /// the outcome carries the patch instead of silently applying it.
+    /// A definition with `writes = true` runs in its own git worktree and its
+    /// clean patch is applied to the requester's checkout, with the diff in
+    /// the outcome.
     #[tokio::test]
-    async fn a_writing_subagent_returns_a_patch_without_touching_the_workspace() {
+    async fn a_writing_subagent_applies_a_clean_patch_to_the_workspace() {
         use std::process::Command;
 
         // Worktrees live under the config dir; isolate HOME like every other
@@ -1036,10 +1036,12 @@ mod tests {
         assert_eq!(outcomes.len(), 1);
         let content = &outcomes[0].content;
         assert!(content.contains("--- patch"), "{content}");
+        assert!(content.contains("applied cleanly"), "{content}");
         assert!(content.contains("created.txt"), "{content}");
-        assert!(
-            !dir.path().join("created.txt").exists(),
-            "the requester's checkout is untouched"
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("created.txt")).unwrap(),
+            "hello\n",
+            "the clean patch reached the requester's checkout"
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),

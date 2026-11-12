@@ -15,11 +15,27 @@
 //! Requires a git repository with at least one commit. A project without git
 //! gets a clear refusal instead of a half-working isolation story.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
+
+/// Patches are applied to the requester's checkout one at a time, even when
+/// several writing children finish together: `git apply` is not safe to run
+/// concurrently against one working tree.
+static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// What happened when a patch was offered to the requester's checkout.
+#[derive(Debug, PartialEq)]
+pub enum Applied {
+    /// `--check` passed and the patch was applied.
+    Clean,
+    /// The patch does not apply to the current tree; the reason is git's own
+    /// wording. Nothing was written.
+    Conflict(String),
+}
 
 #[derive(Debug)]
 pub struct Worktree {
@@ -102,6 +118,18 @@ impl Worktree {
         })
     }
 
+    /// Offer this worktree's patch to the requester's checkout. Serialized
+    /// process-wide; `--check` first, so a conflict writes nothing at all.
+    pub fn apply(&self, diff: &str) -> Result<Applied, String> {
+        let _guard = APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(conflict) = git_stdin(&self.repo, &["apply", "--check", "--binary", "-"], diff) {
+            return Ok(Applied::Conflict(conflict));
+        }
+        git_stdin(&self.repo, &["apply", "--binary", "-"], diff)
+            .map_err(|e| format!("git apply failed after --check passed: {e}"))?;
+        Ok(Applied::Clean)
+    }
+
     /// Best effort: a worktree already gone, or a repo that moved, must not
     /// turn a completed child into an error.
     pub fn remove(&self) {
@@ -121,6 +149,37 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
         .args(args)
         .output()
         .map_err(|e| format!("could not run git: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = stderr.trim();
+        return Err(if message.is_empty() {
+            format!("git {} failed", args.join(" "))
+        } else {
+            message.to_string()
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Same, with `input` written to git's stdin (for `git apply -`).
+fn git_stdin(cwd: &Path, args: &[&str], input: &str) -> Result<String, String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|e| format!("could not send the patch to git: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git did not finish: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
@@ -171,6 +230,55 @@ mod tests {
 
         worktree.remove();
         assert!(!worktree.path().exists(), "the worktree is gone");
+    }
+
+    #[test]
+    fn a_clean_patch_applies_to_the_repository() {
+        let (_dir, root) = repo();
+        let base = tempfile::tempdir().expect("base");
+        let worktree = Worktree::create_in(base.path(), &root, "worker").expect("worktree");
+        std::fs::write(worktree.path().join("tracked.txt"), "after\n").expect("edit");
+        std::fs::write(worktree.path().join("new.txt"), "created\n").expect("create");
+        let patch = worktree.patch().expect("patch");
+
+        assert_eq!(worktree.apply(&patch.diff), Ok(Applied::Clean));
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "after\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("new.txt")).unwrap(),
+            "created\n"
+        );
+        worktree.remove();
+    }
+
+    /// A patch that no longer applies writes nothing at all -- `--check` is
+    /// what makes the conflict safe rather than partial.
+    #[test]
+    fn a_conflicting_patch_is_reported_and_writes_nothing() {
+        let (_dir, root) = repo();
+        let base = tempfile::tempdir().expect("base");
+        let worktree = Worktree::create_in(base.path(), &root, "worker").expect("worktree");
+        std::fs::write(worktree.path().join("tracked.txt"), "after\n").expect("edit");
+        std::fs::write(worktree.path().join("new.txt"), "created\n").expect("create");
+        let patch = worktree.patch().expect("patch");
+
+        std::fs::write(root.join("tracked.txt"), "someone else\n").expect("concurrent edit");
+        match worktree.apply(&patch.diff) {
+            Ok(Applied::Conflict(_)) => {}
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "someone else\n",
+            "the conflicting file is untouched"
+        );
+        assert!(
+            !root.join("new.txt").exists(),
+            "the new file from a rejected patch is not created"
+        );
+        worktree.remove();
     }
 
     #[test]

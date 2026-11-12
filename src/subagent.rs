@@ -484,20 +484,45 @@ fn finish_subagent(
             }
             Ok(patch) => {
                 let plural = if patch.files.len() == 1 { "" } else { "s" };
-                if patch.diff.chars().count() > max_patch_bytes {
-                    content.push_str(&format!(
-                        "\n\n--- patch ({} file{plural}) — too large to include ---\n\
-                         The full worktree is at {} and was left in place.",
-                        patch.files.len(),
+                let include = patch.diff.chars().count() <= max_patch_bytes;
+                match worktree.apply(&patch.diff) {
+                    Ok(crate::worktree::Applied::Clean) => {
+                        if include {
+                            content.push_str(&format!(
+                                "\n\n--- patch ({} file{plural}) — applied cleanly ---\n{}",
+                                patch.files.len(),
+                                patch.diff
+                            ));
+                        } else {
+                            content.push_str(&format!(
+                                "\n\n--- patch ({} file{plural}) — applied cleanly ---\n\
+                                 The diff is too large to include here; the files in the \
+                                 requester's checkout are updated.",
+                                patch.files.len()
+                            ));
+                        }
+                        worktree.remove();
+                    }
+                    Ok(crate::worktree::Applied::Conflict(reason)) => {
+                        content.push_str(&format!(
+                            "\n\nThe patch was NOT applied because it conflicts with the current \
+                             files: {reason}\nThe child's worktree is at {} and was left in \
+                             place so its work is not lost.",
+                            worktree.path().display()
+                        ));
+                        if include {
+                            content.push_str(&format!(
+                                "\n\n--- patch ({} file{plural}) ---\n{}",
+                                patch.files.len(),
+                                patch.diff
+                            ));
+                        }
+                    }
+                    Err(error) => content.push_str(&format!(
+                        "\n\nThe patch could not be applied ({error}); the child's worktree is \
+                         at {} and was left in place.",
                         worktree.path().display()
-                    ));
-                } else {
-                    content.push_str(&format!(
-                        "\n\n--- patch ({} file{plural}) ---\n{}",
-                        patch.files.len(),
-                        patch.diff
-                    ));
-                    worktree.remove();
+                    )),
                 }
             }
             Err(error) => content.push_str(&format!(

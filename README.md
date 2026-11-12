@@ -278,9 +278,10 @@ and `tools.subagent_model` can route research to a faster model.
 A definition may set `writes = true`. That child runs in an isolated git
 worktree at HEAD (the repository needs at least one commit), may call
 `write_file`/`edit_file`, and returns its changes as a patch after its report.
-Your own checkout is untouched; applying the patch is your call. A writing
-agent is asked about before it runs, and is refused in plan mode and under
-`[tools] sandbox = "read-only"`.
+A clean patch is applied to your checkout automatically; a conflict is
+reported with the patch and the retained worktree path, and nothing is
+written. A writing agent is asked about before it runs, and is refused in plan
+mode and under `[tools] sandbox = "read-only"`.
 
 ```toml
 # .covexcode/agents/worker.toml
