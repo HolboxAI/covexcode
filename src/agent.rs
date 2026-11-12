@@ -980,16 +980,9 @@ mod tests {
         assert_eq!(outcomes[1].content, "report");
     }
 
-    /// A definition with `writes = true` runs in its own git worktree and its
-    /// clean patch is applied to the requester's checkout, with the diff in
-    /// the outcome.
-    #[tokio::test]
-    async fn a_writing_subagent_applies_a_clean_patch_to_the_workspace() {
+    fn committed_workspace() -> (tempfile::TempDir, Workspace) {
         use std::process::Command;
 
-        // Worktrees live under the config dir; isolate HOME like every other
-        // test that reaches it.
-        let _home = crate::config::test_support::IsolatedHome::new();
         let (dir, ws) = workspace_with_hello();
         let git = |args: &[&str]| {
             let output = Command::new("git")
@@ -1009,14 +1002,43 @@ mod tests {
         git(&["config", "user.name", "Test"]);
         git(&["add", "hello.txt"]);
         git(&["commit", "-qm", "initial"]);
+        (dir, ws)
+    }
 
-        let agents = dir.path().join(".covexcode").join("agents");
+    fn worker_definition(dir: &std::path::Path, verify: Option<&str>) {
+        let agents = dir.join(".covexcode").join("agents");
         std::fs::create_dir_all(&agents).unwrap();
+        let verify = verify
+            .map(|command| format!("\nverify = \"{command}\""))
+            .unwrap_or_default();
         std::fs::write(
             agents.join("worker.toml"),
-            "name = \"worker\"\nwrites = true\nprompt = \"Create the file.\"\n",
+            format!(
+                "name = \"worker\"\nwrites = true\nprompt = \"Create the file.\"{verify}\n"
+            ),
         )
         .unwrap();
+    }
+
+    async fn run_worker(ws: &Workspace, config: &Config) -> ToolOutcome {
+        let calls = vec![agent_call(
+            json!({ "task": "create created.txt", "agent_type": "worker" }),
+        )];
+        let outcomes = run_calls(&calls, ws, config, false, None).await;
+        assert_eq!(outcomes.len(), 1);
+        outcomes.into_iter().next().expect("one outcome")
+    }
+
+    /// A definition with `writes = true` runs in its own git worktree, its
+    /// verify command passes, and the clean patch is applied to the
+    /// requester's checkout with the diff in the outcome.
+    #[tokio::test]
+    async fn a_writing_subagent_applies_a_clean_patch_to_the_workspace() {
+        // Worktrees live under the config dir; isolate HOME like every other
+        // test that reaches it.
+        let _home = crate::config::test_support::IsolatedHome::new();
+        let (dir, ws) = committed_workspace();
+        worker_definition(dir.path(), Some("test -f created.txt"));
 
         let (endpoint, _bodies) = serve_rounds(vec![
             tool_call_round(
@@ -1027,15 +1049,12 @@ mod tests {
         ])
         .await;
         let config = config_for(&endpoint);
-        let calls = vec![agent_call(
-            json!({ "task": "create created.txt", "agent_type": "worker" }),
-        )];
 
-        let outcomes = run_calls(&calls, &ws, &config, false, None).await;
+        let outcome = run_worker(&ws, &config).await;
 
-        assert_eq!(outcomes.len(), 1);
-        let content = &outcomes[0].content;
+        let content = &outcome.content;
         assert!(content.contains("--- patch"), "{content}");
+        assert!(content.contains("verify passed"), "{content}");
         assert!(content.contains("applied cleanly"), "{content}");
         assert!(content.contains("created.txt"), "{content}");
         assert_eq!(
@@ -1046,6 +1065,35 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
             "one\ntwo\nthree\n"
+        );
+    }
+
+    /// A failing verify command stops the patch: the requester's checkout is
+    /// untouched and the failure output is in the result.
+    #[tokio::test]
+    async fn a_failed_verify_keeps_the_patch_unapplied() {
+        let _home = crate::config::test_support::IsolatedHome::new();
+        let (dir, ws) = committed_workspace();
+        worker_definition(dir.path(), Some("echo verify says no >&2; exit 1"));
+
+        let (endpoint, _bodies) = serve_rounds(vec![
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"created.txt","content":"hello\n"}"#,
+            ),
+            text_round("Created created.txt."),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+
+        let outcome = run_worker(&ws, &config).await;
+
+        let content = &outcome.content;
+        assert!(content.contains("verify command failed"), "{content}");
+        assert!(content.contains("verify says no"), "{content}");
+        assert!(
+            !dir.path().join("created.txt").exists(),
+            "a failed verify must not apply the patch"
         );
     }
 }

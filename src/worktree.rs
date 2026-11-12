@@ -130,6 +130,60 @@ impl Worktree {
         Ok(Applied::Clean)
     }
 
+    /// Run a definition's `verify` command inside this worktree, before its
+    /// patch is offered to the requester. `Ok(output)` means exit 0; `Err` is
+    /// the failure text (non-zero exit, timeout, or spawn error). The command
+    /// is project/user-supplied and runs with the user's own permissions --
+    /// the same trust boundary as `.covexcode/agents` prompts themselves.
+    pub async fn verify(&self, command: &str, timeout: std::time::Duration) -> Result<String, String> {
+        let (shell, flag) = if cfg!(windows) {
+            ("cmd", "/C")
+        } else {
+            ("sh", "-c")
+        };
+        let mut cmd = tokio::process::Command::new(shell);
+        cmd.arg(flag)
+            .arg(command)
+            .current_dir(&self.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        match tokio::time::timeout(timeout, cmd.output()).await {
+            Ok(Ok(output)) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let mut text = String::new();
+                if !stdout.trim().is_empty() {
+                    text.push_str(stdout.trim_end());
+                }
+                if !stderr.trim().is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(stderr.trim_end());
+                }
+                if output.status.success() {
+                    Ok(text)
+                } else {
+                    Err(format!(
+                        "exit {}\n{text}",
+                        output
+                            .status
+                            .code()
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "killed".to_string())
+                    ))
+                }
+            }
+            Ok(Err(e)) => Err(format!("could not run the verify command: {e}")),
+            Err(_) => Err(format!(
+                "timed out after {}s",
+                timeout.as_secs()
+            )),
+        }
+    }
+
     /// Best effort: a worktree already gone, or a repo that moved, must not
     /// turn a completed child into an error.
     pub fn remove(&self) {
@@ -278,6 +332,32 @@ mod tests {
             !root.join("new.txt").exists(),
             "the new file from a rejected patch is not created"
         );
+        worktree.remove();
+    }
+
+    /// A verify command runs with the worktree as its cwd, and a failure
+    /// carries git's/command's own output back to the caller.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verify_runs_in_the_worktree_and_reports_failure() {
+        let (_dir, root) = repo();
+        let base = tempfile::tempdir().expect("base");
+        let worktree = Worktree::create_in(base.path(), &root, "worker").expect("worktree");
+        std::fs::write(worktree.path().join("marker.txt"), "x").expect("write");
+
+        assert!(worktree
+            .verify("test -f marker.txt", std::time::Duration::from_secs(5))
+            .await
+            .is_ok());
+        let failure = worktree
+            .verify(
+                "echo nope >&2; exit 3",
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect_err("a non-zero exit is a failure");
+        assert!(failure.contains("nope"), "{failure}");
+        assert!(failure.contains("exit 3"), "{failure}");
         worktree.remove();
     }
 
