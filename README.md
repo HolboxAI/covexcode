@@ -275,6 +275,21 @@ definition changes what the child is asked to do, not what it is able to do.
 Sibling `agent` calls run concurrently (default 4, `tools.subagent_concurrency`),
 and `tools.subagent_model` can route research to a faster model.
 
+A definition may set `writes = true`. That child runs in an isolated git
+worktree at HEAD (the repository needs at least one commit), may call
+`write_file`/`edit_file`, and returns its changes as a patch after its report.
+Your own checkout is untouched; applying the patch is your call. A writing
+agent is asked about before it runs, and is refused in plan mode and under
+`[tools] sandbox = "read-only"`.
+
+```toml
+# .covexcode/agents/worker.toml
+name = "worker"
+description = "implements one scoped change"
+writes = true
+prompt = "Make the requested change..."
+```
+
 There is no setting for the feedback prompt, and no key that turns it on: it is
 not a mode, a posture or a button. It appears only in the moment you have
 already said no, asking whether you want to say why — so the answer to "do I

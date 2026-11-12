@@ -44,6 +44,7 @@ mod transport;
 mod ui;
 mod upgrade;
 mod usage;
+mod worktree;
 mod workspace;
 
 use app::App;

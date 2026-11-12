@@ -47,7 +47,10 @@ Landed on `main`:
   and the ACP engine; sibling `agent` calls run concurrently (default 4); the
   engine forwards each child tool call as live activity on the parent call;
   `tools.subagent_model` routes children to their own model; project-defined
-  read-only agent types load from `.covexcode/agents/*.toml`.
+  agent types load from `.covexcode/agents/*.toml`, and a definition with
+  `writes = true` runs in an isolated git worktree and returns a patch.
+  Applying that patch is still a manual/parent decision; auto-merge and the
+  agent panel are not built.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -55,10 +58,11 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 4's write-capable worktree agents, budgets and
-agent panel; Phase 5's task DAG and teams. Phase 1 is complete; retiring the
-`COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
-deleting the old loop) is follow-up cleanup, not parity work.
+Remaining, in plan order: Phase 4's automatic patch application/merge,
+implementation/test/review worktree pipelines and the agent panel; Phase 5's
+task DAG and teams. Phase 1 is complete; retiring the `COVEXCODE_CORE_SESSION`
+flag (making the engine the TUI's only path and deleting the old loop) is
+follow-up cleanup, not parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.

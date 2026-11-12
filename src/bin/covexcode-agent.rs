@@ -82,6 +82,8 @@ mod transport;
 mod usage;
 #[path = "../workspace.rs"]
 mod workspace;
+#[path = "../worktree.rs"]
+mod worktree;
 
 use std::error::Error;
 

@@ -1355,6 +1355,98 @@ pub fn subagent_call_allowed(call: &ToolCall) -> Result<(), String> {
     Ok(())
 }
 
+/// The tools a *writing* subagent is offered: the read-only set plus the two
+/// file writers. No shell beyond the read-only allowlist: a worktree isolates
+/// source paths, not the process, so a child that can run arbitrary commands
+/// is not isolated at all.
+pub const SUBAGENT_WRITE_TOOLS: &[&str] = &[
+    RUN_COMMAND,
+    READ_FILE,
+    LIST_DIR,
+    GLOB,
+    GREP_SEARCH,
+    WRITE_FILE,
+    EDIT_FILE,
+];
+
+/// Same construction as [`subagent_schemas`], over the writing allowlist.
+pub fn subagent_write_schemas() -> Vec<Value> {
+    let mut schemas = schemas(Mode::Normal, false, false, false);
+    schemas.retain(|schema| {
+        let name = schema["function"]["name"].as_str().unwrap_or_default();
+        SUBAGENT_WRITE_TOOLS.contains(&name)
+    });
+    schemas
+}
+
+/// Why `call` may not run inside a writing subagent. The shape of
+/// [`subagent_call_allowed`], widened by exactly the two file writers. The
+/// child works in its own worktree, so writes there are safe to allow without
+/// an approval prompt; commands stay read-only, for the same reason they are
+/// in a research child.
+pub fn subagent_write_call_allowed(call: &ToolCall) -> Result<(), String> {
+    let name = call.function.name.as_str();
+    if name == AGENT {
+        return Err(
+            "Subagents cannot spawn further subagents. Do the task yourself, or note in \
+             your report what still needs doing."
+                .to_string(),
+        );
+    }
+    if !SUBAGENT_WRITE_TOOLS.contains(&name) {
+        return Err(format!(
+            "You are a writing subagent in an isolated worktree; '{name}' is not available \
+             here. Your tools are {RUN_COMMAND} (read-only commands), {READ_FILE}, {LIST_DIR}, \
+             {GLOB}, {GREP_SEARCH}, {WRITE_FILE} and {EDIT_FILE}."
+        ));
+    }
+    if name == RUN_COMMAND {
+        let command = serde_json::from_str::<RunArgs>(&call.function.arguments)
+            .map(|args| args.command.trim().to_string())
+            .unwrap_or_default();
+        if !command.is_empty() && !is_read_only(&command) {
+            return Err(format!(
+                "Writing subagents may only run commands that cannot change anything, and \
+                 `{}` is not on that list. Use write_file/edit_file for changes.",
+                clip(&command, 60)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What a writing subagent is told. Same deliverable shape as the research
+/// prompt -- the final message is the report -- plus the one difference that
+/// matters: it may change files, but only inside a disposable worktree, and
+/// its changes travel back as a patch.
+pub fn subagent_write_system_prompt(
+    workspace: &Workspace,
+    steps_used: usize,
+    max_steps: usize,
+) -> String {
+    let budget = if max_steps == 0 {
+        String::new()
+    } else if steps_used >= max_steps {
+        " You have used up your tool budget. Write your report now, in text.".to_string()
+    } else {
+        format!(
+            " You have {} tool round{} left; be economical, then answer.",
+            max_steps - steps_used,
+            if max_steps - steps_used == 1 { "" } else { "s" },
+        )
+    };
+    format!(
+        "You are a writing subagent inside covexcode, a terminal coding assistant. A larger \
+         agent delegated one task to you. You are working in an isolated git worktree at {}; \
+         the requester's own checkout is untouched, and your changes are captured as a patch \
+         after your final message and returned to them. There is no user to converse with and \
+         no approval prompt: do the task, read back what you changed to check it, then write \
+         a final report. You may call write_file and edit_file; read-only shell commands are \
+         allowed for inspection, but nothing that builds or mutates. Do not try to commit.{budget}",
+        workspace.root().display()
+    )
+}
+
 /// What a subagent is told about its situation. The counterpart of
 /// `system_prompt` for a child loop: same workspace and OS facts, but the
 /// job description is inverted -- research and report, never change anything,
@@ -8430,6 +8522,34 @@ mod tests {
             refusal.is_err(),
             "writing is exactly what a child cannot do"
         );
+    }
+
+    #[test]
+    fn a_writing_subagent_may_write_but_not_spawn_or_deploy() {
+        let schemas = subagent_write_schemas();
+        let names: Vec<&str> = schemas
+            .iter()
+            .filter_map(|schema| schema["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&WRITE_FILE), "{names:?}");
+        assert!(names.contains(&EDIT_FILE), "{names:?}");
+        assert!(!names.contains(&AGENT), "children do not spawn children");
+
+        assert!(subagent_write_call_allowed(&tool_call(
+            WRITE_FILE,
+            json!({ "path": "a.txt", "content": "x" })
+        ))
+        .is_ok());
+        assert!(subagent_write_call_allowed(&tool_call(
+            EDIT_FILE,
+            json!({ "path": "a.txt", "old_string": "x", "new_string": "y" })
+        ))
+        .is_ok());
+        assert!(
+            subagent_write_call_allowed(&call("cargo build")).is_err(),
+            "a writing child still may not run mutating commands"
+        );
+        assert!(subagent_write_call_allowed(&tool_call(DEPLOY_PROJECT, json!({}))).is_err());
     }
 
     #[test]

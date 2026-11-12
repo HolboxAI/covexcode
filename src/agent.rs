@@ -979,4 +979,71 @@ mod tests {
         assert_eq!(outcomes[0].content, "report");
         assert_eq!(outcomes[1].content, "report");
     }
+
+    /// A definition with `writes = true` runs in its own git worktree: the
+    /// child's file lands there, the requester's checkout is untouched, and
+    /// the outcome carries the patch instead of silently applying it.
+    #[tokio::test]
+    async fn a_writing_subagent_returns_a_patch_without_touching_the_workspace() {
+        use std::process::Command;
+
+        // Worktrees live under the config dir; isolate HOME like every other
+        // test that reaches it.
+        let _home = crate::config::test_support::IsolatedHome::new();
+        let (dir, ws) = workspace_with_hello();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "hello.txt"]);
+        git(&["commit", "-qm", "initial"]);
+
+        let agents = dir.path().join(".covexcode").join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("worker.toml"),
+            "name = \"worker\"\nwrites = true\nprompt = \"Create the file.\"\n",
+        )
+        .unwrap();
+
+        let (endpoint, _bodies) = serve_rounds(vec![
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"created.txt","content":"hello\n"}"#,
+            ),
+            text_round("Created created.txt."),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+        let calls = vec![agent_call(
+            json!({ "task": "create created.txt", "agent_type": "worker" }),
+        )];
+
+        let outcomes = run_calls(&calls, &ws, &config, false, None).await;
+
+        assert_eq!(outcomes.len(), 1);
+        let content = &outcomes[0].content;
+        assert!(content.contains("--- patch"), "{content}");
+        assert!(content.contains("created.txt"), "{content}");
+        assert!(
+            !dir.path().join("created.txt").exists(),
+            "the requester's checkout is untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
+    }
 }

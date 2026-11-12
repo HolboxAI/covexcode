@@ -23,14 +23,16 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use tokio::sync::mpsc;
 
-/// One user-defined read-only agent.
+/// One user-defined agent. Read-only unless `writes = true`, which puts the
+/// child in an isolated git worktree and returns its changes as a patch.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentDefinition {
     pub name: String,
     pub description: String,
-    /// Appended to the built-in child system prompt, so the read-only rules
-    /// stay in force even for a hand-written definition.
+    /// Appended to the built-in child system prompt, so the read-only or
+    /// worktree rules stay in force even for a hand-written definition.
     pub prompt: String,
+    pub writes: bool,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +41,8 @@ struct AgentFile {
     #[serde(default)]
     description: String,
     prompt: String,
+    #[serde(default)]
+    writes: bool,
 }
 
 /// Every usable definition, project over user, sorted by name. Invalid or
@@ -76,6 +80,7 @@ pub fn definitions(workspace_root: &Path) -> Vec<AgentDefinition> {
                     name: name.to_string(),
                     description: file.description.trim().to_string(),
                     prompt: file.prompt.trim().to_string(),
+                    writes: file.writes,
                 },
             );
         }
@@ -159,6 +164,62 @@ pub async fn run_subagent(
         }
     };
 
+    // A writing agent runs in its own checkout. Read-only child behavior is
+    // unchanged: same workspace, same tool list, same prompt.
+    let write_mode = definition
+        .as_ref()
+        .is_some_and(|definition| definition.writes);
+    if write_mode && config.tools.sandbox == crate::config::SandboxPolicy::ReadOnly {
+        return ToolOutcome {
+            call_id: call.id.clone(),
+            display: format!("agent \"{}\" — disabled by sandbox", brief(&task, 40)),
+            content: "Error: writing subagents cannot run while `[tools] sandbox = \
+                      \"read-only\"`. Change the sandbox policy or use a read-only agent."
+                .to_string(),
+            diff: None,
+            rollback: None,
+        };
+    }
+    let worktree = if write_mode {
+        let label = definition
+            .as_ref()
+            .map(|definition| definition.name.as_str())
+            .unwrap_or("worker");
+        match crate::worktree::Worktree::create(workspace.root(), label) {
+            Ok(worktree) => Some(worktree),
+            Err(error) => {
+                return ToolOutcome {
+                    call_id: call.id.clone(),
+                    display: format!("agent \"{}\" — needs git", brief(&task, 40)),
+                    content: format!(
+                        "Error: a writing subagent needs a git repository with at least one \
+                         commit so it can work in an isolated worktree. {error}"
+                    ),
+                    diff: None,
+                    rollback: None,
+                }
+            }
+        }
+    } else {
+        None
+    };
+    let child_workspace = match &worktree {
+        Some(worktree) => match Workspace::new(worktree.path()) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                worktree.remove();
+                return ToolOutcome {
+                    call_id: call.id.clone(),
+                    display: format!("agent \"{}\" — worktree unusable", brief(&task, 40)),
+                    content: format!("Error: the isolated worktree could not be used: {error}"),
+                    diff: None,
+                    rollback: None,
+                };
+            }
+        },
+        None => workspace.clone(),
+    };
+
     let max_steps = config.tools.subagent_max_steps;
     let token_budget = config.tools.subagent_token_budget;
     // The parent's model unless the user pointed research at a faster one.
@@ -186,11 +247,19 @@ pub async fn run_subagent(
             (max_steps == 0 || steps < max_steps) && (token_budget == 0 || spent < token_budget);
         // Telling the prompt the budget is gone (whichever budget it was) is
         // what makes the last round an answer instead of another search.
-        let mut system = tools::subagent_system_prompt(
-            workspace,
-            if budget_left { steps } else { max_steps },
-            max_steps,
-        );
+        let mut system = if write_mode {
+            tools::subagent_write_system_prompt(
+                &child_workspace,
+                if budget_left { steps } else { max_steps },
+                max_steps,
+            )
+        } else {
+            tools::subagent_system_prompt(
+                &child_workspace,
+                if budget_left { steps } else { max_steps },
+                max_steps,
+            )
+        };
         // A definition extends the built-in prompt rather than replacing it:
         // the read-only rules and the budget warning stay in force.
         if let Some(definition) = &definition {
@@ -199,7 +268,11 @@ pub async fn run_subagent(
         }
         history[0] = ChatMessage::text("system", system);
         let schemas = if budget_left {
-            tools::subagent_schemas()
+            if write_mode {
+                tools::subagent_write_schemas()
+            } else {
+                tools::subagent_schemas()
+            }
         } else {
             Vec::new()
         };
@@ -270,16 +343,21 @@ pub async fn run_subagent(
         };
         if let Some(e) = error {
             record_subagent_usage(spent, model);
-            return ToolOutcome {
-                call_id: call.id.clone(),
-                display: format!("agent \"{}\" — failed", brief(&task, 40)),
-                content: format!(
-                    "The subagent failed before finishing: {e}\nDo the research yourself \
-                     with read_file/grep_search/glob, or try the agent again."
+            return finish_subagent(
+                call,
+                format!("agent \"{}\" — failed", brief(&task, 40)),
+                format!(
+                    "The subagent failed before finishing: {e}\n{}",
+                    if write_mode {
+                        "Do the task yourself, or try the agent again."
+                    } else {
+                        "Do the research yourself with read_file/grep_search/glob, or try the \
+                         agent again."
+                    }
                 ),
-                diff: None,
-                rollback: None,
-            };
+                worktree.as_ref(),
+                config.tools.max_output_bytes,
+            );
         }
 
         // Exact counts when the endpoint reports them, the same
@@ -293,23 +371,23 @@ pub async fn run_subagent(
         if calls.is_empty() {
             record_subagent_usage(spent, model);
             let report = text.trim().to_string();
-            return ToolOutcome {
-                call_id: call.id.clone(),
-                display: format!(
+            return finish_subagent(
+                call,
+                format!(
                     "agent \"{}\" — done ({} tool round{}, ~{}k tokens)",
                     brief(&task, 40),
                     steps,
                     if steps == 1 { "" } else { "s" },
                     (spent + 500) / 1000,
                 ),
-                content: if report.is_empty() {
+                if report.is_empty() {
                     "The subagent finished without producing a report.".to_string()
                 } else {
                     report
                 },
-                diff: None,
-                rollback: None,
-            };
+                worktree.as_ref(),
+                config.tools.max_output_bytes,
+            );
         }
 
         history.push(ChatMessage {
@@ -324,14 +402,13 @@ pub async fn run_subagent(
             if overtime > 1 {
                 // Refused once already and it asked again: stop paying.
                 record_subagent_usage(spent, model);
-                return ToolOutcome {
-                    call_id: call.id.clone(),
-                    display: format!("agent \"{}\" — budget spent", brief(&task, 40)),
-                    content: "The subagent spent its whole budget without writing a report."
-                        .to_string(),
-                    diff: None,
-                    rollback: None,
-                };
+                return finish_subagent(
+                    call,
+                    format!("agent \"{}\" — budget spent", brief(&task, 40)),
+                    "The subagent spent its whole budget without writing a report.".to_string(),
+                    worktree.as_ref(),
+                    config.tools.max_output_bytes,
+                );
             }
         }
         steps += 1;
@@ -344,6 +421,8 @@ pub async fn run_subagent(
                     "Your budget is spent. Write your report now, from what you have seen."
                         .to_string(),
                 )
+            } else if write_mode {
+                tools::subagent_write_call_allowed(c)
             } else {
                 tools::subagent_call_allowed(c)
             };
@@ -371,7 +450,7 @@ pub async fn run_subagent(
             // -- an unanswered tool call leaves the transcript invalid and
             // fails the *next* request instead of this one.
             let content = match gate {
-                Ok(()) => tools::execute(c, workspace, &config.tools).await.content,
+                Ok(()) => tools::execute(c, &child_workspace, &config.tools).await.content,
                 Err(reason) => reason,
             };
             history.push(ChatMessage {
@@ -382,6 +461,57 @@ pub async fn run_subagent(
                 images: Vec::new(),
             });
         }
+    }
+}
+
+/// Turn a child's final state into the parent-visible outcome. A writing
+/// child's worktree is captured as a patch here; the worktree is removed only
+/// once the patch is safely in the text. If the patch is too large to include,
+/// or cannot be produced, the worktree is left in place and its path is named
+/// -- losing uncommitted work to cleanup would be worse than a stale dir.
+fn finish_subagent(
+    call: &ToolCall,
+    display: String,
+    mut content: String,
+    worktree: Option<&crate::worktree::Worktree>,
+    max_patch_bytes: usize,
+) -> ToolOutcome {
+    if let Some(worktree) = worktree {
+        match worktree.patch() {
+            Ok(patch) if patch.files.is_empty() => {
+                content.push_str("\n\n(no files were changed)");
+                worktree.remove();
+            }
+            Ok(patch) => {
+                let plural = if patch.files.len() == 1 { "" } else { "s" };
+                if patch.diff.chars().count() > max_patch_bytes {
+                    content.push_str(&format!(
+                        "\n\n--- patch ({} file{plural}) — too large to include ---\n\
+                         The full worktree is at {} and was left in place.",
+                        patch.files.len(),
+                        worktree.path().display()
+                    ));
+                } else {
+                    content.push_str(&format!(
+                        "\n\n--- patch ({} file{plural}) ---\n{}",
+                        patch.files.len(),
+                        patch.diff
+                    ));
+                    worktree.remove();
+                }
+            }
+            Err(error) => content.push_str(&format!(
+                "\n\nThe worktree diff could not be captured ({error}); it was left at {}.",
+                worktree.path().display()
+            )),
+        }
+    }
+    ToolOutcome {
+        call_id: call.id.clone(),
+        display,
+        content,
+        diff: None,
+        rollback: None,
     }
 }
 
@@ -451,6 +581,26 @@ mod tests {
             assert_eq!(names, vec!["reviewer", "tests"]);
             assert_eq!(definitions[0].prompt, "project prompt");
             assert_eq!(definitions[1].prompt, "test prompt");
+        });
+    }
+
+    #[test]
+    fn a_definition_can_declare_itself_a_writer() {
+        crate::config::test_support::with_isolated_home(|| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let project = workspace.path().join(".covexcode").join("agents");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(
+                project.join("worker.toml"),
+                "name = \"worker\"\ndescription = \"edit files\"\nprompt = \"do it\"\n\
+                 writes = true\n",
+            )
+            .unwrap();
+
+            let definitions = definitions(workspace.path());
+            assert_eq!(definitions.len(), 1);
+            assert_eq!(definitions[0].name, "worker");
+            assert!(definitions[0].writes);
         });
     }
 }
