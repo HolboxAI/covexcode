@@ -34,10 +34,11 @@ Landed on `main`:
 - **Phase 3 (partial)**: independent `write_file`/`edit_file` calls to
   distinct files run concurrently in both the TUI batch runner and the
   engine's auto-approved path (same-file repeats still serialize, and
-  non-write calls fence the run). `[tools] persistent_shell` opts into one
-  long-lived `sh` per workspace, leased one command at a time and falling back
-  to the one-shot path when busy; a timeout kills it. Per-file cross-session
-  locks and the sandbox policy are still pending.
+  non-write calls fence the run), and a process-wide per-path write lock
+  extends that ordering across sessions sharing a workspace. `[tools]
+  persistent_shell` opts into one long-lived `sh` per workspace, leased one
+  command at a time and falling back to the one-shot path when busy; a timeout
+  kills it. The sandbox policy is still pending.
 - **Phase 4 (partial)**: the read-only `explore` subagent is shared by the TUI
   and the ACP engine; sibling `agent` calls run concurrently (default 4); the
   engine forwards each child tool call as live activity on the parent call;
@@ -50,9 +51,8 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 3's per-file cross-session locks and sandbox
-policy; Phase 4's write-capable worktree agents, budgets and agent panel;
-Phase 5's task DAG and teams. Phase 1 is complete; retiring the
+Remaining, in plan order: Phase 3's sandbox policy; Phase 4's write-capable
+worktree agents, budgets and agent panel; Phase 5's task DAG and teams. Phase 1 is complete; retiring the
 `COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
 deleting the old loop) is follow-up cleanup, not parity work.
 

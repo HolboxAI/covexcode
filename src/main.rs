@@ -17,6 +17,7 @@ mod diff;
 mod domain;
 mod errors;
 mod feedback;
+mod file_locks;
 mod headless;
 mod history;
 mod llm;

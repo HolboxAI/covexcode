@@ -3261,6 +3261,19 @@ pub async fn execute_truncated(
         }
     }
 
+    // One writer per path, process-wide. The schedulers already order writes
+    // within one batch; this covers two sessions sharing a workspace, which
+    // know nothing about each other. Held only across the execution below,
+    // never across an approval wait or an LLM round.
+    let lock_target = match call.function.name.as_str() {
+        WRITE_FILE | EDIT_FILE => write_target(workspace, call),
+        _ => None,
+    };
+    let _file_guard = match lock_target {
+        Some(path) => Some(crate::file_locks::lock(path).await),
+        None => None,
+    };
+
     match call.function.name.as_str() {
         RUN_COMMAND => execute_run_command(call, workspace, config).await,
         READ_FILE => execute_read_file(call, workspace, config).await,
@@ -7326,6 +7339,31 @@ mod tests {
             "merged streams are labelled as output: {}",
             second.content
         );
+    }
+
+    /// The dispatcher, not only the scheduler, honours the process-wide path
+    /// lock: a write to a path another session holds waits for it.
+    #[tokio::test]
+    async fn a_write_waits_for_the_process_wide_file_lock() {
+        let (_dir, ws, cfg) = fixture();
+        let target = ws.root().join("locked.txt");
+        let guard = crate::file_locks::lock(target.clone()).await;
+
+        let task = tokio::spawn({
+            let ws = ws.clone();
+            let cfg = cfg.clone();
+            async move { execute(&write_call("locked.txt", "content"), &ws, &cfg).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !task.is_finished(),
+            "the write must wait for the same path's lock"
+        );
+
+        drop(guard);
+        let out = task.await.expect("the task joins");
+        assert!(!out.content.is_empty(), "the write completed: {}", out.content);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "content");
     }
 
     /// A non-zero exit is information for the model, not a failure of the tool.

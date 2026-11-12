@@ -37,6 +37,8 @@ mod diff;
 mod domain;
 #[path = "../errors.rs"]
 mod errors;
+#[path = "../file_locks.rs"]
+mod file_locks;
 #[path = "../headless.rs"]
 mod headless;
 #[path = "../llm.rs"]
