@@ -1,8 +1,8 @@
 # Multi-agent CLI architecture
 
 Status: Phase 0 complete; Phase 1 complete; Phase 2 complete (JSONL store);
-Phase 3 started; Phase 4 partial  
-Date: 2026-11-06  
+Phase 3 complete (tool-level sandbox); Phase 4 partial  
+Date: 2026-11-12  
 Scope: `HolboxAI/covexcode` (the Rust CLI and agent runtime)
 
 ## Implementation status
@@ -31,14 +31,18 @@ Landed on `main`:
   every attached connection. Conversations are persisted to
   `~/.covexcode/sessions` at round boundaries, compaction rotates to a fresh
   file, and `session/recordings` / `session/resume` list and reload them.
-- **Phase 3 (partial)**: independent `write_file`/`edit_file` calls to
+- **Phase 3**: independent `write_file`/`edit_file` calls to
   distinct files run concurrently in both the TUI batch runner and the
   engine's auto-approved path (same-file repeats still serialize, and
   non-write calls fence the run), and a process-wide per-path write lock
   extends that ordering across sessions sharing a workspace. `[tools]
   persistent_shell` opts into one long-lived `sh` per workspace, leased one
   command at a time and falling back to the one-shot path when busy; a timeout
-  kills it. The sandbox policy is still pending.
+  kills it. `[tools] sandbox = "read-only"` refuses mutating tools and any
+  command off the read-only allowlist in the tool dispatcher, so every runner
+  and subagent is covered, not just the approval loop. Two deliberate limits:
+  the shell is persistent but not a PTY, and the sandbox is a tool-level
+  policy, not OS-level isolation.
 - **Phase 4 (partial)**: the read-only `explore` subagent is shared by the TUI
   and the ACP engine; sibling `agent` calls run concurrently (default 4); the
   engine forwards each child tool call as live activity on the parent call;
@@ -51,8 +55,8 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 3's sandbox policy; Phase 4's write-capable
-worktree agents, budgets and agent panel; Phase 5's task DAG and teams. Phase 1 is complete; retiring the
+Remaining, in plan order: Phase 4's write-capable worktree agents, budgets and
+agent panel; Phase 5's task DAG and teams. Phase 1 is complete; retiring the
 `COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
 deleting the old loop) is follow-up cleanup, not parity work.
 

@@ -288,7 +288,9 @@ pub fn verdict_for(
                 || matches!(a, crate::tools::Action::Plan(_))
                 || match approval_mode {
                     crate::config::ApprovalMode::Destructive => false,
-                    crate::config::ApprovalMode::Always => !is_read_only_action(a),
+                    crate::config::ApprovalMode::Always => {
+                        !crate::tools::is_read_only_action(a)
+                    }
                 }
         }
         // Nothing coherent to show, so nothing to approve -- see the
@@ -304,23 +306,6 @@ pub fn verdict_for(
     Verdict::Ask(action.expect("needs_approval only true when action is Some"))
 }
 
-/// Whether `action` changes nothing, for `ApprovalMode::Always`. Mirrors
-/// `App::is_read_only_action` exactly -- see that copy's own docs for why
-/// `write_file`/`edit_file` are deliberately absent from this list.
-fn is_read_only_action(action: &crate::tools::Action) -> bool {
-    match action {
-        crate::tools::Action::Read { .. }
-        | crate::tools::Action::List { .. }
-        | crate::tools::Action::Glob { .. }
-        | crate::tools::Action::Grep { .. }
-        | crate::tools::Action::DesignStarter
-        | crate::tools::Action::CheckContrast { .. }
-        | crate::tools::Action::Agent { .. }
-        | crate::tools::Action::CheckInBrowser { .. } => true,
-        crate::tools::Action::Command { command, .. } => crate::tools::is_read_only(command),
-        _ => false,
-    }
-}
 
 #[cfg(test)]
 mod tests {

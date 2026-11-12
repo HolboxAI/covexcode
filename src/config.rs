@@ -393,6 +393,30 @@ pub enum ApprovalMode {
     Always,
 }
 
+/// The outer bound on what tools may change, independent of the approval
+/// mode. Approval decides whether to ask; the sandbox decides whether the
+/// action is possible at all.
+///
+/// `read-only` is a hard floor under every caller -- TUI, ACP, subagents --
+/// enforced in `tools::execute_truncated`, not just in the approval loop. It
+/// is not OS-level isolation: a read-only command allowlist cannot see what a
+/// path inside a command will touch, so non-read-only commands are refused
+/// whole rather than filtered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxPolicy {
+    /// Everything the approval mode allows: writes are confined to the
+    /// workspace (see `tools::resolve_in_workspace`); shell commands run as
+    /// the user, bounded only by the danger blocklist and approvals.
+    #[default]
+    Workspace,
+    /// No mutating tool runs: `write_file`/`edit_file`, deploy/publish/auth/db
+    /// and mailbox resolution are refused, as is any command not on the
+    /// read-only allowlist. Reads, searches, browser checks, subagents and
+    /// plan/todo bookkeeping still work.
+    ReadOnly,
+}
+
 /// Settings for the shell command tool.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolsConfig {
@@ -411,6 +435,10 @@ pub struct ToolsConfig {
     /// setting in either direction and refuses the catastrophic tier outright.
     #[serde(default)]
     pub approval: ApprovalMode,
+    /// The outer bound on what tools may change, independent of `approval`.
+    /// `read-only` refuses mutating tools and non-read-only commands outright.
+    #[serde(default)]
+    pub sandbox: SandboxPolicy,
     /// Retired in favour of `approval`. Read so an old config still loads,
     /// then discarded.
     ///
@@ -658,6 +686,7 @@ impl Default for ToolsConfig {
             enabled: yes(),
             workspace: dot(),
             approval: ApprovalMode::default(),
+            sandbox: SandboxPolicy::default(),
             require_approval: None,
             auto_approve_read_only: None,
             command_timeout_secs: default_command_timeout(),
@@ -1700,6 +1729,21 @@ mod tests {
             toml::from_str("[llm]\nendpoint = \"http://x\"\nmax_tokens = 500000\n").expect("parses");
         config.normalize();
         assert_eq!(config.llm.max_tokens, 393_216);
+    }
+
+    /// The sandbox defaults to the historical workspace-write policy; the
+    /// read-only variant must survive the TOML spelling.
+    #[test]
+    fn tool_sandbox_defaults_to_workspace_and_parses_read_only() {
+        assert_eq!(
+            Config::default().tools.sandbox,
+            super::SandboxPolicy::Workspace
+        );
+        let parsed: Config = toml::from_str(
+            "[llm]\nendpoint = \"http://x\"\n[tools]\nsandbox = \"read-only\"\n",
+        )
+        .expect("parses");
+        assert_eq!(parsed.tools.sandbox, super::SandboxPolicy::ReadOnly);
     }
 
     /// The compact threshold is derived from the model, not a fixed 80k that
