@@ -2574,6 +2574,29 @@ pub fn action_risk(action: &Action, workspace_root: &Path) -> danger::Risk {
 ///
 /// The messages are addressed to the model, not the user. Each says what to do
 /// instead, because a refusal that only says "no" gets retried.
+/// Whether an action changes nothing outside the session's own bookkeeping.
+/// The one classification the read-only sandbox and `ApprovalMode::Always`
+/// share, so a tool added later cannot be silently classified differently by
+/// the two.
+pub fn is_read_only_action(action: &Action) -> bool {
+    match action {
+        Action::Read { .. }
+        | Action::List { .. }
+        | Action::Glob { .. }
+        | Action::Grep { .. }
+        | Action::Search { .. }
+        | Action::DesignStarter
+        | Action::CheckContrast { .. }
+        | Action::Agent { .. }
+        | Action::CheckInBrowser { .. }
+        | Action::Plan(_)
+        | Action::Progress { .. }
+        | Action::Todos(_) => true,
+        Action::Command { command, .. } => is_read_only(command),
+        _ => false,
+    }
+}
+
 pub fn plan_mode_block(action: &Action) -> Option<String> {
     match action {
         Action::Read { .. }
@@ -3258,6 +3281,22 @@ pub async fn execute_truncated(
     if let Some(action) = describe_action(call) {
         if let danger::Risk::Blocked(reason) = action_risk(&action, workspace.root()) {
             return refused_as_dangerous(call, &reason);
+        }
+        // The sandbox is a hard floor under every caller: an approval loop
+        // that failed to ask, or a subagent, cannot get a mutating tool past
+        // this. Checked after the danger blocklist so a catastrophic command
+        // is still named as blocked rather than merely out of policy.
+        if config.sandbox == crate::config::SandboxPolicy::ReadOnly
+            && !is_read_only_action(&action)
+        {
+            return outcome(
+                &call.id,
+                format!("{} — read-only sandbox", action.label()),
+                "Error: this session's sandbox policy is read-only, so this action was not \
+                 executed. Reads, searches and read-only commands still work; set \
+                 `[tools] sandbox = \"workspace\"` to allow it."
+                    .to_string(),
+            );
         }
     }
 
@@ -7364,6 +7403,29 @@ mod tests {
         let out = task.await.expect("the task joins");
         assert!(!out.content.is_empty(), "the write completed: {}", out.content);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "content");
+    }
+
+    /// The read-only sandbox is a dispatcher-level floor: mutations are
+    /// refused before execution and nothing lands on disk, while reads and
+    /// read-only commands keep working.
+    #[tokio::test]
+    async fn a_read_only_sandbox_refuses_mutations_and_allows_reads() {
+        let (dir, ws, mut cfg) = fixture();
+        cfg.sandbox = crate::config::SandboxPolicy::ReadOnly;
+
+        let write = execute(&write_call("new.txt", "x"), &ws, &cfg).await;
+        assert!(write.content.contains("read-only"), "{}", write.content);
+        assert!(!dir.path().join("new.txt").exists());
+
+        let mkdir = execute(&call("mkdir made"), &ws, &cfg).await;
+        assert!(mkdir.content.contains("read-only"), "{}", mkdir.content);
+        assert!(!dir.path().join("made").exists());
+
+        let read = execute(&read_call("hello.txt"), &ws, &cfg).await;
+        assert!(read.content.contains("one"), "{}", read.content);
+
+        let ls = execute(&call(list_command()), &ws, &cfg).await;
+        assert!(ls.content.contains("hello.txt"), "{}", ls.content);
     }
 
     /// A non-zero exit is information for the model, not a failure of the tool.
