@@ -64,6 +64,43 @@ fn lock_path(kind: &str, workspace: &Path) -> PathBuf {
     store_dir(kind).join(format!("{}.lock", key(workspace)))
 }
 
+/// A held exclusive lock. Dropping it unlocks explicitly and then closes the
+/// file, so release does not depend on close-time semantics alone.
+pub struct FileLock {
+    file: std::fs::File,
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// Take an exclusive OS lock on `path`, creating the file and its parent if
+/// needed. The lock is released when the returned guard is dropped.
+///
+/// For mutual exclusion around work that is not a stored JSON document --
+/// notably `git apply` against a checkout, which two covexcode processes in
+/// one repository must not interleave. A process already serializes its own
+/// applies with a local mutex; this covers the other processes. The caller
+/// chooses the path, so the lock can live beside the thing it protects (the
+/// repository's git dir) rather than in the config dir.
+pub fn lock_exclusive(path: &Path) -> Result<FileLock, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    file.lock()
+        .map_err(|e| format!("could not lock {}: {e}", path.display()))?;
+    Ok(FileLock { file })
+}
+
 /// Read, mutate, and (when `write`) replace the document for `workspace`.
 ///
 /// `init` builds an empty document; it receives the workspace label so the
@@ -176,6 +213,36 @@ mod tests {
         assert!(
             second.try_lock().is_ok(),
             "the lock is available after release"
+        );
+    }
+
+    #[test]
+    fn lock_exclusive_creates_parents_and_holds_the_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("nested").join("apply.lock");
+        let held = lock_exclusive(&path).expect("lock");
+        assert!(path.exists(), "the lock file is created");
+
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("second handle");
+        assert!(
+            second.try_lock().is_err(),
+            "another handle must not acquire the same checkout lock"
+        );
+        drop(second);
+        drop(held);
+        let third = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("third handle");
+        let third_lock = third.try_lock();
+        assert!(
+            third_lock.is_ok(),
+            "dropping the guard releases the lock: {third_lock:?}"
         );
     }
 }

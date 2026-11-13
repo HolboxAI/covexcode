@@ -136,7 +136,9 @@ impl Worktree {
     }
 
     /// Offer this worktree's patch to the requester's checkout. Serialized
-    /// process-wide.
+    /// process-wide by `APPLY_LOCK` and across processes by a lock file in the
+    /// repository's git dir: two covexcode processes in one checkout must not
+    /// interleave `git apply` (or the three-way snapshot/restore).
     ///
     /// A plain `--check` is tried first because it is exact and never writes.
     /// If it fails, a three-way merge is attempted against the current
@@ -147,6 +149,7 @@ impl Worktree {
     /// was and the conflict is reported instead.
     pub fn apply(&self, diff: &str) -> Result<Applied, String> {
         let _guard = APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _checkout = self.checkout_lock()?;
         let plain = git_stdin(&self.repo, &["apply", "--check", "--binary", "-"], diff);
         if let Err(conflict) = plain {
             return self.apply_three_way(diff, conflict);
@@ -154,6 +157,20 @@ impl Worktree {
         git_stdin(&self.repo, &["apply", "--binary", "-"], diff)
             .map_err(|e| format!("git apply failed after --check passed: {e}"))?;
         Ok(Applied::Clean)
+    }
+
+    /// The cross-process apply lock for this repository's checkout. It lives
+    /// in the common git dir, so every worktree of the same repository (and
+    /// every process using any of them) locks the same file.
+    fn checkout_lock(&self) -> Result<crate::locked_store::FileLock, String> {
+        let common = git(&self.repo, &["rev-parse", "--git-common-dir"])?;
+        let common = PathBuf::from(common.trim());
+        let common = if common.is_absolute() {
+            common
+        } else {
+            self.repo.join(common)
+        };
+        crate::locked_store::lock_exclusive(&common.join("covexcode-apply.lock"))
     }
 
     fn apply_three_way(&self, diff: &str, plain_conflict: String) -> Result<Applied, String> {
