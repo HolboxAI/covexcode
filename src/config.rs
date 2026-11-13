@@ -439,6 +439,14 @@ pub struct ToolsConfig {
     /// `read-only` refuses mutating tools and non-read-only commands outright.
     #[serde(default)]
     pub sandbox: SandboxPolicy,
+    /// Allow a *writing* agent type to run as a background teammate.
+    ///
+    /// Off by default: a writing teammate applies its patch from a detached
+    /// task, after the turn that approved it has moved on. Read-only
+    /// teammates are always allowed. Turning this on is an explicit choice to
+    /// let verified, isolated patches land unattended.
+    #[serde(default)]
+    pub background_writes: bool,
     /// Retired in favour of `approval`. Read so an old config still loads,
     /// then discarded.
     ///
@@ -687,6 +695,7 @@ impl Default for ToolsConfig {
             workspace: dot(),
             approval: ApprovalMode::default(),
             sandbox: SandboxPolicy::default(),
+            background_writes: false,
             require_approval: None,
             auto_approve_read_only: None,
             command_timeout_secs: default_command_timeout(),
@@ -1726,7 +1735,8 @@ mod tests {
     #[test]
     fn a_reply_cap_above_the_model_ceiling_is_clamped() {
         let mut config: Config =
-            toml::from_str("[llm]\nendpoint = \"http://x\"\nmax_tokens = 500000\n").expect("parses");
+            toml::from_str("[llm]\nendpoint = \"http://x\"\nmax_tokens = 500000\n")
+                .expect("parses");
         config.normalize();
         assert_eq!(config.llm.max_tokens, 393_216);
     }
@@ -1739,11 +1749,21 @@ mod tests {
             Config::default().tools.sandbox,
             super::SandboxPolicy::Workspace
         );
-        let parsed: Config = toml::from_str(
-            "[llm]\nendpoint = \"http://x\"\n[tools]\nsandbox = \"read-only\"\n",
-        )
-        .expect("parses");
+        let parsed: Config =
+            toml::from_str("[llm]\nendpoint = \"http://x\"\n[tools]\nsandbox = \"read-only\"\n")
+                .expect("parses");
         assert_eq!(parsed.tools.sandbox, super::SandboxPolicy::ReadOnly);
+    }
+
+    /// Background writing teammates are an explicit opt-in; the TOML spelling
+    /// and the default both matter.
+    #[test]
+    fn background_writes_is_off_unless_explicitly_enabled() {
+        assert!(!Config::default().tools.background_writes);
+        let parsed: Config =
+            toml::from_str("[llm]\nendpoint = \"http://x\"\n[tools]\nbackground_writes = true\n")
+                .expect("parses");
+        assert!(parsed.tools.background_writes);
     }
 
     /// The compact threshold is derived from the model, not a fixed 80k that
@@ -1764,7 +1784,10 @@ mod tests {
             auto: true,
             auto_at_tokens: 200_000,
         };
-        assert_eq!(explicit.effective_auto_at_tokens(1_048_576, 131_072), 200_000);
+        assert_eq!(
+            explicit.effective_auto_at_tokens(1_048_576, 131_072),
+            200_000
+        );
         assert_eq!(explicit.effective_auto_at_tokens(131_072, 32_768), 78_644);
         assert_eq!(explicit.effective_auto_at_tokens(0, 32_768), 200_000);
     }

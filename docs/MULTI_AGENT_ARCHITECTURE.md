@@ -106,10 +106,12 @@ Landed on `main`:
   keyed by its own id and a `SubagentFinished` event closes the `/agents`
   trail; the legacy TUI loop and ACP clients poll `teammates` instead.
   Cancelling the turn does not cancel a teammate; `stop` is the explicit
-  control. A writing type cannot be backgrounded yet, because its patch would
-  be applied while nobody is watching; resuming running jobs across process
-  restarts remains, as does a merge agent that writes through overlapping
-  hunks.
+  control. A writing type is refused as a teammate by default, because its
+  patch would be applied while nobody is watching; the explicit
+  `[tools] background_writes = true` opts in, and the patch still goes through
+  the worktree, verify, and three-way-merge path. Resuming running jobs across
+  process restarts remains, as does a merge agent that writes through
+  overlapping hunks.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
