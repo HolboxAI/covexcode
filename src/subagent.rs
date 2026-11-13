@@ -647,23 +647,10 @@ async fn finish_subagent(
                         ));
                     }
                 } else {
-                    match worktree.apply(&patch.diff) {
-                        Ok(crate::worktree::Applied::Clean) => {
-                            if include {
-                                content.push_str(&format!(
-                                    "\n\n--- patch ({} file{plural}) — applied cleanly ---\n{}",
-                                    patch.files.len(),
-                                    patch.diff
-                                ));
-                            } else {
-                                content.push_str(&format!(
-                                    "\n\n--- patch ({} file{plural}) — applied cleanly ---\n\
-                                     The diff is too large to include here; the files in the \
-                                     requester's checkout are updated.",
-                                    patch.files.len()
-                                ));
-                            }
-                            worktree.remove();
+                    let how = match worktree.apply(&patch.diff) {
+                        Ok(crate::worktree::Applied::Clean) => Some("applied cleanly"),
+                        Ok(crate::worktree::Applied::Merged) => {
+                            Some("applied after a three-way merge with your current files")
                         }
                         Ok(crate::worktree::Applied::Conflict(reason)) => {
                             content.push_str(&format!(
@@ -679,12 +666,33 @@ async fn finish_subagent(
                                     patch.diff
                                 ));
                             }
+                            None
                         }
-                        Err(error) => content.push_str(&format!(
-                            "\n\nThe patch could not be applied ({error}); the child's worktree \
-                             is at {} and was left in place.",
-                            worktree.path().display()
-                        )),
+                        Err(error) => {
+                            content.push_str(&format!(
+                                "\n\nThe patch could not be applied ({error}); the child's \
+                                 worktree is at {} and was left in place.",
+                                worktree.path().display()
+                            ));
+                            None
+                        }
+                    };
+                    if let Some(how) = how {
+                        if include {
+                            content.push_str(&format!(
+                                "\n\n--- patch ({} file{plural}) — {how} ---\n{}",
+                                patch.files.len(),
+                                patch.diff
+                            ));
+                        } else {
+                            content.push_str(&format!(
+                                "\n\n--- patch ({} file{plural}) — {how} ---\n\
+                                 The diff is too large to include here; the files in the \
+                                 requester's checkout are updated.",
+                                patch.files.len()
+                            ));
+                        }
+                        worktree.remove();
                     }
                 }
             }

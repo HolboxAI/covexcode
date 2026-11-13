@@ -5,12 +5,16 @@
 //! until somebody applies that patch, which is what makes parallel children
 //! safe to run and a bad child safe to discard.
 //!
-//! Deliberately not a merge engine. `patch` stages everything (including new
-//! files) and asks git for a binary-safe diff; applying it is the caller's
-//! decision. A worktree is only removed by [`Worktree::remove`] -- abnormal
-//! exits leave it in place with its path in the report, because losing a
-//! child's uncommitted work to a cleanup step would be worse than a stale
-//! directory.
+//! Deliberately not a general merge engine. `patch` stages everything
+//! (including new files) and asks git for a binary-safe diff; applying it is
+//! the caller's decision. When a patch no longer applies exactly, [`apply`]
+//! makes one three-way attempt against the current checkout, because two
+//! independent agents commonly edit the same file in different places. If
+//! that merge conflicts too, the checkout is restored and the conflict is
+//! reported -- resolution stays a decision, not a guess. A worktree is only
+//! removed by [`Worktree::remove`] -- abnormal exits leave it in place with
+//! its path in the report, because losing a child's uncommitted work to a
+//! cleanup step would be worse than a stale directory.
 //!
 //! Requires a git repository with at least one commit. A project without git
 //! gets a clear refusal instead of a half-working isolation story.
@@ -32,6 +36,9 @@ static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub enum Applied {
     /// `--check` passed and the patch was applied.
     Clean,
+    /// The patch did not apply exactly, but a three-way merge against the
+    /// current checkout resolved it and the merged files were written.
+    Merged,
     /// The patch does not apply to the current tree; the reason is git's own
     /// wording. Nothing was written.
     Conflict(String),
@@ -103,10 +110,20 @@ impl Worktree {
 
     /// Stage everything and return the staged diff, including new files.
     /// Staging is confined to this worktree's own index.
+    ///
+    /// Rename detection is off so the patch names both the old and the new
+    /// path: [`apply`](Self::apply)'s three-way fallback snapshots every path
+    /// a patch touches, and a rename record names only its destination.
     pub fn patch(&self) -> Result<Patch, String> {
         git(&self.path, &["add", "-A"])?;
-        let files = git(&self.path, &["diff", "--cached", "--name-only"])?;
-        let diff = git(&self.path, &["diff", "--cached", "--binary"])?;
+        let files = git(
+            &self.path,
+            &["diff", "--cached", "--no-renames", "--name-only"],
+        )?;
+        let diff = git(
+            &self.path,
+            &["diff", "--cached", "--no-renames", "--binary"],
+        )?;
         Ok(Patch {
             files: files
                 .lines()
@@ -119,15 +136,86 @@ impl Worktree {
     }
 
     /// Offer this worktree's patch to the requester's checkout. Serialized
-    /// process-wide; `--check` first, so a conflict writes nothing at all.
+    /// process-wide.
+    ///
+    /// A plain `--check` is tried first because it is exact and never writes.
+    /// If it fails, a three-way merge is attempted against the current
+    /// working tree, still without touching the real index: a temporary index
+    /// is synced to the checkout, and every path the patch touches is
+    /// snapshotted first. A clean merge reports [`Applied::Merged`]; any
+    /// conflict restores the snapshots, so the checkout is left exactly as it
+    /// was and the conflict is reported instead.
     pub fn apply(&self, diff: &str) -> Result<Applied, String> {
         let _guard = APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        if let Err(conflict) = git_stdin(&self.repo, &["apply", "--check", "--binary", "-"], diff) {
-            return Ok(Applied::Conflict(conflict));
+        let plain = git_stdin(&self.repo, &["apply", "--check", "--binary", "-"], diff);
+        if let Err(conflict) = plain {
+            return self.apply_three_way(diff, conflict);
         }
         git_stdin(&self.repo, &["apply", "--binary", "-"], diff)
             .map_err(|e| format!("git apply failed after --check passed: {e}"))?;
         Ok(Applied::Clean)
+    }
+
+    fn apply_three_way(&self, diff: &str, plain_conflict: String) -> Result<Applied, String> {
+        let paths = match patch_paths(&self.repo, diff) {
+            Ok(paths) => paths,
+            Err(e) => {
+                return Ok(Applied::Conflict(format!(
+                    "{plain_conflict}\nA three-way merge could not be attempted: {e}"
+                )))
+            }
+        };
+        if paths.is_empty() {
+            return Ok(Applied::Conflict(plain_conflict));
+        }
+        // Snapshot before merging: a failed three-way leaves conflict markers
+        // in the files it touched, and those must not survive into the
+        // requester's checkout.
+        let snapshots: Vec<(PathBuf, Option<Vec<u8>>)> = paths
+            .iter()
+            .map(|relative| {
+                let path = self.repo.join(relative);
+                let content = std::fs::read(&path).ok();
+                (path, content)
+            })
+            .collect();
+
+        let Some(index) = TempIndex::new() else {
+            return Ok(Applied::Conflict(format!(
+                "{plain_conflict}\nA three-way merge could not prepare an index."
+            )));
+        };
+        let merge = (|| -> Result<(), String> {
+            // The temporary index must describe the current working tree,
+            // not HEAD: `git apply --3way` refuses to merge against an index
+            // that does not match the files it is about to change.
+            git_with_index(&self.repo, &["read-tree", "HEAD"], None, index.path())?;
+            git_with_index(&self.repo, &["add", "-A"], None, index.path())?;
+            git_with_index(
+                &self.repo,
+                &["apply", "--3way", "--binary", "-"],
+                Some(diff),
+                index.path(),
+            )?;
+            Ok(())
+        })();
+
+        match merge {
+            Ok(()) => Ok(Applied::Merged),
+            Err(merge_error) => {
+                let unrestored = restore(&snapshots);
+                let mut reason = format!(
+                    "{plain_conflict}\nA three-way merge did not resolve it: {merge_error}"
+                );
+                if !unrestored.is_empty() {
+                    reason.push_str(&format!(
+                        "\nSome files could not be restored automatically: {}",
+                        unrestored.join(", ")
+                    ));
+                }
+                Ok(Applied::Conflict(reason))
+            }
+        }
     }
 
     /// Run a definition's `verify` command inside this worktree, before its
@@ -246,6 +334,137 @@ fn git_stdin(cwd: &Path, args: &[&str], input: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Paths a patch touches, from git's NUL-separated numstat records.
+///
+/// `-z` keeps spaces and other bytes literal; without it git C-quotes paths,
+/// and the snapshot/restore step would write to the wrong file.
+fn patch_paths(repo: &Path, diff: &str) -> Result<Vec<PathBuf>, String> {
+    let output = git_stdin(repo, &["apply", "--numstat", "-z", "-"], diff)?;
+    let mut paths = Vec::new();
+    for record in output.split('\0') {
+        if record.is_empty() {
+            continue;
+        }
+        let Some(path) = record.splitn(3, '\t').nth(2) else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        // The patch comes from our own worktree, but the snapshot step joins
+        // these paths onto the checkout: never let one escape it.
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+        {
+            return Err(format!(
+                "refusing a patch path outside the repository: {}",
+                path.display()
+            ));
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// A throwaway index for the three-way attempt. The user's real index is
+/// never touched: syncing it to the working tree would stage their changes.
+struct TempIndex {
+    path: PathBuf,
+}
+
+impl TempIndex {
+    fn new() -> Option<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "covexcode-index-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .ok()?;
+        Some(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// `git`, with one command's index redirected and optional stdin.
+fn git_with_index(
+    cwd: &Path,
+    args: &[&str],
+    input: Option<&str>,
+    index: &Path,
+) -> Result<String, String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if let (Some(stdin), Some(input)) = (child.stdin.as_mut(), input) {
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|e| format!("could not send the patch to git: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git did not finish: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let message = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        return Err(if message.is_empty() {
+            format!("git {} failed", args.join(" "))
+        } else {
+            message.to_string()
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Put the snapshotted files back after a failed merge. Returns the paths
+/// that could not be restored, so the caller can say so rather than claim a
+/// clean rollback.
+fn restore(snapshots: &[(PathBuf, Option<Vec<u8>>)]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (path, content) in snapshots {
+        let result = match content {
+            Some(bytes) => std::fs::write(path, bytes),
+            None => match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            },
+        };
+        if let Err(e) = result {
+            failures.push(format!("{} ({e})", path.display()));
+        }
+    }
+    failures
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +526,43 @@ mod tests {
         worktree.remove();
     }
 
+    /// Two agents editing nearby lines of one file is the common collision:
+    /// the exact patch no longer applies, but a three-way merge against the
+    /// requester's checkout keeps both edits. Adjacent changed lines are a
+    /// genuine overlap and still conflict; one line of separation merges.
+    #[test]
+    fn a_patch_near_a_concurrent_edit_is_three_way_merged() {
+        let (_dir, root) = repo();
+        let base_text = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n";
+        std::fs::write(root.join("tracked.txt"), base_text).expect("rewrite");
+        git(&root, &["add", "tracked.txt"]).expect("add");
+        git(&root, &["commit", "-qm", "lines"]).expect("commit");
+
+        let base = tempfile::tempdir().expect("base");
+        let worktree = Worktree::create_in(base.path(), &root, "worker").expect("worktree");
+        std::fs::write(
+            worktree.path().join("tracked.txt"),
+            base_text.replace("two", "TWO"),
+        )
+        .expect("child edit");
+        let patch = worktree.patch().expect("patch");
+
+        std::fs::write(root.join("tracked.txt"), base_text.replace("four", "FOUR"))
+            .expect("concurrent nearby edit");
+
+        assert_eq!(worktree.apply(&patch.diff), Ok(Applied::Merged));
+        let merged = std::fs::read_to_string(root.join("tracked.txt")).unwrap();
+        assert!(
+            merged.contains("TWO"),
+            "the child's edit survived: {merged}"
+        );
+        assert!(
+            merged.contains("FOUR"),
+            "the requester's edit survived: {merged}"
+        );
+        worktree.remove();
+    }
+
     /// A patch that no longer applies writes nothing at all -- `--check` is
     /// what makes the conflict safe rather than partial.
     #[test]
@@ -331,6 +587,34 @@ mod tests {
         assert!(
             !root.join("new.txt").exists(),
             "the new file from a rejected patch is not created"
+        );
+        worktree.remove();
+    }
+
+    /// The snapshot/restore path reads paths from `--numstat -z`; a space in
+    /// a filename must not turn the restore into a no-op or the wrong file.
+    #[test]
+    fn a_conflict_in_a_path_with_spaces_restores_that_file() {
+        let (_dir, root) = repo();
+        let spaced = root.join("sp ace.txt");
+        std::fs::write(&spaced, "before\n").expect("write");
+        git(&root, &["add", "sp ace.txt"]).expect("add");
+        git(&root, &["commit", "-qm", "spaced"]).expect("commit");
+
+        let base = tempfile::tempdir().expect("base");
+        let worktree = Worktree::create_in(base.path(), &root, "worker").expect("worktree");
+        std::fs::write(worktree.path().join("sp ace.txt"), "after\n").expect("edit");
+        let patch = worktree.patch().expect("patch");
+
+        std::fs::write(&spaced, "someone else\n").expect("concurrent edit");
+        match worktree.apply(&patch.diff) {
+            Ok(Applied::Conflict(_)) => {}
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&spaced).unwrap(),
+            "someone else\n",
+            "the file the merge touched was restored exactly"
         );
         worktree.remove();
     }
