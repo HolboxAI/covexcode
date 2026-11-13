@@ -274,6 +274,17 @@ pub enum SessionEvent {
         label: String,
         rounds: usize,
     },
+    /// The teammate for a parent `agent` call is done. Foreground children
+    /// already close their trail through the parent call's completion; a
+    /// background child has no later tool result, so this is the event that
+    /// tells a `/agents` panel to stop showing it as running.
+    SubagentFinished {
+        session_id: SessionId,
+        turn: TurnId,
+        call_id: String,
+        /// "done" or "failed" -- a short label, not the report itself.
+        summary: String,
+    },
     UsageUpdated {
         session_id: SessionId,
         turn: TurnId,

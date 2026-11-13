@@ -30,7 +30,7 @@
 //! foreground fan-out already respects.
 
 use crate::config::Config;
-use crate::llm::ToolCall;
+use crate::llm::{StreamEvent, ToolCall};
 use crate::locked_store::{self, Document};
 use crate::tools::{self, Action, ToolOutcome};
 use crate::workspace::Workspace;
@@ -99,6 +99,19 @@ pub struct Started {
     pub id: String,
     pub name: String,
 }
+
+/// Progress a teammate reports while it runs. `id` is the teammate id; a
+/// frontend that shows trails keys on the parent `agent` call instead, so the
+/// caller's sink decides how to translate it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Activity {
+    Step { label: String, rounds: usize },
+    Finished { summary: String },
+}
+
+/// Called from the teammate's task for each activity; must be cheap and must
+/// not block on the teammate itself.
+pub type ActivitySink = Arc<dyn Fn(&str, Activity) + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct View {
@@ -234,7 +247,12 @@ fn take_persisted(workspace: &Path, id: &str) -> Result<Option<String>, String> 
 
 /// Start the background teammate a call describes. The call must be an
 /// `agent` call with `background: true`; the engine only routes those here.
-pub fn spawn(call: ToolCall, workspace: Workspace, config: Config) -> Result<Started, String> {
+pub fn spawn(
+    call: ToolCall,
+    workspace: Workspace,
+    config: Config,
+    activity: Option<ActivitySink>,
+) -> Result<Started, String> {
     let Some(Action::Agent {
         task,
         agent_type,
@@ -335,8 +353,40 @@ pub fn spawn(call: ToolCall, workspace: Workspace, config: Config) -> Result<Sta
     // writes the report to the persisted store for a later process.
     let slot = outcome.clone();
     let job_id = id.clone();
+    let event_id = id.clone();
     let handle = tokio::spawn(async move {
-        let outcome = crate::subagent::run_subagent(&call, &workspace, &config, None).await;
+        // Drive the child and its progress channel in this task, the same
+        // shape the foreground fan-out uses. The sink is the only way a
+        // background child reaches the parent's live view.
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(64);
+        let runner =
+            crate::subagent::run_subagent(&call, &workspace, &config, Some((0, &progress_tx)));
+        tokio::pin!(runner);
+        let outcome = loop {
+            tokio::select! {
+                outcome = &mut runner => break outcome,
+                Some((_, event)) = progress_rx.recv() => {
+                    if let Some(activity) = &activity {
+                        if let StreamEvent::AgentActivity { label, rounds, .. } = event {
+                            activity(&event_id, Activity::Step { label, rounds });
+                        }
+                    }
+                }
+            }
+        };
+        if let Some(activity) = &activity {
+            let summary = if outcome.content.starts_with("Error:") {
+                "failed"
+            } else {
+                "done"
+            };
+            activity(
+                &event_id,
+                Activity::Finished {
+                    summary: summary.to_string(),
+                },
+            );
+        }
         let report = outcome.content.clone();
         // Persist before publishing the in-memory outcome: anyone who sees
         // "report ready" can then trust that a later process could collect it
@@ -555,8 +605,13 @@ mod tests {
                 "name = \"worker\"\nwrites = true\nprompt = \"edit\"\n",
             )
             .unwrap();
-            let error = spawn(background_call("worker"), ws, config("http://127.0.0.1:9"))
-                .expect_err("writing is refused");
+            let error = spawn(
+                background_call("worker"),
+                ws,
+                config("http://127.0.0.1:9"),
+                None,
+            )
+            .expect_err("writing is refused");
             assert!(error.contains("read-only"), "{error}");
         });
     }
@@ -572,6 +627,7 @@ mod tests {
             background_call("nonsense"),
             ws,
             config("http://127.0.0.1:9"),
+            None,
         )
         .expect("spawn");
         assert!(list(&root).iter().any(|job| job.id == started.id));
@@ -608,6 +664,7 @@ mod tests {
             background_call("nonsense"),
             ws_a,
             config("http://127.0.0.1:9"),
+            None,
         )
         .expect("spawn");
 
@@ -645,6 +702,7 @@ mod tests {
             background_call("nonsense"),
             ws,
             config("http://127.0.0.1:9"),
+            None,
         )
         .expect("spawn");
 
@@ -696,6 +754,7 @@ mod tests {
             background_call("explore"),
             ws,
             config(&format!("http://{addr}")),
+            None,
         )
         .expect("spawn");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

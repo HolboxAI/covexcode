@@ -291,6 +291,15 @@ impl CoreTui {
                     .unwrap_or_else(|| call_id.clone());
                 app.record_core_subagent_activity(&call_id, task, label, rounds);
             }
+            SessionEvent::SubagentFinished {
+                call_id, summary, ..
+            } => {
+                // A background teammate's parent call completed when it
+                // started, so this is the only signal that closes its trail.
+                // Its synthetic title has no further use.
+                self.titles.remove(&call_id);
+                app.finish_core_subagent(&call_id, summary);
+            }
             SessionEvent::UsageUpdated {
                 used,
                 prompt_tokens,
@@ -845,6 +854,79 @@ mod tests {
             },
         );
         assert_eq!(app.subagent_trails[0].finished.as_deref(), Some("done"));
+    }
+
+    /// A background teammate's parent call completed before the child did;
+    /// its progress is keyed by the teammate id, and the finish event is what
+    /// closes that trail.
+    #[tokio::test]
+    async fn a_background_subagent_finish_closes_its_trail() {
+        let (_dir, mut core, mut app) = core_with_workspace();
+
+        // The parent call: it completes as soon as the teammate starts.
+        core.apply(
+            &mut app,
+            SessionEvent::ToolCallStarted {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                tool_call_id: "call_bg".to_string(),
+                title: r#"background agent: "research""#.to_string(),
+            },
+        );
+        core.apply(
+            &mut app,
+            SessionEvent::ToolCallUpdated {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                tool_call_id: "call_bg".to_string(),
+                status: Some(ToolStatus::Completed),
+                text: Some("Started background teammate 'teammate-1'".to_string()),
+            },
+        );
+        assert!(
+            app.subagent_trails.is_empty(),
+            "the parent call's completion must not create or close a trail"
+        );
+
+        // The teammate streams under its own id.
+        core.apply(
+            &mut app,
+            SessionEvent::ToolCallStarted {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                tool_call_id: "teammate-1".to_string(),
+                title: r#"background agent: "research""#.to_string(),
+            },
+        );
+        core.apply(
+            &mut app,
+            SessionEvent::SubagentActivity {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                call_id: "teammate-1".to_string(),
+                label: "read hello.txt".to_string(),
+                rounds: 1,
+            },
+        );
+        assert!(
+            app.subagent_trails[0].finished.is_none(),
+            "the child is still running after its call returns"
+        );
+
+        core.apply(
+            &mut app,
+            SessionEvent::SubagentFinished {
+                session_id: event_id(),
+                turn: TurnId::new(1),
+                call_id: "teammate-1".to_string(),
+                summary: "done".to_string(),
+            },
+        );
+        assert_eq!(app.subagent_trails[0].finished.as_deref(), Some("done"));
+        assert!(
+            !core.titles.contains_key("teammate-1"),
+            "the synthetic title is cleaned up"
+        );
     }
 
     #[tokio::test]
