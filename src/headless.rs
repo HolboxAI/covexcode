@@ -1805,11 +1805,11 @@ impl HeadlessSession {
                 }
                 Verdict::AutoApprove => {
                     let action = tools::describe_action(call);
-                    // Two auto-approved actions cannot go through
+                    // Auto-approved actions that cannot go through
                     // `tools::execute`: `check_in_browser` needs an ACP
-                    // client's browser tab, and `agent` needs the LLM config
-                    // the tool runner deliberately never sees. Both are
-                    // intercepted here, before dispatch.
+                    // client's browser tab, while `agent` and `teammates
+                    // retry` need the LLM config the tool runner deliberately
+                    // never sees. All are intercepted here, before dispatch.
                     if let Some(Action::CheckInBrowser { url }) = &action {
                         let (text, screenshot_images) =
                             self.check_browser(call, url, updates, browser).await;
@@ -1817,6 +1817,23 @@ impl HeadlessSession {
                         text
                     } else if matches!(&action, Some(Action::Agent { .. })) {
                         self.run_agent_call(call, updates).await
+                    } else if tools::teammates_retry_id(call).is_some() {
+                        let _ = updates
+                            .send(SessionUpdate::ToolCall(AcpToolCall {
+                                tool_call_id: ToolCallId(call.id.clone()),
+                                title: action
+                                    .map(|a| a.label())
+                                    .unwrap_or_else(|| call.function.name.clone()),
+                                kind: ToolKind::Other,
+                                status: ToolCallStatus::InProgress,
+                            }))
+                            .await;
+                        let outcome =
+                            tools::execute_teammates_retry(call, &self.workspace, &self.config);
+                        let _ = updates
+                            .send(SessionUpdate::ToolCallUpdate((&outcome).into()))
+                            .await;
+                        outcome.content
                     } else {
                         let _ = updates
                             .send(SessionUpdate::ToolCall(AcpToolCall {

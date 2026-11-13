@@ -405,6 +405,12 @@ async fn run_calls(
                     .into_iter()
                     .map(|outcome| outcome.expect("every agent call produced an outcome")),
             );
+        } else if tools::teammates_retry_id(&calls[i]).is_some() {
+            // Retrying starts a new child, which needs the live LLM config;
+            // `tools::execute` never sees it, so the runner handles this call
+            // the same way it handles `agent`.
+            outcomes.push(tools::execute_teammates_retry(&calls[i], ws, config));
+            i += 1;
         } else {
             let call = &calls[i];
             outcomes.push(tools::execute_truncated(call, ws, &config.tools, truncated).await);
