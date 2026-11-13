@@ -606,6 +606,18 @@ impl Router {
             .await;
         let mut session =
             HeadlessSession::new(session_id.clone(), workspace, self.config.clone());
+        // Background teammates outlive the prompt that starts them. Their
+        // updates go through a session-lifetime channel instead of the
+        // per-prompt one: keeping a per-prompt sender alive would make the
+        // transport's drain (and so the prompt response) wait for the child.
+        let (background_tx, mut background_rx) = mpsc::unbounded_channel::<SessionUpdate>();
+        let background_hub = channels.updates.clone();
+        tokio::spawn(async move {
+            while let Some(update) = background_rx.recv().await {
+                background_hub.send(update).await;
+            }
+        });
+        session.set_background_updates(background_tx);
         if let Some(messages) = restore {
             session.restore(messages);
         }

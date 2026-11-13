@@ -104,7 +104,10 @@ Landed on `main`:
   to its process and cannot be stopped from another one. In the engine-backed
   session, a teammate's tool calls are forwarded as `SubagentActivity` events
   keyed by its own id and a `SubagentFinished` event closes the `/agents`
-  trail; the legacy TUI loop and ACP clients poll `teammates` instead.
+  trail. The same progress is sent to ACP clients as tool-call updates through
+  a session-lifetime channel, so it arrives after the prompt that started the
+  teammate has returned; keeping it off the per-prompt channel is what stops
+  the transport's drain from waiting for the child.
   Cancelling the turn does not cancel a teammate; `stop` is the explicit
   control. A writing type is refused as a teammate by default, because its
   patch would be applied while nobody is watching; the explicit
@@ -119,12 +122,11 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's teammate progress for the legacy TUI and
-ACP clients, resuming running jobs across process restarts, and a merge agent
-for conflicts beyond a clean three-way merge. Phase 1 is complete; the
-`COVEXCODE_CORE_SESSION` flag is retired, and deleting the old `App` loop
-(which now only serves a no-workspace session) is follow-up cleanup, not
-parity work.
+Remaining, in plan order: Phase 5's resuming running jobs across process
+restarts and a merge agent for conflicts beyond a clean three-way merge.
+Phase 1 is complete; the `COVEXCODE_CORE_SESSION` flag is retired, and deleting
+the old `App` loop (which now only serves a no-workspace session) is follow-up
+cleanup, not parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.
