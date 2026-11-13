@@ -1166,19 +1166,20 @@ pub fn schemas_for(
             "description": "Inspect or stop background teammates started with \
                             agent { \"background\": true }. `list` shows running and finished \
                             jobs with their ids and tasks, `report` returns a finished \
-                            teammate's full report and removes the job, and `stop` aborts a \
-                            running one. Reports are process-local until collected.",
+                            teammate's full report and removes the job, `stop` aborts a \
+                            running one, and `retry` resumes one whose process exited before \
+                            it reported (its original call is stored).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "report", "stop"],
+                        "enum": ["list", "report", "stop", "retry"],
                         "description": "What to do."
                     },
                     "id": {
                         "type": "string",
-                        "description": "Teammate id for report/stop, e.g. 'teammate-1'."
+                        "description": "Teammate id for report/stop/retry, e.g. 'teammate-1'."
                     }
                 },
                 "required": ["action"]
@@ -6263,6 +6264,8 @@ fn execute_teammates(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
                     } else {
                         "finished — report ready".to_string()
                     }
+                } else if job.interrupted {
+                    "interrupted — retry to resume it".to_string()
                 } else {
                     "ended without a report".to_string()
                 };
@@ -6274,8 +6277,9 @@ fn execute_teammates(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
                 ));
             }
             text.push_str(
-                "\n\nCollect with teammates { action: \"report\", id: \"...\" }; \
-                 stop one with { action: \"stop\", id: \"...\" }.",
+                "\n\nCollect with teammates { action: \"report\", id: \"...\" }; stop one with \
+                 { action: \"stop\", id: \"...\" }; resume an interrupted one with \
+                 { action: \"retry\", id: \"...\" }.",
             );
             outcome(&call.id, format!("teammates — {} job(s)", jobs.len()), text)
         }
@@ -6317,10 +6321,83 @@ fn execute_teammates(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
                 ),
             }
         }
+        "retry" => outcome(
+            &call.id,
+            "teammates — retry needs the engine".to_string(),
+            "Error: `retry` starts a new child and needs the live model configuration, so the \
+             session runner handles it. This call reached the tool runner instead."
+                .to_string(),
+        ),
         other => outcome(
             &call.id,
             format!("teammates — unknown action '{other}'"),
-            "Error: action must be one of list, report, stop.".to_string(),
+            "Error: action must be one of list, report, stop, retry.".to_string(),
+        ),
+    }
+}
+
+/// The id from a `teammates { action: "retry" }` call, or `None` when this is
+/// not a retry. Retrying starts a new child and therefore needs the live LLM
+/// config, which the tool runner never sees -- the session runners intercept
+/// this call instead of dispatching it through `execute`.
+pub fn teammates_retry_id(call: &ToolCall) -> Option<Result<String, String>> {
+    if call.function.name != TEAMMATES {
+        return None;
+    }
+    let args: TeammatesArgs = serde_json::from_str(&call.function.arguments).ok()?;
+    if !args.action.trim().eq_ignore_ascii_case("retry") {
+        return None;
+    }
+    Some(
+        match args
+            .id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+        {
+            Some(id) => Ok(id),
+            None => Err("`retry` needs an `id`.".to_string()),
+        },
+    )
+}
+
+/// Run a retry with the session's live config. Shared by the TUI runner and
+/// the ACP engine so the two paths cannot drift.
+pub fn execute_teammates_retry(
+    call: &ToolCall,
+    workspace: &Workspace,
+    config: &crate::config::Config,
+) -> ToolOutcome {
+    let Some(id) = teammates_retry_id(call) else {
+        return outcome(
+            &call.id,
+            "teammates — not a retry".to_string(),
+            "Error: this is not a `teammates retry` call.".to_string(),
+        );
+    };
+    let id = match id {
+        Ok(id) => id,
+        Err(e) => {
+            return outcome(
+                &call.id,
+                "teammates — retry needs an id".to_string(),
+                format!("Error: {e}"),
+            )
+        }
+    };
+    match crate::teammates::retry(workspace.root(), &id, config) {
+        Ok(started) => outcome(
+            &call.id,
+            format!("teammates — retried {id}"),
+            format!(
+                "Resumed the interrupted teammate as '{}' ({}). Collect its new report with \
+                 teammates {{ \"action\": \"report\", \"id\": \"{}\" }}.",
+                started.name, started.id, started.id
+            ),
+        ),
+        Err(e) => outcome(
+            &call.id,
+            format!("teammates — {id} not retried"),
+            format!("Error: {e}"),
         ),
     }
 }
@@ -8391,6 +8468,25 @@ mod tests {
             "{}",
             out.content
         );
+    }
+
+    /// Only a retry call is routed to the engine's own handler; everything
+    /// else about `teammates` stays in the tool runner.
+    #[test]
+    fn a_teammates_retry_is_recognized_and_needs_an_id() {
+        match teammates_retry_id(&tool_call(
+            TEAMMATES,
+            json!({ "action": "retry", "id": "teammate-3" }),
+        )) {
+            Some(Ok(id)) => assert_eq!(id, "teammate-3"),
+            other => panic!("expected a retry id, got {other:?}"),
+        }
+        assert!(matches!(
+            teammates_retry_id(&tool_call(TEAMMATES, json!({ "action": "retry" }))),
+            Some(Err(_))
+        ));
+        assert!(teammates_retry_id(&tool_call(TEAMMATES, json!({ "action": "list" }))).is_none());
+        assert!(teammates_retry_id(&tool_call(READ_FILE, json!({ "path": "x" }))).is_none());
     }
 
     /// The background flag is parsed into the action; the runner is what

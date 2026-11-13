@@ -299,9 +299,10 @@ tool lists running and finished jobs, returns a finished report (`report`), or
 aborts one (`stop`). Jobs run in the session's process. A finished report is
 also persisted per workspace under the config directory, so if that process
 exits before you collect it, a later session can still read it; a *running*
-job does not survive the process. A teammate started by another covexcode
-process can have its finished report collected, but only its own process can
-stop it. In the engine-backed session, `/agents` shows a background teammate's
+job does not survive the process. A job whose process is gone is shown as
+interrupted, and `teammates { action: "retry", id }` re-runs the call stored
+with it in the new process. A teammate started by another covexcode process can
+have its finished report collected, but only its own process can stop it. In the engine-backed session, `/agents` shows a background teammate's
 tool calls live and marks it finished when it reports; ACP clients receive the
 same progress as tool-call updates after the prompt that started the teammate
 has returned, and a client that ignores them can poll

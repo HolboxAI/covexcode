@@ -30,7 +30,7 @@
 //! foreground fan-out already respects.
 
 use crate::config::Config;
-use crate::llm::{StreamEvent, ToolCall};
+use crate::llm::{FunctionCall, StreamEvent, ToolCall};
 use crate::locked_store::{self, Document};
 use crate::tools::{self, Action, ToolOutcome};
 use crate::workspace::Workspace;
@@ -126,6 +126,9 @@ pub struct View {
     /// process than the one listing.
     pub pid: u32,
     pub remote: bool,
+    /// The owning process is gone (or the record is stale): the job cannot
+    /// finish unless it is retried.
+    pub interrupted: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +147,10 @@ struct Record {
     started_at: u64,
     status: RecordStatus,
     report: Option<String>,
+    /// The original `agent` call's arguments JSON, enough to retry the job
+    /// after the process that started it has exited.
+    #[serde(default)]
+    arguments: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -224,19 +231,21 @@ fn take_persisted(workspace: &Path, id: &str) -> Result<Option<String>, String> 
             return Ok(None);
         };
         if record.status != RecordStatus::Finished {
-            if record.pid != std::process::id() {
+            let interrupted = record.pid == std::process::id()
+                || process_alive(record.pid) == Some(false)
+                || now_secs() >= record.started_at + RUNNING_TTL_SECS;
+            if interrupted {
+                // Keep the record: it holds the stored call that `retry`
+                // needs. Removing it here would lose the only way to resume.
                 return Err(format!(
-                    "teammate '{id}' is still running in process {}; it was started by another \
-                     covexcode process and cannot be collected until it finishes",
-                    record.pid
+                    "teammate '{id}' was interrupted before it reported; retry it with \
+                     teammates {{ action: \"retry\", id: \"{id}\" }}"
                 ));
             }
-            // Our own pid but not in the in-memory registry: the record is
-            // stale (for example, the process persisted the job then failed
-            // before starting it). Drop it instead of reporting it forever.
-            store.jobs.remove(id);
             return Err(format!(
-                "teammate '{id}' ended without a report; its record was stale and has been removed"
+                "teammate '{id}' is still running in process {}; it was started by another \
+                 covexcode process and cannot be collected until it finishes",
+                record.pid
             ));
         }
         let report = record.report.clone().unwrap_or_default();
@@ -340,6 +349,7 @@ pub fn spawn(
             started_at: now_secs(),
             status: RecordStatus::Running,
             report: None,
+            arguments: call.function.arguments.clone(),
         },
     )?;
     let outcome = Arc::new(Mutex::new(None));
@@ -406,9 +416,45 @@ pub fn spawn(
     Ok(Started { id, name })
 }
 
+/// Whether `pid` is alive. `None` when the platform's probe is unavailable,
+/// in which case a persisted running record is treated as alive rather than
+/// guessed dead.
+fn process_alive(pid: u32) -> Option<bool> {
+    #[cfg(unix)]
+    {
+        // `kill -0` sends no signal; success means the process exists (or is
+        // owned by someone else and merely un-signalable, which still means
+        // it exists).
+        let status = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        Some(status.success())
+    }
+    #[cfg(windows)]
+    {
+        let filter = format!("PID eq {pid}");
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &filter, "/NH"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        Some(text.contains(&pid.to_string()))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Jobs for `workspace`, in a stable order, newest id last. Includes records
 /// persisted by a previous process: a finished report stays collectable after
-/// the process that produced it exits.
+/// the process that produced it exits, and a running record whose process is
+/// gone is reported as interrupted (and can be retried).
 pub fn list(workspace: &Path) -> Vec<View> {
     let mut views: Vec<View> = {
         let map = jobs().lock().unwrap_or_else(|e| e.into_inner());
@@ -423,6 +469,7 @@ pub fn list(workspace: &Path) -> Vec<View> {
                 elapsed_secs: job.started.elapsed().as_secs(),
                 pid: std::process::id(),
                 remote: false,
+                interrupted: false,
             })
             .collect()
     };
@@ -433,17 +480,20 @@ pub fn list(workspace: &Path) -> Vec<View> {
         if memory.contains(&record.id) {
             continue;
         }
-        let stale = record.status == RecordStatus::Running
-            && (record.pid == std::process::id() || now >= record.started_at + RUNNING_TTL_SECS);
+        let interrupted = record.status == RecordStatus::Running
+            && (record.pid == std::process::id()
+                || process_alive(record.pid) == Some(false)
+                || now >= record.started_at + RUNNING_TTL_SECS);
         views.push(View {
             id: record.id.clone(),
             name: record.name.clone(),
             task: record.task.clone(),
-            running: record.status == RecordStatus::Running && !stale,
+            running: record.status == RecordStatus::Running && !interrupted,
             has_report: record.status == RecordStatus::Finished && record.report.is_some(),
             elapsed_secs: now.saturating_sub(record.started_at),
             pid: record.pid,
             remote: record.pid != std::process::id(),
+            interrupted,
         });
     }
     views.sort_by(|a, b| a.id.cmp(&b.id));
@@ -520,20 +570,85 @@ pub fn stop(workspace: &Path, id: &str) -> Result<String, String> {
         let Some(record) = store.jobs.get(id) else {
             return Err(format!("there is no teammate '{id}'"));
         };
-        if record.status == RecordStatus::Running
-            && record.pid != std::process::id()
-            && now_secs() < record.started_at + RUNNING_TTL_SECS
-        {
-            return Err(format!(
-                "teammate '{id}' is running in process {}; it cannot be stopped from another \
-                 covexcode process",
-                record.pid
-            ));
+        if record.status == RecordStatus::Running {
+            let interrupted = record.pid == std::process::id()
+                || process_alive(record.pid) == Some(false)
+                || now_secs() >= record.started_at + RUNNING_TTL_SECS;
+            if !interrupted {
+                return Err(format!(
+                    "teammate '{id}' is running in process {}; it cannot be stopped from another \
+                     covexcode process",
+                    record.pid
+                ));
+            }
         }
         let name = record.name.clone();
         store.jobs.remove(id);
         Ok(name)
     })
+}
+
+/// Resume an interrupted teammate from the call stored in its persisted
+/// record. Only a running record whose process is gone qualifies; a finished
+/// job has a report to collect, and a live job must be stopped first.
+///
+/// The replacement is a new job with a new id, because the old id's record is
+/// removed in the same locked step that hands back its call.
+pub fn retry(workspace: &Path, id: &str, config: &Config) -> Result<Started, String> {
+    // The in-memory registry only holds jobs owned by this process, and one
+    // of them is alive by definition.
+    if jobs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        .is_some_and(|job| job.workspace == workspace)
+    {
+        return Err(format!(
+            "teammate '{id}' is still running in this process; stop it before retrying"
+        ));
+    }
+
+    let arguments = locked_store::update("teammates", workspace, true, empty_persisted, |store| {
+        let Some(record) = store.jobs.get(id) else {
+            return Err(format!("there is no teammate '{id}'"));
+        };
+        if record.status == RecordStatus::Finished {
+            return Err(format!(
+                "teammate '{id}' already finished; collect its report instead of retrying"
+            ));
+        }
+        let interrupted = record.pid == std::process::id()
+            || process_alive(record.pid) == Some(false)
+            || now_secs() >= record.started_at + RUNNING_TTL_SECS;
+        if !interrupted {
+            return Err(format!(
+                "teammate '{id}' is still running in process {}; it cannot be retried while it \
+                 is alive",
+                record.pid
+            ));
+        }
+        let arguments = record.arguments.clone();
+        if arguments.trim().is_empty() {
+            return Err(format!(
+                "teammate '{id}' has no stored call to retry (it was started by an older \
+                 version)"
+            ));
+        }
+        store.jobs.remove(id);
+        Ok(arguments)
+    })?;
+
+    let call = ToolCall {
+        id: format!("call_retry_{id}"),
+        kind: "function".to_string(),
+        function: FunctionCall {
+            name: tools::AGENT.to_string(),
+            arguments,
+        },
+    };
+    let workspace = Workspace::new(workspace)
+        .map_err(|e| format!("the teammate's workspace could not be reopened: {e}"))?;
+    spawn(call, workspace, config.clone(), None)
 }
 
 /// Forget a job in memory without touching its persisted record, simulating
@@ -598,6 +713,95 @@ mod tests {
         config.llm.model = "test-model".to_string();
         config.llm.api_key = "sk-test".to_string();
         config
+    }
+
+    /// A pid that is certainly gone: spawn a process that exits immediately
+    /// and wait for it.
+    fn dead_pid() -> u32 {
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit"])
+                .spawn()
+                .expect("spawn a short-lived process")
+        } else {
+            std::process::Command::new("true")
+                .spawn()
+                .expect("spawn a short-lived process")
+        };
+        let pid = child.id();
+        child.wait().expect("the process exits");
+        pid
+    }
+
+    #[test]
+    fn process_liveness_is_probed() {
+        assert_eq!(process_alive(std::process::id()), Some(true));
+        assert_eq!(process_alive(dead_pid()), Some(false));
+    }
+
+    fn seed_interrupted(root: &Path, id: &str, task: &str) {
+        persist_spawn(
+            root,
+            Record {
+                id: id.to_string(),
+                name: "nonsense-900".to_string(),
+                task: task.to_string(),
+                pid: dead_pid(),
+                started_at: now_secs(),
+                status: RecordStatus::Running,
+                report: None,
+                arguments: json!({
+                    "task": task,
+                    "agent_type": "nonsense",
+                    "background": true
+                })
+                .to_string(),
+            },
+        )
+        .expect("seed the interrupted record");
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_teammate_can_be_retried() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
+        let (_dir, ws) = workspace();
+        let root = ws.root().to_path_buf();
+        seed_interrupted(&root, "teammate-900", "resume me");
+
+        let view = list(&root)
+            .into_iter()
+            .find(|job| job.id == "teammate-900")
+            .expect("the record is visible");
+        assert!(view.interrupted, "{view:?}");
+        assert!(!view.running && !view.has_report, "{view:?}");
+
+        let error = report(&root, "teammate-900").expect_err("interrupted has no report");
+        assert!(error.contains("retry"), "{error}");
+
+        let started = retry(&root, "teammate-900", &config("http://127.0.0.1:9"))
+            .expect("retry starts a new job");
+        assert_ne!(started.id, "teammate-900");
+        assert!(
+            !list(&root).iter().any(|job| job.id == "teammate-900"),
+            "the old record is consumed by the retry"
+        );
+
+        // The replacement runs the stored call (an unknown type, so it ends
+        // without a network request) and its report is collectable.
+        let mut collected = None;
+        for _ in 0..100 {
+            match report(&root, &started.id) {
+                Ok(text) => {
+                    collected = Some(text);
+                    break;
+                }
+                Err(e) if e.contains("still running") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(e) => panic!("unexpected report error: {e}"),
+            }
+        }
+        assert!(collected.expect("a report").contains("Error"));
     }
 
     #[test]

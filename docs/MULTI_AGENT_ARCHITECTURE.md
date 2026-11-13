@@ -112,9 +112,11 @@ Landed on `main`:
   control. A writing type is refused as a teammate by default, because its
   patch would be applied while nobody is watching; the explicit
   `[tools] background_writes = true` opts in, and the patch still goes through
-  the worktree, verify, and three-way-merge path. Resuming running jobs across
-  process restarts remains, as does a merge agent that writes through
-  overlapping hunks.
+  the worktree, verify, and three-way-merge path. A running job does not
+  survive its process, but its record does: `teammates` shows it as
+  interrupted (pid liveness, or the 24-hour stale cutoff) and `retry` re-runs
+  the stored call in the new process as a fresh job. A merge agent that writes
+  through overlapping hunks remains.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -122,11 +124,10 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's resuming running jobs across process
-restarts and a merge agent for conflicts beyond a clean three-way merge.
-Phase 1 is complete; the `COVEXCODE_CORE_SESSION` flag is retired, and deleting
-the old `App` loop (which now only serves a no-workspace session) is follow-up
-cleanup, not parity work.
+Remaining, in plan order: Phase 5's merge agent for conflicts beyond a clean
+three-way merge. Phase 1 is complete; the `COVEXCODE_CORE_SESSION` flag is
+retired, and deleting the old `App` loop (which now only serves a no-workspace
+session) is follow-up cleanup, not parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.
