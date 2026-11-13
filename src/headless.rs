@@ -1846,10 +1846,54 @@ impl HeadlessSession {
                 foreground.push((index, call.clone()));
                 continue;
             }
+            // A background child has no tool result to close its trail with,
+            // so forward its progress and completion to the session's event
+            // hub. Events are keyed by the teammate id, not the parent call:
+            // the parent call completed when the child started, and keying it
+            // that way would close the trail immediately.
+            let title = tools::describe_action(call)
+                .map(|action| action.label())
+                .unwrap_or_else(|| call.function.name.clone());
+            let events = updates.events.clone();
+            let session_id = updates.session_id.clone();
+            let turn = updates.turn;
+            let announced = std::sync::Once::new();
+            let activity: crate::teammates::ActivitySink =
+                std::sync::Arc::new(move |teammate_id, event| {
+                    announced.call_once(|| {
+                        events.send(SessionEvent::ToolCallStarted {
+                            session_id: session_id.clone(),
+                            turn,
+                            tool_call_id: teammate_id.to_string(),
+                            title: title.clone(),
+                        });
+                    });
+                    let event = match event {
+                        crate::teammates::Activity::Step { label, rounds } => {
+                            SessionEvent::SubagentActivity {
+                                session_id: session_id.clone(),
+                                turn,
+                                call_id: teammate_id.to_string(),
+                                label,
+                                rounds,
+                            }
+                        }
+                        crate::teammates::Activity::Finished { summary } => {
+                            SessionEvent::SubagentFinished {
+                                session_id: session_id.clone(),
+                                turn,
+                                call_id: teammate_id.to_string(),
+                                summary,
+                            }
+                        }
+                    };
+                    events.send(event);
+                });
             let content = match crate::teammates::spawn(
                 call.clone(),
                 self.workspace.clone(),
                 self.config.clone(),
+                Some(activity),
             ) {
                 Ok(started) => format!(
                     "Started background teammate '{}' ({}). Continue with other work; collect \
@@ -3339,7 +3383,11 @@ mod tests {
         // The teammate registry persists records under the config dir.
         let _home = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws) = workspace();
-        let endpoint = serve_rounds(vec![text_round("Background says hi.")]).await;
+        let endpoint = serve_rounds(vec![
+            tool_call_round(tools::READ_FILE, r#"{"path":"hello.txt"}"#),
+            text_round("Background says hi."),
+        ])
+        .await;
         let config = config_for(&endpoint);
         let session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
         let call = ToolCall {
@@ -3351,9 +3399,11 @@ mod tests {
             },
         };
         let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let hub = EventHub::default();
+        let mut events = hub.subscribe();
         let updates = UpdateSink {
             updates: &updates_tx,
-            events: EventHub::default(),
+            events: hub,
             session_id: session.session_id.clone(),
             turn: TurnId::new(1),
         };
@@ -3395,6 +3445,28 @@ mod tests {
             }
         }
         assert_eq!(collected.expect("a report"), "Background says hi.");
+
+        // The teammate's progress reached the session event hub under its own
+        // id, and its finish closed the trail a /agents panel renders.
+        let mut saw_step = false;
+        let mut saw_finished = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                SessionEvent::SubagentActivity { call_id, label, .. }
+                    if call_id.starts_with("teammate-") =>
+                {
+                    saw_step |= label.contains("read hello.txt");
+                }
+                SessionEvent::SubagentFinished {
+                    call_id, summary, ..
+                } if call_id.starts_with("teammate-") => {
+                    saw_finished |= summary == "done";
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_step, "the child's tool call was streamed");
+        assert!(saw_finished, "the teammate's finish was streamed");
     }
 
     /// A long child turn must not look frozen: the engine forwards each child

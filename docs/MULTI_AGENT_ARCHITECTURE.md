@@ -101,12 +101,15 @@ Landed on `main`:
   multiply the token bill. A finished report is persisted per workspace under
   `CONFIG_DIR/teammates/` through the shared locked store, so a later process
   can collect it after the one that ran the child exits; a running job belongs
-  to its process and cannot be stopped from another one. Cancelling the turn
-  does not cancel a teammate; `stop` is the explicit control. A writing type
-  cannot be backgrounded yet, because its patch would be applied while nobody
-  is watching; forwarding teammate progress to `/agents` and resuming running
-  jobs across process restarts also remain, as does a merge agent that writes
-  through overlapping hunks.
+  to its process and cannot be stopped from another one. In the engine-backed
+  session, a teammate's tool calls are forwarded as `SubagentActivity` events
+  keyed by its own id and a `SubagentFinished` event closes the `/agents`
+  trail; the legacy TUI loop and ACP clients poll `teammates` instead.
+  Cancelling the turn does not cancel a teammate; `stop` is the explicit
+  control. A writing type cannot be backgrounded yet, because its patch would
+  be applied while nobody is watching; resuming running jobs across process
+  restarts remains, as does a merge agent that writes through overlapping
+  hunks.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -114,9 +117,9 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's background-teammate event streaming,
-resuming running jobs across process restarts, and a merge agent for conflicts
-beyond a clean three-way merge. Phase 1 is complete; retiring the
+Remaining, in plan order: Phase 5's teammate progress for the legacy TUI and
+ACP clients, resuming running jobs across process restarts, and a merge agent
+for conflicts beyond a clean three-way merge. Phase 1 is complete; retiring the
 `COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
 deleting the old loop) is follow-up cleanup, not parity work.
 

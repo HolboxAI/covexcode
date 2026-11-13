@@ -301,9 +301,12 @@ also persisted per workspace under the config directory, so if that process
 exits before you collect it, a later session can still read it; a *running*
 job does not survive the process. A teammate started by another covexcode
 process can have its finished report collected, but only its own process can
-stop it. Cancelling a turn does not stop a teammate — use `stop`. Writing
-agent types cannot be backgrounded yet — their patch would land while you are
-not watching.
+stop it. In the engine-backed session used by the core TUI, `/agents` shows a
+background teammate's tool calls live and marks it finished when it reports;
+clients that do not consume that event stream poll `teammates { action: "list" }`.
+Cancelling a turn does not stop a teammate — use `stop`. Writing agent types
+cannot be backgrounded yet — their patch would land while you are not
+watching.
 
 A definition may set `writes = true`. That child runs in an isolated git
 worktree at HEAD (the repository needs at least one commit), may call

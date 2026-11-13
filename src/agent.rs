@@ -247,7 +247,7 @@ const MAX_CONCURRENT_READS: usize = 16;
 /// already running as a teammate, so this reports its job id instead of a
 /// report the parent would have to wait for.
 fn start_teammate(call: &ToolCall, ws: &Workspace, config: &Config) -> ToolOutcome {
-    match crate::teammates::spawn(call.clone(), ws.clone(), config.clone()) {
+    match crate::teammates::spawn(call.clone(), ws.clone(), config.clone(), None) {
         Ok(started) => ToolOutcome {
             call_id: call.id.clone(),
             display: format!("agent — started {}", started.id),
