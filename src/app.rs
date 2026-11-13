@@ -171,6 +171,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/subagents", "what each subagent did, step by step"),
     ("/agents", "live panel of running and finished subagents"),
     (
+        "/teammates",
+        "background teammate jobs and whether reports are ready",
+    ),
+    (
         "/hosted",
         "projects this machine is hosting, and whether they are live",
     ),
@@ -1153,6 +1157,7 @@ impl App {
             "/quota" => self.show_quota(),
             "/subagents" => self.show_subagents(),
             "/agents" => self.overlay = Some(Overlay::AgentPanel { selected: 0 }),
+            "/teammates" => self.show_teammates(),
             "/hosted" => self.start_hosted(),
             cmd if cmd.starts_with("/rollback") => self.start_rollback_command(cmd),
             cmd if cmd.starts_with("/quota") => self.handle_quota_command(cmd),
@@ -4316,6 +4321,56 @@ impl App {
                 out.push_str(&format!("\n   · {step}"));
             }
         }
+        self.messages.push(Message::new(Role::System, out));
+        self.follow_tail = true;
+    }
+
+    /// `/teammates`: background jobs for this workspace, read straight from
+    /// the same registry the model's `teammates` tool uses. A local readout --
+    /// the model is not asked -- so a person can check status without spending
+    /// a turn. Report bodies stay behind `teammates { action: "report" }` so
+    /// they enter the conversation only when the model asks for them.
+    fn show_teammates(&mut self) {
+        if self.workspace_root.is_empty() {
+            self.messages.push(Message::new(
+                Role::System,
+                "No workspace is open, so there are no teammate jobs.",
+            ));
+            self.follow_tail = true;
+            return;
+        }
+        let jobs = crate::teammates::list(Path::new(&self.workspace_root));
+        if jobs.is_empty() {
+            self.messages.push(Message::new(
+                Role::System,
+                "No background teammates. Start one with agent { \"background\": true }.",
+            ));
+            self.follow_tail = true;
+            return;
+        }
+        let mut out = format!("Background teammates in {}:", self.workspace_root);
+        for job in &jobs {
+            let state = if job.running {
+                if job.remote {
+                    format!("running {}s (process {})", job.elapsed_secs, job.pid)
+                } else {
+                    format!("running {}s", job.elapsed_secs)
+                }
+            } else if job.has_report {
+                "finished — report ready".to_string()
+            } else if job.interrupted {
+                "interrupted — ask the model to retry it".to_string()
+            } else {
+                "ended without a report".to_string()
+            };
+            out.push_str(&format!(
+                "\n\n[{}] {} — {state}\n   {}",
+                job.id, job.name, job.task
+            ));
+        }
+        out.push_str(
+            "\n\nAsk the model to call teammates { action: \"report\", id: \"...\" } to read one.",
+        );
         self.messages.push(Message::new(Role::System, out));
         self.follow_tail = true;
     }
@@ -10900,6 +10955,31 @@ mod tests {
         a.show_subagents();
         let last = a.messages.last().expect("a message");
         assert!(last.content.contains("No subagents"), "{}", last.content);
+    }
+
+    #[test]
+    fn the_teammates_command_says_so_when_no_workspace_is_open() {
+        let mut a = app();
+        a.workspace_root = String::new();
+        a.show_teammates();
+        let last = a.messages.last().expect("a message");
+        assert!(last.content.contains("No workspace"), "{}", last.content);
+    }
+
+    #[test]
+    fn the_teammates_command_lists_no_jobs_in_a_fresh_workspace() {
+        crate::config::test_support::with_isolated_home(|| {
+            let dir = tempfile::tempdir().expect("workspace");
+            let mut a = app();
+            a.workspace_root = dir.path().display().to_string();
+            a.show_teammates();
+            let last = a.messages.last().expect("a message");
+            assert!(
+                last.content.contains("No background teammates"),
+                "{}",
+                last.content
+            );
+        });
     }
 
     /// The cap drops the oldest trail, not the newest -- and never a live one
