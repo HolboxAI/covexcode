@@ -31,13 +31,15 @@
 
 use crate::config::Config;
 use crate::llm::ToolCall;
+use crate::locked_store::{self, Document};
 use crate::tools::{self, Action, ToolOutcome};
 use crate::workspace::Workspace;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 /// Finished reports nobody collected still hold child output in memory; past
 /// this many jobs, completed ones are dropped to make room.
@@ -45,6 +47,12 @@ const MAX_JOBS: usize = 24;
 /// A run with no configured concurrency limit still needs a ceiling: every
 /// child is a model loop spending tokens.
 const MAX_UNCONFIGURED_RUNNING: usize = 8;
+/// Reports kept on disk for a later process to collect. Reaching this many
+/// refuses a new job rather than silently discarding an unread report.
+const MAX_PERSISTED: usize = 50;
+/// A persisted "running" record older than this is assumed lost: a teammate
+/// that outlived a day belongs to a process that is gone.
+const RUNNING_TTL_SECS: u64 = 24 * 60 * 60;
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -100,6 +108,128 @@ pub struct View {
     pub running: bool,
     pub has_report: bool,
     pub elapsed_secs: u64,
+    /// The process that started it. A job can be visible here after the
+    /// process that ran it is gone; `remote` says it belongs to a different
+    /// process than the one listing.
+    pub pid: u32,
+    pub remote: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RecordStatus {
+    Running,
+    Finished,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Record {
+    id: String,
+    name: String,
+    task: String,
+    pid: u32,
+    started_at: u64,
+    status: RecordStatus,
+    report: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Persisted {
+    workspace: String,
+    jobs: BTreeMap<String, Record>,
+}
+
+impl Document for Persisted {
+    fn workspace(&self) -> &str {
+        &self.workspace
+    }
+
+    fn set_workspace(&mut self, workspace: String) {
+        self.workspace = workspace;
+    }
+}
+
+fn empty_persisted(workspace: String) -> Persisted {
+    Persisted {
+        workspace,
+        jobs: BTreeMap::new(),
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn persist_spawn(workspace: &Path, record: Record) -> Result<(), String> {
+    locked_store::update("teammates", workspace, true, empty_persisted, |store| {
+        store.jobs.retain(|_, job| {
+            job.status == RecordStatus::Finished || now_secs() < job.started_at + RUNNING_TTL_SECS
+        });
+        if store.jobs.len() >= MAX_PERSISTED {
+            return Err(format!(
+                "too many persisted teammate reports ({MAX_PERSISTED}); collect them with \
+                 teammates {{ action: \"report\" }} first"
+            ));
+        }
+        store.jobs.insert(record.id.clone(), record);
+        Ok(())
+    })
+}
+
+fn persist_finish(workspace: &Path, id: &str, report: &str) {
+    let _ = locked_store::update("teammates", workspace, true, empty_persisted, |store| {
+        if let Some(record) = store.jobs.get_mut(id) {
+            record.status = RecordStatus::Finished;
+            record.report = Some(report.to_string());
+        }
+        Ok(())
+    });
+}
+
+fn persist_remove(workspace: &Path, id: &str) {
+    let _ = locked_store::update("teammates", workspace, true, empty_persisted, |store| {
+        store.jobs.remove(id);
+        Ok(())
+    });
+}
+
+fn persisted(workspace: &Path) -> Vec<Record> {
+    locked_store::update("teammates", workspace, false, empty_persisted, |store| {
+        Ok(store.jobs.values().cloned().collect())
+    })
+    .unwrap_or_default()
+}
+
+/// Remove and return a finished persisted report. A record that is still
+/// running is left in place and named in the error.
+fn take_persisted(workspace: &Path, id: &str) -> Result<Option<String>, String> {
+    locked_store::update("teammates", workspace, true, empty_persisted, |store| {
+        let Some(record) = store.jobs.get(id) else {
+            return Ok(None);
+        };
+        if record.status != RecordStatus::Finished {
+            if record.pid != std::process::id() {
+                return Err(format!(
+                    "teammate '{id}' is still running in process {}; it was started by another \
+                     covexcode process and cannot be collected until it finishes",
+                    record.pid
+                ));
+            }
+            // Our own pid but not in the in-memory registry: the record is
+            // stale (for example, the process persisted the job then failed
+            // before starting it). Drop it instead of reporting it forever.
+            store.jobs.remove(id);
+            return Err(format!(
+                "teammate '{id}' ended without a report; its record was stale and has been removed"
+            ));
+        }
+        let report = record.report.clone().unwrap_or_default();
+        store.jobs.remove(id);
+        Ok(Some(report))
+    })
 }
 
 /// Start the background teammate a call describes. The call must be an
@@ -173,6 +303,21 @@ pub fn spawn(call: ToolCall, workspace: Workspace, config: Config) -> Result<Sta
     let number = NEXT.fetch_add(1, Ordering::Relaxed);
     let id = format!("teammate-{number}");
     let name = format!("{agent_type}-{number}");
+    // Persist before starting: a job record on disk is what lets a later
+    // process collect the report, and failing here must not leave a running
+    // child nobody can find.
+    persist_spawn(
+        &root,
+        Record {
+            id: id.clone(),
+            name: name.clone(),
+            task: task.clone(),
+            pid: std::process::id(),
+            started_at: now_secs(),
+            status: RecordStatus::Running,
+            report: None,
+        },
+    )?;
     let outcome = Arc::new(Mutex::new(None));
     map.insert(
         id.clone(),
@@ -180,16 +325,23 @@ pub fn spawn(call: ToolCall, workspace: Workspace, config: Config) -> Result<Sta
             id: id.clone(),
             name: name.clone(),
             task,
-            workspace: root,
+            workspace: root.clone(),
             started: Instant::now(),
             outcome: outcome.clone(),
             handle: None,
         },
     );
-    // Keep the task short: it only runs the child and stores the outcome.
+    // Keep the task short: it only runs the child, stores the outcome, and
+    // writes the report to the persisted store for a later process.
     let slot = outcome.clone();
+    let job_id = id.clone();
     let handle = tokio::spawn(async move {
         let outcome = crate::subagent::run_subagent(&call, &workspace, &config, None).await;
+        let report = outcome.content.clone();
+        // Persist before publishing the in-memory outcome: anyone who sees
+        // "report ready" can then trust that a later process could collect it
+        // too.
+        persist_finish(&root, &job_id, &report);
         *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
     });
     if let Some(job) = map.get_mut(&id) {
@@ -198,68 +350,147 @@ pub fn spawn(call: ToolCall, workspace: Workspace, config: Config) -> Result<Sta
     Ok(Started { id, name })
 }
 
-/// Jobs for `workspace`, in a stable order, newest id last.
+/// Jobs for `workspace`, in a stable order, newest id last. Includes records
+/// persisted by a previous process: a finished report stays collectable after
+/// the process that produced it exits.
 pub fn list(workspace: &Path) -> Vec<View> {
-    let map = jobs().lock().unwrap_or_else(|e| e.into_inner());
-    map.values()
-        .filter(|job| job.workspace == workspace)
-        .map(|job| View {
-            id: job.id.clone(),
-            name: job.name.clone(),
-            task: job.task.clone(),
-            running: !job.report_ready() && !job.finished_without_report(),
-            has_report: job.report_ready(),
-            elapsed_secs: job.started.elapsed().as_secs(),
-        })
-        .collect()
+    let mut views: Vec<View> = {
+        let map = jobs().lock().unwrap_or_else(|e| e.into_inner());
+        map.values()
+            .filter(|job| job.workspace == workspace)
+            .map(|job| View {
+                id: job.id.clone(),
+                name: job.name.clone(),
+                task: job.task.clone(),
+                running: !job.report_ready() && !job.finished_without_report(),
+                has_report: job.report_ready(),
+                elapsed_secs: job.started.elapsed().as_secs(),
+                pid: std::process::id(),
+                remote: false,
+            })
+            .collect()
+    };
+    let memory: std::collections::BTreeSet<String> =
+        views.iter().map(|view| view.id.clone()).collect();
+    let now = now_secs();
+    for record in persisted(workspace) {
+        if memory.contains(&record.id) {
+            continue;
+        }
+        let stale = record.status == RecordStatus::Running
+            && (record.pid == std::process::id() || now >= record.started_at + RUNNING_TTL_SECS);
+        views.push(View {
+            id: record.id.clone(),
+            name: record.name.clone(),
+            task: record.task.clone(),
+            running: record.status == RecordStatus::Running && !stale,
+            has_report: record.status == RecordStatus::Finished && record.report.is_some(),
+            elapsed_secs: now.saturating_sub(record.started_at),
+            pid: record.pid,
+            remote: record.pid != std::process::id(),
+        });
+    }
+    views.sort_by(|a, b| a.id.cmp(&b.id));
+    views
 }
 
 /// Take a finished teammate's report and remove the job. A still-running job
 /// is left in place; a job that ended without a report (aborted or panicked)
-/// is removed and reported as such.
+/// is removed and reported as such. A report persisted by a previous process
+/// is collected from disk.
 pub fn report(workspace: &Path, id: &str) -> Result<String, String> {
-    let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(job) = map.get(id).filter(|job| job.workspace == workspace) else {
-        return Err(format!("there is no teammate '{id}'"));
+    let collected = {
+        let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(id).filter(|job| job.workspace == workspace) {
+            Some(job) => {
+                let outcome = job
+                    .outcome
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let ended_without_report = job.finished_without_report();
+                let name = job.name.clone();
+                if let Some(outcome) = outcome {
+                    let content = outcome.content;
+                    map.remove(id);
+                    Some(Ok(content))
+                } else if ended_without_report {
+                    map.remove(id);
+                    Some(Err(format!(
+                        "teammate '{id}' ({name}) ended without a report -- it was stopped, or \
+                         its task panicked"
+                    )))
+                } else {
+                    Some(Err(format!(
+                        "teammate '{id}' is still running; check teammates \
+                         {{ action: \"list\" }}"
+                    )))
+                }
+            }
+            None => None,
+        }
     };
-    let outcome = job
-        .outcome
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let ended_without_report = job.finished_without_report();
-    let name = job.name.clone();
-    if let Some(outcome) = outcome {
-        let content = outcome.content;
-        map.remove(id);
-        return Ok(content);
+    if let Some(result) = collected {
+        persist_remove(workspace, id);
+        return result;
     }
-    if ended_without_report {
-        map.remove(id);
-        return Err(format!(
-            "teammate '{id}' ({name}) ended without a report -- it was stopped, or its task \
-             panicked"
-        ));
+    match take_persisted(workspace, id)? {
+        Some(report) => Ok(report),
+        None => Err(format!("there is no teammate '{id}'")),
     }
-    Err(format!(
-        "teammate '{id}' is still running; check teammates {{ action: \"list\" }}"
-    ))
 }
 
 /// Abort a teammate and remove it. Its report, if it had already finished, is
-/// discarded.
+/// discarded. A job owned by another live process cannot be aborted from
+/// here; a finished or stale persisted record is simply removed.
 pub fn stop(workspace: &Path, id: &str) -> Result<String, String> {
-    let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
-    if !map.get(id).is_some_and(|job| job.workspace == workspace) {
-        return Err(format!("there is no teammate '{id}'"));
-    }
-    let Some(job) = map.remove(id) else {
-        return Err(format!("there is no teammate '{id}'"));
+    let name = {
+        let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(id).is_some_and(|job| job.workspace == workspace) {
+            let job = map.remove(id).expect("checked above");
+            if let Some(handle) = job.handle {
+                handle.abort();
+            }
+            Some(job.name)
+        } else {
+            None
+        }
     };
-    if let Some(handle) = job.handle {
-        handle.abort();
+    if let Some(name) = name {
+        persist_remove(workspace, id);
+        return Ok(name);
     }
-    Ok(job.name)
+    locked_store::update("teammates", workspace, true, empty_persisted, |store| {
+        let Some(record) = store.jobs.get(id) else {
+            return Err(format!("there is no teammate '{id}'"));
+        };
+        if record.status == RecordStatus::Running
+            && record.pid != std::process::id()
+            && now_secs() < record.started_at + RUNNING_TTL_SECS
+        {
+            return Err(format!(
+                "teammate '{id}' is running in process {}; it cannot be stopped from another \
+                 covexcode process",
+                record.pid
+            ));
+        }
+        let name = record.name.clone();
+        store.jobs.remove(id);
+        Ok(name)
+    })
+}
+
+/// Forget a job in memory without touching its persisted record, simulating
+/// the process that ran it going away.
+#[cfg(test)]
+fn forget_memory(workspace: &Path, id: &str) {
+    let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
+    if map.get(id).is_some_and(|job| job.workspace == workspace) {
+        let job = map.remove(id).expect("checked above");
+        if let Some(handle) = job.handle {
+            handle.abort();
+        }
+    }
 }
 
 fn definition_writes(workspace: &Workspace, agent_type: &str) -> bool {
@@ -332,6 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_report_can_be_collected_and_the_job_removed() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         // An unknown type returns its refusal without touching the network,
         // which makes the job finish deterministically.
         let (_dir, ws) = workspace();
@@ -367,6 +599,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_workspace_cannot_see_or_collect_a_job() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         let (_dir_a, ws_a) = workspace();
         let (_dir_b, ws_b) = workspace();
         let root_a = ws_a.root().to_path_buf();
@@ -404,7 +637,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_finished_report_survives_the_process_that_produced_it() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
+        let (_dir, ws) = workspace();
+        let root = ws.root().to_path_buf();
+        let started = spawn(
+            background_call("nonsense"),
+            ws,
+            config("http://127.0.0.1:9"),
+        )
+        .expect("spawn");
+
+        let mut ready = false;
+        for _ in 0..100 {
+            if list(&root)
+                .iter()
+                .any(|job| job.id == started.id && job.has_report)
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(ready, "the job finishes");
+
+        // The record on disk is the only copy now, as if this process had
+        // exited after the child finished.
+        forget_memory(&root, &started.id);
+        let text = report(&root, &started.id).expect("report from disk");
+        assert!(text.contains("Error"), "{text}");
+        assert!(
+            report(&root, &started.id).is_err(),
+            "collecting removes the persisted record"
+        );
+    }
+
+    #[tokio::test]
     async fn stop_removes_a_running_teammate() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         // Accept connections but never answer, so the child stays in its
         // request until it is aborted.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -296,10 +296,14 @@ same repository. Subagents are told their agent type as their mailbox name.
 A read-only subagent can also run as a background teammate: `agent` with
 `"background": true` returns a teammate id immediately, and the `teammates`
 tool lists running and finished jobs, returns a finished report (`report`), or
-aborts one (`stop`). Jobs live in the session's process, so they end when it
-exits, and a report is kept only until it is collected. Cancelling a turn does
-not stop a teammate — use `stop`. Writing agent types cannot be backgrounded
-yet — their patch would land while you are not watching.
+aborts one (`stop`). Jobs run in the session's process. A finished report is
+also persisted per workspace under the config directory, so if that process
+exits before you collect it, a later session can still read it; a *running*
+job does not survive the process. A teammate started by another covexcode
+process can have its finished report collected, but only its own process can
+stop it. Cancelling a turn does not stop a teammate — use `stop`. Writing
+agent types cannot be backgrounded yet — their patch would land while you are
+not watching.
 
 A definition may set `writes = true`. That child runs in an isolated git
 worktree at HEAD (the repository needs at least one commit), may call
