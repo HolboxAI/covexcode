@@ -1055,6 +1055,8 @@ mod tests {
     /// from the teammate registry instead of the tool result.
     #[tokio::test]
     async fn a_background_agent_call_returns_a_job_and_its_report_is_collectable() {
+        // The teammate registry persists records under the config dir.
+        let _home = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws) = workspace_with_hello();
         let (endpoint, _bodies) = serve_rounds(vec![text_round("Background report.")]).await;
         let config = config_for(&endpoint);

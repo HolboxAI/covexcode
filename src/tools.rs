@@ -6248,9 +6248,20 @@ fn execute_teammates(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
             let mut text = format!("Teammates ({}):", jobs.len());
             for job in &jobs {
                 let state = if job.running {
-                    format!("running {}s", job.elapsed_secs)
+                    if job.remote {
+                        format!(
+                            "running {}s in process {} (started by another covexcode process)",
+                            job.elapsed_secs, job.pid
+                        )
+                    } else {
+                        format!("running {}s", job.elapsed_secs)
+                    }
                 } else if job.has_report {
-                    "finished — report ready".to_string()
+                    if job.remote {
+                        "finished — report ready (from an earlier process)".to_string()
+                    } else {
+                        "finished — report ready".to_string()
+                    }
                 } else {
                     "ended without a report".to_string()
                 };
@@ -8362,6 +8373,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_teammates_tool_reports_an_unknown_job() {
+        // Reading the persisted registry touches the config dir.
+        let _isolated = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws, cfg) = fixture();
         let out = execute(
             &tool_call(

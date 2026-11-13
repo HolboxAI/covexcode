@@ -3336,6 +3336,8 @@ mod tests {
     /// running and its report is collected through the teammate registry.
     #[tokio::test]
     async fn a_background_agent_call_returns_while_the_child_keeps_running() {
+        // The teammate registry persists records under the config dir.
+        let _home = crate::config::test_support::IsolatedHome::new();
         let (_dir, ws) = workspace();
         let endpoint = serve_rounds(vec![text_round("Background says hi.")]).await;
         let config = config_for(&endpoint);
