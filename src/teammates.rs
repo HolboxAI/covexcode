@@ -261,20 +261,26 @@ pub fn spawn(
     else {
         return Err("only an agent call marked `background: true` starts a teammate".to_string());
     };
-    if definition_writes(&workspace, &agent_type) {
+    let writes = definition_writes(&workspace, &agent_type);
+    if writes && !config.tools.background_writes {
         return Err(format!(
-            "'{agent_type}' is a writing agent. Background teammates are read-only for now, \
-             because a writing teammate's patch would be applied while the requester is not \
-             watching. Run it in the foreground, or use a read-only type such as explore."
+            "'{agent_type}' is a writing agent. A background teammate applies its patch from a \
+             detached task, after the turn that approved it has moved on, so writing types \
+             stay foreground-only unless `[tools] background_writes = true` is set. Run it in \
+             the foreground, or opt in explicitly."
         ));
     }
 
-    // Belt and braces: even if an agent definition changes between this
-    // check and the child's own resolution, the teammate runs under the
-    // read-only sandbox. `run_subagent` itself refuses a writing agent under
-    // that policy, so the detached task cannot land a patch by a race.
+    // Belt and braces for the read-only posture: even if an agent definition
+    // changes between this check and the child's own resolution, a teammate
+    // that was allowed as read-only runs under the read-only sandbox.
+    // `run_subagent` itself refuses a writing agent under that policy, so such
+    // a change cannot land a patch. An opted-in writing teammate keeps the
+    // configured sandbox (and its worktree).
     let mut config = config;
-    config.tools.sandbox = crate::config::SandboxPolicy::ReadOnly;
+    if !writes {
+        config.tools.sandbox = crate::config::SandboxPolicy::ReadOnly;
+    }
 
     let limit = if config.tools.subagent_concurrency == 0 {
         MAX_UNCONFIGURED_RUNNING
@@ -612,7 +618,7 @@ mod tests {
                 None,
             )
             .expect_err("writing is refused");
-            assert!(error.contains("read-only"), "{error}");
+            assert!(error.contains("background_writes"), "{error}");
         });
     }
 

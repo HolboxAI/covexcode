@@ -1055,7 +1055,8 @@ pub fn schemas_for(
                         "description": "Run as a background teammate and return a job id \
                                         immediately instead of waiting for the report. \
                                         Collect it with teammates { action: \"report\" }. \
-                                        Read-only agent types only, for now."
+                                        Read-only agent types are always allowed; a writing \
+                                        type requires [tools] background_writes = true."
                     }
                 },
                 "required": ["task"]

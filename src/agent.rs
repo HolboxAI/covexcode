@@ -1094,6 +1094,65 @@ mod tests {
         assert_eq!(collected.expect("a report"), "Background report.");
     }
 
+    /// With the explicit `[tools] background_writes` opt-in, a writing type
+    /// can run as a teammate; its verified patch lands in the requester's
+    /// checkout like a foreground child's.
+    #[tokio::test]
+    async fn an_opted_in_writing_teammate_applies_its_patch() {
+        let _home = crate::config::test_support::IsolatedHome::new();
+        let (dir, ws) = committed_workspace();
+        worker_definition(dir.path(), Some("test -f created.txt"));
+
+        let (endpoint, _bodies) = serve_rounds(vec![
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"created.txt","content":"hello\n"}"#,
+            ),
+            text_round("Created created.txt."),
+        ])
+        .await;
+        let mut config = config_for(&endpoint);
+        config.tools.background_writes = true;
+        let call = agent_call(json!({
+            "task": "create created.txt in the background",
+            "agent_type": "worker",
+            "background": true
+        }));
+
+        let outcomes = run_calls(&[call], &ws, &config, false, None).await;
+        assert!(
+            outcomes[0].content.contains("Started background teammate"),
+            "{}",
+            outcomes[0].content
+        );
+
+        let id = crate::teammates::list(ws.root())
+            .into_iter()
+            .find(|job| job.task == "create created.txt in the background")
+            .map(|job| job.id)
+            .expect("the job is registered");
+        let mut collected = None;
+        for _ in 0..200 {
+            match crate::teammates::report(ws.root(), &id) {
+                Ok(text) => {
+                    collected = Some(text);
+                    break;
+                }
+                Err(e) if e.contains("still running") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(e) => panic!("unexpected report error: {e}"),
+            }
+        }
+        let report = collected.expect("a report");
+        assert!(report.contains("applied cleanly"), "{report}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("created.txt")).unwrap(),
+            "hello\n",
+            "the teammate's patch reached the requester's checkout"
+        );
+    }
+
     fn committed_workspace() -> (tempfile::TempDir, Workspace) {
         use std::process::Command;
 
