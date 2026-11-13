@@ -1,16 +1,13 @@
-//! The opt-in bridge that drives the TUI through [`crate::session_client`]
-//! instead of `App`'s own agent loop.
+//! The bridge that drives the TUI through [`crate::session_client`] instead
+//! of `App`'s own agent loop.
 //!
-//! Enabled by `COVEXCODE_CORE_SESSION=1`. Deliberately partial in this first
-//! slice: the engine owns the turn, so text, tool results, usage and approval
-//! prompts are real and stream in normally, and `/new`, `/compact`,
-//! `/rollback`, `/diff`, `/resume`, `/sessions`, startup `--resume`,
-//! `/provider`, `/model`, login and the `/subagents` trail are mirrored into
-//! the engine. Every TUI surface that touches the agent is engine-backed in
-//! this mode; the old `App` loop remains the default and the rollback.
-//!
-//! The old path stays the default and is untouched; with the variable unset
-//! nothing in this module runs.
+//! Every TUI session with a workspace runs through the engine: text, tool
+//! results, usage and approval prompts are real and stream in normally, and
+//! `/new`, `/compact`, `/rollback`, `/diff`, `/resume`, `/sessions`, startup
+//! `--resume`, `/provider`, `/model`, login, the `/subagents` trail and the
+//! `/agents` panel are mirrored into the engine. The old `App` loop remains
+//! only for a session whose tools/workspace are disabled -- where no agent can
+//! run at all -- and deleting it is follow-up cleanup.
 
 use crate::app::{App, AppState};
 use crate::approval::ApprovalRequest;
@@ -70,13 +67,6 @@ pub struct CoreTui {
 }
 
 impl CoreTui {
-    pub fn enabled() -> bool {
-        matches!(
-            std::env::var("COVEXCODE_CORE_SESSION").ok().as_deref(),
-            Some("1") | Some("true")
-        )
-    }
-
     pub fn start(workspace: Workspace, config: crate::config::Config) -> Self {
         Self::start_with_history(workspace, config, None)
     }
