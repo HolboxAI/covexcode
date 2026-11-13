@@ -69,6 +69,10 @@ struct Job {
     /// report is being collected.
     outcome: Arc<Mutex<Option<ToolOutcome>>>,
     handle: Option<tokio::task::JoinHandle<()>>,
+    /// Kept here as well as in the task so `stop` can close the teammate's
+    /// trail in the live view; aborting the task alone would leave a
+    /// `/agents` row spinning forever.
+    activity: Option<ActivitySink>,
 }
 
 impl Job {
@@ -363,6 +367,7 @@ pub fn spawn(
             started: Instant::now(),
             outcome: outcome.clone(),
             handle: None,
+            activity: activity.clone(),
         },
     );
     // Keep the task short: it only runs the child, stores the outcome, and
@@ -554,6 +559,16 @@ pub fn stop(workspace: &Path, id: &str) -> Result<String, String> {
         let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
         if map.get(id).is_some_and(|job| job.workspace == workspace) {
             let job = map.remove(id).expect("checked above");
+            // Close the live trail before aborting: the task will not get a
+            // chance to emit its own finish event once it is dropped.
+            if let Some(activity) = &job.activity {
+                activity(
+                    &job.id,
+                    Activity::Finished {
+                        summary: "stopped".to_string(),
+                    },
+                );
+            }
             if let Some(handle) = job.handle {
                 handle.abort();
             }
@@ -960,11 +975,20 @@ mod tests {
 
         let (_dir, ws) = workspace();
         let root = ws.root().to_path_buf();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let seen = seen.clone();
+            Arc::new(move |_: &str, activity: Activity| {
+                seen.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(activity);
+            }) as ActivitySink
+        };
         let started = spawn(
             background_call("explore"),
             ws,
             config(&format!("http://{addr}")),
-            None,
+            Some(sink),
         )
         .expect("spawn");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -977,6 +1001,16 @@ mod tests {
 
         stop(&root, &started.id).expect("stop");
         assert!(!list(&root).iter().any(|job| job.id == started.id));
+        assert!(
+            seen.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|activity| matches!(
+                    activity,
+                    Activity::Finished { summary } if summary == "stopped"
+                )),
+            "stopping closes the live trail instead of leaving it spinning"
+        );
         server.abort();
     }
 }

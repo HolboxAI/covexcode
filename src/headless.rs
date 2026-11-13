@@ -538,10 +538,12 @@ fn teammate_outcome(id: &str, summary: &str) -> SessionUpdate {
         tool_call_id: ToolCallId(id.to_string()),
         title: None,
         kind: None,
-        status: Some(if summary == "failed" {
-            ToolCallStatus::Failed
-        } else {
+        status: Some(if summary == "done" {
             ToolCallStatus::Completed
+        } else {
+            // "failed" and "stopped" both end the row as a failure; only a
+            // report is a success.
+            ToolCallStatus::Failed
         }),
         content: Some(ToolCallContent::Text {
             text: summary.to_string(),
