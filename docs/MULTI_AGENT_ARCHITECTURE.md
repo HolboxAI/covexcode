@@ -59,8 +59,12 @@ Landed on `main`:
   failures before reporting; a background invocation does not qualify, and
   the shell string must match exactly.
   A clean patch is applied to the requester's checkout serially (one
-  `git apply` at a time); a conflict is reported with the patch and the
-  retained worktree path, and writes nothing. Step and token budgets and
+  `git apply` at a time). If it no longer applies exactly, one three-way
+  merge is attempted against the working tree through a throwaway git index
+  (the user's index is never staged), with every touched path snapshotted
+  first; a clean merge keeps both edits and reports that it was merged, while
+  a genuine conflict restores the snapshots, writes nothing, and reports with
+  the patch and the retained worktree path. Step and token budgets and
   child concurrency are enforced by both loops, `/agents` renders a live
   panel over the same trails (task, status, rounds, steps), and `/subagents`
   replays them in the transcript. The implement → test → review pipeline is
@@ -87,9 +91,11 @@ Landed on `main`:
   after the child reports and before the patch is applied, and may also be run
   by the child itself while it works, so the implement → fix loop happens
   inside the worktree. Patch application is serial and verified before it
-  touches the checkout; a conflict is reported and nothing is written, rather
-  than resolved automatically. Persistent background teammates (a teammate
-  that outlives one tool call) and automatic conflict resolution remain.
+  touches the checkout; a patch that no longer applies exactly gets one
+  three-way merge against the working tree, and only an unresolved overlap is
+  reported (with the checkout restored) rather than guessed at. Persistent
+  background teammates (a teammate that outlives one tool call) and a merge
+  agent that writes through overlapping hunks remain.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -97,8 +103,9 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's persistent teammate runtime and automatic
-conflict resolution. Phase 1 is complete; retiring the
+Remaining, in plan order: Phase 5's persistent teammate runtime and a merge
+agent for conflicts beyond a clean three-way merge. Phase 1 is complete;
+retiring the
 `COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
 deleting the old loop) is follow-up cleanup, not parity work.
 

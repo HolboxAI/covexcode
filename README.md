@@ -296,10 +296,13 @@ same repository. Subagents are told their agent type as their mailbox name.
 A definition may set `writes = true`. That child runs in an isolated git
 worktree at HEAD (the repository needs at least one commit), may call
 `write_file`/`edit_file`, and returns its changes as a patch after its report.
-A clean patch is applied to your checkout automatically; a conflict is
-reported with the patch and the retained worktree path, and nothing is
-written. A writing agent is asked about before it runs, and is refused in plan
-mode and under `[tools] sandbox = "read-only"`.
+A clean patch is applied to your checkout automatically. If it no longer
+applies exactly — often because another child edited the same file nearby —
+one three-way merge is attempted against your current files, keeping both
+edits when the merge is clean. A genuine conflict is reported with the patch
+and the retained worktree path, and nothing is written. A writing agent is
+asked about before it runs, and is refused in plan mode and under
+`[tools] sandbox = "read-only"`.
 
 A writing definition may also declare `verify = "cargo check"` (or any
 command). It runs inside the worktree before the patch is offered; a non-zero
