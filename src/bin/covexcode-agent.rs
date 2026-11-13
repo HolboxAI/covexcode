@@ -77,6 +77,8 @@ mod shell;
 mod subagent;
 #[path = "../tasks.rs"]
 mod tasks;
+#[path = "../teammates.rs"]
+mod teammates;
 #[cfg(feature = "cli")]
 #[path = "../theme.rs"]
 mod theme;

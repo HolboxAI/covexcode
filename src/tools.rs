@@ -72,6 +72,7 @@ pub const AGENT: &str = "agent";
 pub const UPDATE_TODOS: &str = "update_todos";
 pub const TASKS: &str = "tasks";
 pub const MAILBOX: &str = "mailbox";
+pub const TEAMMATES: &str = "teammates";
 pub const CHECK_IN_BROWSER: &str = "check_in_browser";
 pub const INTERACT_IN_BROWSER: &str = "interact_in_browser";
 
@@ -1048,6 +1049,13 @@ pub fn schemas_for(
                                         reviewer (read-only). A project can define more \
                                         under .covexcode/agents; the system prompt lists \
                                         them when it does."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Run as a background teammate and return a job id \
+                                        immediately instead of waiting for the report. \
+                                        Collect it with teammates { action: \"report\" }. \
+                                        Read-only agent types only, for now."
                     }
                 },
                 "required": ["task"]
@@ -1143,6 +1151,33 @@ pub fn schemas_for(
                     "id": {
                         "type": "integer",
                         "description": "Message id for read."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    }));
+
+    schemas.push(json!({
+        "type": "function",
+        "function": {
+            "name": TEAMMATES,
+            "description": "Inspect or stop background teammates started with \
+                            agent { \"background\": true }. `list` shows running and finished \
+                            jobs with their ids and tasks, `report` returns a finished \
+                            teammate's full report and removes the job, and `stop` aborts a \
+                            running one. Reports are process-local until collected.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "report", "stop"],
+                        "description": "What to do."
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Teammate id for report/stop, e.g. 'teammate-1'."
                     }
                 },
                 "required": ["action"]
@@ -1384,7 +1419,13 @@ pub fn schemas_for(
     }
 
     if !diet.agent {
-        schemas.retain(|schema| schema["function"]["name"] != AGENT);
+        // `teammates` goes with it: with no `agent` schema there is nothing
+        // that could start the jobs it manages, and a small project should
+        // not pay for both schemas on every round.
+        schemas.retain(|schema| {
+            let name = schema["function"]["name"].as_str().unwrap_or_default();
+            name != AGENT && name != TEAMMATES
+        });
     }
     if !diet.web_search {
         schemas.retain(|schema| schema["function"]["name"] != WEB_SEARCH);
@@ -2091,6 +2132,10 @@ struct AgentArgs {
     task: String,
     #[serde(default)]
     agent_type: Option<String>,
+    /// Start a background teammate and return immediately; the engine routes
+    /// these to `teammates::spawn` instead of awaiting the child.
+    #[serde(default)]
+    background: bool,
 }
 
 #[derive(Deserialize)]
@@ -2123,6 +2168,13 @@ struct MailboxArgs {
     body: Option<String>,
     #[serde(default)]
     id: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct TeammatesArgs {
+    action: String,
+    #[serde(default)]
+    id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2611,6 +2663,9 @@ pub enum Action {
     Agent {
         task: String,
         agent_type: String,
+        /// Run the child as a background teammate: the call returns a job id
+        /// immediately and the report is collected with `teammates`.
+        background: bool,
     },
     /// `exit_plan_mode`: the one action that changes nothing on disk *yet* and
     /// is still always worth stopping for. Approving it hands the writing
@@ -2641,6 +2696,13 @@ pub enum Action {
     Mailbox {
         action: String,
         to: Option<String>,
+    },
+    /// `teammates`: inspect or stop background subagents started with
+    /// `agent { background: true }`. Process-local coordination state, like
+    /// `Tasks` and `Mailbox`, so it is allowed in plan mode and under a
+    /// read-only sandbox.
+    Teammates {
+        action: String,
     },
     /// `check_in_browser`: asks the client to capture a screenshot of `url`
     /// -- covexcode itself has no browser tab, only an ACP client (boxcode-ide's
@@ -2758,7 +2820,16 @@ impl Action {
             Action::ResolveChangeRequest { path, id } => {
                 format!("requests {path} — resolve #{id}")
             }
-            Action::Agent { task, .. } => format!("agent: \"{}\"", clip(task, 60)),
+            Action::Agent {
+                task, background, ..
+            } => {
+                let kind = if *background {
+                    "background agent"
+                } else {
+                    "agent"
+                };
+                format!("{kind}: \"{}\"", clip(task, 60))
+            }
             Action::Plan(p) => format!("plan: {}", p.title),
             Action::Progress { step, done, .. } => {
                 format!("{} step {step}", if *done { "☑" } else { "☐" })
@@ -2775,6 +2846,7 @@ impl Action {
                 Some(to) => format!("mailbox — {action} {to}"),
                 None => format!("mailbox — {action}"),
             },
+            Action::Teammates { action } => format!("teammates — {action}"),
             Action::CheckInBrowser { url } => format!("check in browser — {url}"),
             Action::InteractInBrowser { url, interaction } => {
                 format!("interact in browser — {url} ({})", interaction.describe())
@@ -2875,7 +2947,8 @@ pub fn is_read_only_action(action: &Action) -> bool {
         | Action::Progress { .. }
         | Action::Todos(_)
         | Action::Tasks
-        | Action::Mailbox { .. } => true,
+        | Action::Mailbox { .. }
+        | Action::Teammates { .. } => true,
         Action::Command { command, .. } => is_read_only(command),
         _ => false,
     }
@@ -2907,7 +2980,8 @@ pub fn plan_mode_block(action: &Action) -> Option<String> {
         // writes to the config dir and touches nothing plan mode guards.
         | Action::Todos(_)
         | Action::Tasks
-        | Action::Mailbox { .. } => None,
+        | Action::Mailbox { .. }
+        | Action::Teammates { .. } => None,
         Action::Command { command, .. } if is_read_only(command) => None,
         Action::Write { path, .. } => Some(format!(
             "Plan mode is read-only, so nothing was written to {path}. Describe this file and \
@@ -3065,6 +3139,7 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| "explore".to_string()),
+                background: args.background,
             })
         }
         READ_FILE => {
@@ -3342,6 +3417,14 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
                     .map(|to| to.trim().to_string())
                     .filter(|to| !to.is_empty()),
             })
+        }
+        TEAMMATES => {
+            let args: TeammatesArgs = serde_json::from_str(&call.function.arguments).ok()?;
+            let action = args.action.trim().to_lowercase();
+            if action.is_empty() {
+                return None;
+            }
+            Some(Action::Teammates { action })
         }
         _ => None,
     }
@@ -3668,6 +3751,7 @@ pub async fn execute_truncated(
         ),
         TASKS => execute_tasks(call, workspace),
         MAILBOX => execute_mailbox(call, workspace),
+        TEAMMATES => execute_teammates(call, workspace),
         // Never reached: `app::advance_approvals` resolves this itself, for
         // the same reason it resolves `PLAN_PROGRESS` -- it is in-memory
         // bookkeeping on `App`, and the runner has no access to `App`.
@@ -6132,6 +6216,103 @@ fn execute_mailbox(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
     }
 }
 
+/// Background teammates started by `agent { background: true }`. The
+/// registry owns the jobs; this turns its views and errors into tool results.
+fn execute_teammates(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
+    let Ok(args) = serde_json::from_str::<TeammatesArgs>(&call.function.arguments) else {
+        return outcome(
+            &call.id,
+            "teammates — unusable arguments".to_string(),
+            "Error: could not read the arguments. Expected {\"action\": \"list\"} or \
+             {\"action\": \"report\", \"id\": \"teammate-1\"}."
+                .to_string(),
+        );
+    };
+    let action = args.action.trim().to_lowercase();
+    let id = args
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    match action.as_str() {
+        "list" => {
+            let jobs = crate::teammates::list(workspace.root());
+            if jobs.is_empty() {
+                return outcome(
+                    &call.id,
+                    "teammates — none".to_string(),
+                    "No background teammates. Start one with agent { \"background\": true }."
+                        .to_string(),
+                );
+            }
+            let mut text = format!("Teammates ({}):", jobs.len());
+            for job in &jobs {
+                let state = if job.running {
+                    format!("running {}s", job.elapsed_secs)
+                } else if job.has_report {
+                    "finished — report ready".to_string()
+                } else {
+                    "ended without a report".to_string()
+                };
+                text.push_str(&format!(
+                    "\n[{}] {} · {state}\n    {}",
+                    job.id,
+                    job.name,
+                    clip(&job.task, 120)
+                ));
+            }
+            text.push_str(
+                "\n\nCollect with teammates { action: \"report\", id: \"...\" }; \
+                 stop one with { action: \"stop\", id: \"...\" }.",
+            );
+            outcome(&call.id, format!("teammates — {} job(s)", jobs.len()), text)
+        }
+        "report" => {
+            let Some(id) = id else {
+                return outcome(
+                    &call.id,
+                    "teammates — report needs an id".to_string(),
+                    "Error: `report` needs an `id`.".to_string(),
+                );
+            };
+            match crate::teammates::report(workspace.root(), id) {
+                Ok(text) => outcome(&call.id, format!("teammates — report {id}"), text),
+                Err(e) => outcome(
+                    &call.id,
+                    format!("teammates — {id} not ready"),
+                    format!("Error: {e}"),
+                ),
+            }
+        }
+        "stop" => {
+            let Some(id) = id else {
+                return outcome(
+                    &call.id,
+                    "teammates — stop needs an id".to_string(),
+                    "Error: `stop` needs an `id`.".to_string(),
+                );
+            };
+            match crate::teammates::stop(workspace.root(), id) {
+                Ok(name) => outcome(
+                    &call.id,
+                    format!("teammates — stopped {id}"),
+                    format!("Stopped teammate '{id}' ({name})."),
+                ),
+                Err(e) => outcome(
+                    &call.id,
+                    format!("teammates — {id} not stopped"),
+                    format!("Error: {e}"),
+                ),
+            }
+        }
+        other => outcome(
+            &call.id,
+            format!("teammates — unknown action '{other}'"),
+            "Error: action must be one of list, report, stop.".to_string(),
+        ),
+    }
+}
+
 pub fn todos_recorded(call: &ToolCall, items: &[TodoItem]) -> ToolOutcome {
     let total = items.len();
     let done = items
@@ -7186,6 +7367,7 @@ mod tests {
             Action::Agent {
                 task: "look".into(),
                 agent_type: "explore".into(),
+                background: false,
             },
             Action::Plan(Proposal {
                 title: "t".into(),
@@ -8153,6 +8335,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_teammates_tool_is_offered_and_is_coordination_state() {
+        let names: Vec<String> = schemas(Mode::Normal, false, false, false)
+            .iter()
+            .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.contains(&TEAMMATES.to_string()), "{names:?}");
+
+        let call = tool_call(TEAMMATES, json!({ "action": "list" }));
+        assert!(matches!(
+            describe_action(&call),
+            Some(Action::Teammates { .. })
+        ));
+        assert!(is_read_only_action(&Action::Teammates {
+            action: "list".to_string(),
+        }));
+        assert!(
+            plan_mode_block(&Action::Teammates {
+                action: "list".to_string(),
+            })
+            .is_none(),
+            "managing background research changes nothing in the workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_teammates_tool_reports_an_unknown_job() {
+        let (_dir, ws, cfg) = fixture();
+        let out = execute(
+            &tool_call(
+                TEAMMATES,
+                json!({ "action": "report", "id": "teammate-999" }),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+        assert!(
+            out.content.contains("there is no teammate"),
+            "{}",
+            out.content
+        );
+    }
+
+    /// The background flag is parsed into the action; the runner is what
+    /// decides whether a type can run detached.
+    #[test]
+    fn an_agent_call_can_request_the_background() {
+        let call = tool_call(AGENT, json!({ "task": "look around", "background": true }));
+        assert!(matches!(
+            describe_action(&call),
+            Some(Action::Agent {
+                background: true,
+                ..
+            })
+        ));
+    }
+
     #[tokio::test]
     async fn a_read_only_sandbox_refuses_mutations_and_allows_reads() {
         let (dir, ws, mut cfg) = fixture();
@@ -9032,7 +9272,8 @@ mod tests {
                 DEPLOY_PROJECT,
                 AGENT,
                 TASKS,
-                MAILBOX
+                MAILBOX,
+                TEAMMATES
             ]
         );
     }
@@ -9065,6 +9306,10 @@ mod tests {
         );
         let names = schema_names(diet);
         assert!(!names.iter().any(|n| n == AGENT), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n == TEAMMATES),
+            "no agent schema means no jobs to manage: {names:?}"
+        );
         assert!(names.iter().any(|n| n == WEB_SEARCH), "{names:?}");
     }
 
@@ -9113,6 +9358,7 @@ mod tests {
             Some(Action::Agent {
                 task: "find every caller of resolve_in_workspace".to_string(),
                 agent_type: "explore".to_string(),
+                background: false,
             })
         );
     }
@@ -9266,6 +9512,7 @@ mod tests {
         let action = Action::Agent {
             task: "research".to_string(),
             agent_type: "explore".to_string(),
+            background: false,
         };
         assert_eq!(
             plan_mode_block(&action),
@@ -9280,6 +9527,7 @@ mod tests {
         let action = Action::Agent {
             task: "research".to_string(),
             agent_type: "explore".to_string(),
+            background: false,
         };
         assert_eq!(action_risk(&action, ws.root()), danger::Risk::Normal);
     }

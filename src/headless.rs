@@ -1829,21 +1829,66 @@ impl HeadlessSession {
                 }))
                 .await;
         }
+        // Background calls start a teammate and finish immediately; the rest
+        // keep the foreground fan-out below. Results are placed back in call
+        // order, so a mixed batch does not reorder the transcript.
+        let mut contents: Vec<Option<String>> = vec![None; calls.len()];
+        let mut foreground: Vec<(usize, ToolCall)> = Vec::new();
+        for (index, call) in calls.iter().enumerate() {
+            let background = matches!(
+                tools::describe_action(call),
+                Some(tools::Action::Agent {
+                    background: true,
+                    ..
+                })
+            );
+            if !background {
+                foreground.push((index, call.clone()));
+                continue;
+            }
+            let content = match crate::teammates::spawn(
+                call.clone(),
+                self.workspace.clone(),
+                self.config.clone(),
+            ) {
+                Ok(started) => format!(
+                    "Started background teammate '{}' ({}). Continue with other work; collect \
+                     its report with teammates {{ \"action\": \"report\", \"id\": \"{}\" }}.",
+                    started.name, started.id, started.id
+                ),
+                Err(e) => format!("Error: {e}"),
+            };
+            let _ = updates
+                .send(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                    tool_call_id: ToolCallId(call.id.clone()),
+                    title: None,
+                    kind: None,
+                    status: Some(if content.starts_with("Error:") {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    }),
+                    content: Some(ToolCallContent::Text {
+                        text: content.clone(),
+                    }),
+                }))
+                .await;
+            contents[index] = Some(content);
+        }
         let concurrency = self.config.tools.subagent_concurrency;
         let cap = if concurrency == 0 {
-            calls.len()
+            foreground.len()
         } else {
             concurrency
         };
-        let mut contents = Vec::with_capacity(calls.len());
-        for chunk in calls.chunks(cap.max(1)) {
+        for chunk in foreground.chunks(cap.max(1)) {
             // One progress channel per chunk. Children announce each tool
             // call they make; forwarding that as an in-progress update on the
             // parent `agent` row keeps the client from sitting blind through
             // a long research turn.
             let (progress_tx, mut progress_rx) = mpsc::channel(64);
             let progress = &progress_tx;
-            let futures = chunk.iter().map(|call| {
+            let futures = chunk.iter().map(|(_, call)| {
                 let call = call.clone();
                 let workspace = self.workspace.clone();
                 let config = self.config.clone();
@@ -1888,14 +1933,17 @@ impl HeadlessSession {
                     }
                 }
             };
-            for outcome in outcomes {
+            for ((index, _), outcome) in chunk.iter().zip(outcomes) {
                 let _ = updates
                     .send(SessionUpdate::ToolCallUpdate((&outcome).into()))
                     .await;
-                contents.push(outcome.content);
+                contents[*index] = Some(outcome.content);
             }
         }
         contents
+            .into_iter()
+            .map(|content| content.unwrap_or_default())
+            .collect()
     }
 
     /// `plan_progress`: tick a step on the approved plan, persist it, and
@@ -3282,6 +3330,69 @@ mod tests {
             !report.contains("not handled"),
             "the engine must run the subagent, not fall through to tools::execute: {report}"
         );
+    }
+
+    /// A background call returns to the model immediately; the child keeps
+    /// running and its report is collected through the teammate registry.
+    #[tokio::test]
+    async fn a_background_agent_call_returns_while_the_child_keeps_running() {
+        let (_dir, ws) = workspace();
+        let endpoint = serve_rounds(vec![text_round("Background says hi.")]).await;
+        let config = config_for(&endpoint);
+        let session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let call = ToolCall {
+            id: "call_bg".to_string(),
+            kind: "function".to_string(),
+            function: crate::llm::FunctionCall {
+                name: tools::AGENT.to_string(),
+                arguments: r#"{"task":"background research","background":true}"#.to_string(),
+            },
+        };
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let updates = UpdateSink {
+            updates: &updates_tx,
+            events: EventHub::default(),
+            session_id: session.session_id.clone(),
+            turn: TurnId::new(1),
+        };
+
+        let contents = session.run_agent_batch(&[call], &updates).await;
+        assert!(
+            contents[0].contains("Started background teammate"),
+            "{}",
+            contents[0]
+        );
+        let mut announced = false;
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::ToolCallUpdate(update) = update {
+                if update.status == Some(ToolCallStatus::Completed) {
+                    if let Some(ToolCallContent::Text { text }) = update.content {
+                        announced |= text.contains("Started background teammate");
+                    }
+                }
+            }
+        }
+        assert!(announced, "the client is told the teammate started");
+
+        let id = crate::teammates::list(session.workspace.root())
+            .into_iter()
+            .find(|job| job.task == "background research")
+            .map(|job| job.id)
+            .expect("the job is registered");
+        let mut collected = None;
+        for _ in 0..200 {
+            match crate::teammates::report(session.workspace.root(), &id) {
+                Ok(text) => {
+                    collected = Some(text);
+                    break;
+                }
+                Err(e) if e.contains("still running") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(e) => panic!("unexpected report error: {e}"),
+            }
+        }
+        assert_eq!(collected.expect("a report"), "Background says hi.");
     }
 
     /// A long child turn must not look frozen: the engine forwards each child
