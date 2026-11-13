@@ -58,8 +58,10 @@ Landed on `main`:
   read-only command list, so the child can run it while it works and fix
   failures before reporting; a background invocation does not qualify, and
   the shell string must match exactly.
-  A clean patch is applied to the requester's checkout serially (one
-  `git apply` at a time). If it no longer applies exactly, one three-way
+  A clean patch is applied to the requester's checkout serially: one
+  `git apply` at a time in this process, and a lock file in the repository's
+  common git dir excludes a second covexcode process applying to the same
+  checkout. If it no longer applies exactly, one three-way
   merge is attempted against the working tree through a throwaway git index
   (the user's index is never staged), with every touched path snapshotted
   first; a clean merge keeps both edits and reports that it was merged, while
