@@ -17,14 +17,14 @@ Landed on `main`:
   lifecycle, usage, status, plans/todos, and approvals; cooperative ACP
   `session/cancel`; `HeadlessSession` is the reusable engine behind both
   `--acp` and `--listen`, with `SessionCommand` (cancel + approval answers) as
-  its serializable control surface. The TUI still runs its own `App` loop by
-  default; `COVEXCODE_CORE_SESSION=1` drives it through the engine instead
-  (`session_client` + `core_tui`), with streaming text, tool results, usage,
-  cancel, approval prompts, subagent trails, and every command that changes
-  the conversation or its endpoint: `/new`, `/compact`, `/rollback`, `/diff`,
-  `/subagents`, `/provider`, `/model`, and resuming (`/resume`, `/sessions`,
-  startup `--resume`). Phase 1's TUI-as-client exit criterion is met; the old
-  path stays as the default until the flag is retired.
+  its serializable control surface. Every TUI session with a workspace now
+  runs through the engine (`session_client` + `core_tui`), with streaming
+  text, tool results, usage, cancel, approval prompts, subagent trails, the
+  `/agents` panel, and every command that changes the conversation or its
+  endpoint: `/new`, `/compact`, `/rollback`, `/diff`, `/subagents`,
+  `/provider`, `/model`, and resuming (`/resume`, `/sessions`, startup
+  `--resume`). Phase 1's TUI-as-client exit criterion is met; the old `App`
+  loop remains only for a no-workspace session and is slated for deletion.
 - **Phase 2**: a `SessionRegistry` with one actor per session, shared by every
   connection a `--listen` process accepts. `session/list`, `session/attach`,
   `session/close` and `session/cancel` work across connections, status changes
@@ -119,9 +119,10 @@ requirement, not before.
 
 Remaining, in plan order: Phase 5's teammate progress for the legacy TUI and
 ACP clients, resuming running jobs across process restarts, and a merge agent
-for conflicts beyond a clean three-way merge. Phase 1 is complete; retiring the
-`COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
-deleting the old loop) is follow-up cleanup, not parity work.
+for conflicts beyond a clean three-way merge. Phase 1 is complete; the
+`COVEXCODE_CORE_SESSION` flag is retired, and deleting the old `App` loop
+(which now only serves a no-workspace session) is follow-up cleanup, not
+parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.
@@ -336,9 +337,9 @@ without a before/after trace.
 | **5. Orchestrator/teams** | 3 | Task DAG + atomic claims; lead/mailbox; verifier/merge agent; teams behind an experimental flag |
 | **6. Performance/hardening** | continuous | Caching, repo index, model routing, load/fault tests, performance gates |
 
-Every phase is flag-gated (`COVEXCODE_CORE_SESSION`,
-`COVEXCODE_MULTI_SESSION`, `COVEXCODE_SUBAGENTS_V2`) and keeps the current path
-as a rollback until parity tests pass.
+These phases landed incrementally, keeping the previous path as a rollback
+until parity tests passed. `COVEXCODE_CORE_SESSION` was the last such flag;
+it is retired now that the engine drives every TUI session with a workspace.
 
 ### Phase 0 PRs
 

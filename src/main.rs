@@ -371,30 +371,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (hosted_tx, mut hosted_rx) = mpsc::channel::<Vec<backend::Mine>>(8);
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<Result<(), String>>(8);
 
-    // Opt-in (`COVEXCODE_CORE_SESSION=1`): drive this TUI through the shared
-    // session engine instead of `App`'s own agent loop. The default path is
-    // untouched; without the variable this is `None` and `run_app` behaves
-    // exactly as before. See `core_tui`'s own docs for what is still partial.
-    let mut core = if core_tui::CoreTui::enabled() {
-        workspace.as_ref().map(|ws| {
-            app.startup_notices.push(
-                "Core-session mode (experimental): the engine owns the turn, approvals, and every \
-                 command that changes the conversation, including /subagents and /diff."
-                    .to_string(),
-            );
-            // The engine gets the same recording App just loaded (if any),
-            // so a resumed conversation is not one-sided. Taking the marker
-            // also stops the loop below from restoring it a second time.
-            let history = app
-                .pending_resume
-                .take()
-                .map(|path| session::load_chat(&path))
-                .filter(|messages| !messages.is_empty());
-            core_tui::CoreTui::start_with_history(ws.clone(), app.config.clone(), history)
-        })
-    } else {
-        None
-    };
+    // The session engine drives every TUI session with a workspace. The old
+    // `App` agent loop only remains for a session whose tools/workspace are
+    // disabled -- it could not run an agent there anyway -- and is slated for
+    // deletion; every conversation-changing command is engine-backed.
+    let mut core = workspace.as_ref().map(|ws| {
+        // The engine gets the same recording App just loaded (if any), so a
+        // resumed conversation is not one-sided. Taking the marker also stops
+        // the loop below from restoring it a second time.
+        let history = app
+            .pending_resume
+            .take()
+            .map(|path| session::load_chat(&path))
+            .filter(|messages| !messages.is_empty());
+        core_tui::CoreTui::start_with_history(ws.clone(), app.config.clone(), history)
+    });
     if core.is_some() {
         app.core_session = true;
     }
@@ -999,9 +990,10 @@ async fn run_app(
         // the matching state, and both live in `agent.rs` -- this loop only
         // decides *when* they get a chance to run, not what they do.
         //
-        // With `COVEXCODE_CORE_SESSION=1`, firing goes to the engine client
-        // instead; `execute_approved` stays a no-op there because the engine
-        // runs its own tools.
+        // When the session engine owns the turn (every session with a
+        // workspace), firing goes to the engine client instead;
+        // `execute_approved` stays a no-op there because the engine runs its
+        // own tools.
         //
         // A provider/model switch or completed login must reach the running
         // engine before the prompt fired this tick, or that prompt would go
