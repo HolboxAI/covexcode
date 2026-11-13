@@ -109,7 +109,9 @@ Landed on `main`:
   trail. The same progress is sent to ACP clients as tool-call updates through
   a session-lifetime channel, so it arrives after the prompt that started the
   teammate has returned; keeping it off the per-prompt channel is what stops
-  the transport's drain from waiting for the child.
+  the transport's drain from waiting for the child. The TUI's `/teammates`
+  command reads the same registry locally, so a person can check job status
+  without spending a model turn.
   Cancelling the turn does not cancel a teammate; `stop` is the explicit
   control. A writing type is refused as a teammate by default, because its
   patch would be applied while nobody is watching; the explicit

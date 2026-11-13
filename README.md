@@ -306,8 +306,9 @@ have its finished report collected, but only its own process can stop it. In the
 tool calls live and marks it finished when it reports; ACP clients receive the
 same progress as tool-call updates after the prompt that started the teammate
 has returned, and a client that ignores them can poll
-`teammates { action: "list" }`. Cancelling a turn does not stop a teammate —
-use `stop`. Writing agent types are refused by default: their patch would land
+`teammates { action: "list" }`. In the TUI, `/teammates` shows the same job
+list locally, without spending a model turn, and `/agents` tracks a running
+child's tool calls. Cancelling a turn does not stop a teammate — use `stop`. Writing agent types are refused by default: their patch would land
 while you are not watching. Set `[tools] background_writes = true` to allow
 them; their patch still goes through the same worktree, verify, and
 three-way-merge path before it touches the checkout.
