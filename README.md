@@ -303,9 +303,11 @@ mode and under `[tools] sandbox = "read-only"`.
 
 A writing definition may also declare `verify = "cargo check"` (or any
 command). It runs inside the worktree before the patch is offered; a non-zero
-exit leaves the patch unapplied and reports the command's output. Verify
-commands come from the agent file and run with your own permissions — the
-same trust boundary as the prompt itself.
+exit leaves the patch unapplied and reports the command's output. The child
+may run that exact command itself while it works -- it is the one command
+allowed beyond the read-only list -- so it can see failures and fix them
+before reporting. Verify commands come from the agent file and run with your
+own permissions — the same trust boundary as the prompt itself.
 
 ```toml
 # .covexcode/agents/worker.toml

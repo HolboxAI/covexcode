@@ -1515,12 +1515,37 @@ pub fn subagent_write_call_allowed(call: &ToolCall) -> Result<(), String> {
         if !command.is_empty() && !is_read_only(&command) {
             return Err(format!(
                 "Writing subagents may only run commands that cannot change anything, and \
-                 `{}` is not on that list. Use write_file/edit_file for changes.",
+                 `{}` is not on that list. Use write_file/edit_file for changes. If your \
+                 definition sets a verify command, that exact command is also allowed.",
                 clip(&command, 60)
             ));
         }
     }
     Ok(())
+}
+
+/// Whether `call` runs exactly the definition's verify command, and would
+/// actually run it -- a background job returns before checking anything, so it
+/// does not qualify.
+///
+/// This is the one widening of a writing child's command allowlist: the
+/// child may run the command the definition already authorizes to run after
+/// it finishes, so it can see failures and fix them in the same turn instead
+/// of handing back a patch that will be rejected. It grants no authority the
+/// definition did not already have, and the exact-match rule means the shell
+/// string cannot be extended with anything else.
+pub fn is_verify_command(call: &ToolCall, verify: &str) -> bool {
+    if call.function.name != RUN_COMMAND {
+        return false;
+    }
+    let verify = verify.trim();
+    if verify.is_empty() {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<RunArgs>(&call.function.arguments) else {
+        return false;
+    };
+    !args.background && args.command.trim() == verify
 }
 
 /// What a writing subagent is told. Same deliverable shape as the research
@@ -9188,6 +9213,33 @@ mod tests {
             "a writing child still may not run mutating commands"
         );
         assert!(subagent_write_call_allowed(&tool_call(DEPLOY_PROJECT, json!({}))).is_err());
+    }
+
+    #[test]
+    fn only_the_exact_verify_command_is_exempt_from_the_child_allowlist() {
+        let verify = call("cargo test --all");
+        assert!(is_verify_command(&verify, "cargo test --all"));
+        assert!(is_verify_command(&verify, "  cargo test --all  "));
+        assert!(!is_verify_command(&verify, "cargo test"));
+        assert!(
+            !is_verify_command(&call("cargo test --all && rm -rf src"), "cargo test --all"),
+            "the shell string cannot be extended with anything else"
+        );
+        assert!(
+            !is_verify_command(
+                &tool_call(
+                    RUN_COMMAND,
+                    json!({ "command": "cargo test --all", "background": true })
+                ),
+                "cargo test --all"
+            ),
+            "a background command returns before checking anything"
+        );
+        assert!(!is_verify_command(
+            &tool_call(READ_FILE, json!({ "path": "x" })),
+            "x"
+        ));
+        assert!(!is_verify_command(&verify, ""));
     }
 
     #[test]

@@ -54,6 +54,10 @@ Landed on `main`:
   `writes = true` runs in a worktree and returns a patch. An optional
   `verify` command in the definition runs in the worktree before the patch is
   offered: a non-zero exit leaves the patch unapplied and reports the output.
+  The same exact command is the one exception to the writing child's
+  read-only command list, so the child can run it while it works and fix
+  failures before reporting; a background invocation does not qualify, and
+  the shell string must match exactly.
   A clean patch is applied to the requester's checkout serially (one
   `git apply` at a time); a conflict is reported with the patch and the
   retained worktree path, and writes nothing. Step and token budgets and
@@ -78,9 +82,14 @@ Landed on `main`:
   subagents are offered `mailbox` alongside their read-only tools. A corrupt
   or foreign store is reported, never silently reset, because a reset would
   free claims other agents are working under or drop unread messages. This is
-  coordination state for work in flight, not a second event store. Persistent
-  background teammates (a teammate that outlives one tool call) and a
-  verifier/merge agent remain.
+  coordination state for work in flight, not a second event store. The
+  verifier half is config-driven: a writing definition's `verify` command runs
+  after the child reports and before the patch is applied, and may also be run
+  by the child itself while it works, so the implement → fix loop happens
+  inside the worktree. Patch application is serial and verified before it
+  touches the checkout; a conflict is reported and nothing is written, rather
+  than resolved automatically. Persistent background teammates (a teammate
+  that outlives one tool call) and automatic conflict resolution remain.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -88,8 +97,8 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's persistent teammate runtime and the
-verifier/merge agent. Phase 1 is complete; retiring the
+Remaining, in plan order: Phase 5's persistent teammate runtime and automatic
+conflict resolution. Phase 1 is complete; retiring the
 `COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
 deleting the old loop) is follow-up cleanup, not parity work.
 
