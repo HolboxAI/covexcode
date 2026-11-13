@@ -509,6 +509,57 @@ fn plan_update(plan: &crate::plan::Plan) -> crate::protocol::Plan {
     }
 }
 
+/// Announce a background teammate to an ACP client. `id` is the teammate id,
+/// not the parent call: the parent call completed when the child started, so
+/// a client keyed on it would close the row immediately.
+fn teammate_tool_call(id: &str, title: &str) -> SessionUpdate {
+    SessionUpdate::ToolCall(AcpToolCall {
+        tool_call_id: ToolCallId(id.to_string()),
+        title: title.to_string(),
+        kind: ToolKind::Other,
+        status: ToolCallStatus::InProgress,
+    })
+}
+
+fn teammate_progress(id: &str, label: &str, rounds: usize) -> SessionUpdate {
+    SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+        tool_call_id: ToolCallId(id.to_string()),
+        title: None,
+        kind: None,
+        status: Some(ToolCallStatus::InProgress),
+        content: Some(ToolCallContent::Text {
+            text: format!("{label} (round {rounds})"),
+        }),
+    })
+}
+
+fn teammate_outcome(id: &str, summary: &str) -> SessionUpdate {
+    SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+        tool_call_id: ToolCallId(id.to_string()),
+        title: None,
+        kind: None,
+        status: Some(if summary == "failed" {
+            ToolCallStatus::Failed
+        } else {
+            ToolCallStatus::Completed
+        }),
+        content: Some(ToolCallContent::Text {
+            text: summary.to_string(),
+        }),
+    })
+}
+
+/// Best effort: the session-lifetime channel exists only under the ACP
+/// transport, and a full or closed channel must never stall the child.
+fn send_teammate_update(
+    sender: &Option<mpsc::UnboundedSender<SessionUpdate>>,
+    update: SessionUpdate,
+) {
+    if let Some(sender) = sender {
+        let _ = sender.send(update);
+    }
+}
+
 /// One ACP session's worth of state -- deliberately independent of `App`,
 /// not extracted from it. See this module's own docs for the remaining
 /// narrower scope (no deploy) that keeps this from becoming a shadow `App`.
@@ -576,6 +627,12 @@ pub struct HeadlessSession {
     /// `SessionUpdate`; any number of TUI/daemon subscribers can observe the
     /// same session without changing the ACP path.
     events: EventHub,
+    /// Updates that belong to the session, not one prompt turn: background
+    /// teammate progress. The transport wires this to the session's update
+    /// hub, which stays subscribed for the connection's lifetime, so a
+    /// teammate can reach the client after the prompt that started it has
+    /// returned. The TUI engine leaves it `None` and uses `events` instead.
+    background_updates: Option<mpsc::UnboundedSender<SessionUpdate>>,
     /// Cooperative cancellation for the currently running turn. Reset at the
     /// start of every prompt, so a stale cancel cannot kill the next turn.
     cancel: CancelHandle,
@@ -612,6 +669,7 @@ impl HeadlessSession {
             test_persist: false,
             mcp: crate::mcp::McpRegistry::default(),
             events: EventHub::default(),
+            background_updates: None,
             cancel: CancelHandle::default(),
             approvals: ApprovalHandle::default(),
             browser_seq: AtomicU64::new(0),
@@ -651,6 +709,13 @@ impl HeadlessSession {
     /// the seam a TUI or a session manager uses; the ACP path is unchanged.
     pub fn subscribe_events(&self) -> mpsc::UnboundedReceiver<SessionEvent> {
         self.events.subscribe()
+    }
+
+    /// Give background teammates a session-lifetime update channel. The ACP
+    /// transport wires it to its update hub; callers that already consume
+    /// `SessionEvent` (the TUI engine) leave it unset.
+    pub fn set_background_updates(&mut self, updates: mpsc::UnboundedSender<SessionUpdate>) {
+        self.background_updates = Some(updates);
     }
 
     /// Replace this session's conversation with a recorded one (see
@@ -1855,6 +1920,7 @@ impl HeadlessSession {
                 .map(|action| action.label())
                 .unwrap_or_else(|| call.function.name.clone());
             let events = updates.events.clone();
+            let background = self.background_updates.clone();
             let session_id = updates.session_id.clone();
             let turn = updates.turn;
             let announced = std::sync::Once::new();
@@ -1867,27 +1933,38 @@ impl HeadlessSession {
                             tool_call_id: teammate_id.to_string(),
                             title: title.clone(),
                         });
+                        // The ACP hub stays subscribed for the connection's
+                        // lifetime, so this reaches an IDE even though the
+                        // prompt that started the teammate has returned.
+                        send_teammate_update(&background, teammate_tool_call(teammate_id, &title));
                     });
-                    let event = match event {
+                    match event {
                         crate::teammates::Activity::Step { label, rounds } => {
-                            SessionEvent::SubagentActivity {
+                            send_teammate_update(
+                                &background,
+                                teammate_progress(teammate_id, &label, rounds),
+                            );
+                            events.send(SessionEvent::SubagentActivity {
                                 session_id: session_id.clone(),
                                 turn,
                                 call_id: teammate_id.to_string(),
                                 label,
                                 rounds,
-                            }
+                            });
                         }
                         crate::teammates::Activity::Finished { summary } => {
-                            SessionEvent::SubagentFinished {
+                            send_teammate_update(
+                                &background,
+                                teammate_outcome(teammate_id, &summary),
+                            );
+                            events.send(SessionEvent::SubagentFinished {
                                 session_id: session_id.clone(),
                                 turn,
                                 call_id: teammate_id.to_string(),
                                 summary,
-                            }
+                            });
                         }
-                    };
-                    events.send(event);
+                    }
                 });
             let content = match crate::teammates::spawn(
                 call.clone(),
@@ -3389,7 +3466,11 @@ mod tests {
         ])
         .await;
         let config = config_for(&endpoint);
-        let session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        // The transport wires this channel to its long-lived update hub; the
+        // test collects the same values directly.
+        let (background_tx, mut background_rx) = mpsc::unbounded_channel();
+        session.set_background_updates(background_tx);
         let call = ToolCall {
             id: "call_bg".to_string(),
             kind: "function".to_string(),
@@ -3467,6 +3548,27 @@ mod tests {
         }
         assert!(saw_step, "the child's tool call was streamed");
         assert!(saw_finished, "the teammate's finish was streamed");
+
+        // The same progress reaches an ACP client through the session-lifetime
+        // channel: an announcement, then a completed update.
+        let mut announced_update = false;
+        let mut finished_update = false;
+        while let Ok(update) = background_rx.try_recv() {
+            match update {
+                SessionUpdate::ToolCall(tool) if tool.tool_call_id.0.starts_with("teammate-") => {
+                    announced_update = true;
+                }
+                SessionUpdate::ToolCallUpdate(update)
+                    if update.tool_call_id.0.starts_with("teammate-")
+                        && update.status == Some(ToolCallStatus::Completed) =>
+                {
+                    finished_update = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(announced_update, "the teammate is announced to the client");
+        assert!(finished_update, "the client is told the teammate finished");
     }
 
     /// A long child turn must not look frozen: the engine forwards each child

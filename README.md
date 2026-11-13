@@ -302,13 +302,14 @@ exits before you collect it, a later session can still read it; a *running*
 job does not survive the process. A teammate started by another covexcode
 process can have its finished report collected, but only its own process can
 stop it. In the engine-backed session, `/agents` shows a background teammate's
-tool calls live and marks it finished when it reports; clients that do not
-consume that event stream poll `teammates { action: "list" }`. Cancelling a
-turn does not stop a teammate — use `stop`. Writing agent types are refused by
-default: their patch would land while you are not watching. Set
-`[tools] background_writes = true` to allow them; their patch still goes
-through the same worktree, verify, and three-way-merge path before it touches
-the checkout.
+tool calls live and marks it finished when it reports; ACP clients receive the
+same progress as tool-call updates after the prompt that started the teammate
+has returned, and a client that ignores them can poll
+`teammates { action: "list" }`. Cancelling a turn does not stop a teammate —
+use `stop`. Writing agent types are refused by default: their patch would land
+while you are not watching. Set `[tools] background_writes = true` to allow
+them; their patch still goes through the same worktree, verify, and
+three-way-merge path before it touches the checkout.
 
 A definition may set `writes = true`. That child runs in an isolated git
 worktree at HEAD (the repository needs at least one commit), may call
