@@ -931,7 +931,8 @@ fn tool_kind_for(action: &Action) -> ToolKind {
         | Action::Progress { .. }
         | Action::Todos(_)
         | Action::Tasks
-        | Action::Mailbox { .. } => ToolKind::SwitchMode,
+        | Action::Mailbox { .. }
+        | Action::Teammates { .. } => ToolKind::SwitchMode,
     }
 }
 

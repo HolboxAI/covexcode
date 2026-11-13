@@ -2380,6 +2380,15 @@ fn tool_approval_parts(
             )));
             (" Use the mailbox? ", "send", "skip")
         }
+        // Teammate jobs are inspected, not approved: the child was already
+        // approved when it started.
+        Action::Teammates { action } => {
+            lines.push(Line::from(Span::styled(
+                format!("teammates {action}"),
+                theme::text(),
+            )));
+            (" Manage teammates? ", "manage", "skip")
+        }
     };
 
     lines.push(Line::from(""));

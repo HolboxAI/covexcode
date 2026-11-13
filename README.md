@@ -293,6 +293,14 @@ directory -- a writing subagent's worktree shares its requester's mailbox --
 so notes survive a turn and are visible to another covexcode process in the
 same repository. Subagents are told their agent type as their mailbox name.
 
+A read-only subagent can also run as a background teammate: `agent` with
+`"background": true` returns a teammate id immediately, and the `teammates`
+tool lists running and finished jobs, returns a finished report (`report`), or
+aborts one (`stop`). Jobs live in the session's process, so they end when it
+exits, and a report is kept only until it is collected. Cancelling a turn does
+not stop a teammate — use `stop`. Writing agent types cannot be backgrounded
+yet — their patch would land while you are not watching.
+
 A definition may set `writes = true`. That child runs in an isolated git
 worktree at HEAD (the repository needs at least one commit), may call
 `write_file`/`edit_file`, and returns its changes as a patch after its report.

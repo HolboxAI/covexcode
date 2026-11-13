@@ -243,6 +243,32 @@ pub fn execute_approved(
 /// `artifacts.rs` uses for its own bounded upload fan-out.
 const MAX_CONCURRENT_READS: usize = 16;
 
+/// The immediate tool result for a background `agent` call: the child is
+/// already running as a teammate, so this reports its job id instead of a
+/// report the parent would have to wait for.
+fn start_teammate(call: &ToolCall, ws: &Workspace, config: &Config) -> ToolOutcome {
+    match crate::teammates::spawn(call.clone(), ws.clone(), config.clone()) {
+        Ok(started) => ToolOutcome {
+            call_id: call.id.clone(),
+            display: format!("agent — started {}", started.id),
+            content: format!(
+                "Started background teammate '{}' ({}). Continue with other work; collect \
+                 its report with teammates {{ \"action\": \"report\", \"id\": \"{}\" }}.",
+                started.name, started.id, started.id
+            ),
+            diff: None,
+            rollback: None,
+        },
+        Err(e) => ToolOutcome {
+            call_id: call.id.clone(),
+            display: "agent — not started".to_string(),
+            content: format!("Error: {e}"),
+            diff: None,
+            rollback: None,
+        },
+    }
+}
+
 /// Run one turn's approved calls and hand back their outcomes in the same
 /// order `calls` came in, regardless of which read finished first.
 ///
@@ -340,19 +366,45 @@ async fn run_calls(
             } else {
                 config.tools.subagent_concurrency
             };
+            // Background calls start a teammate and finish immediately; the
+            // results are placed back by index so a mixed run keeps the
+            // transcript's order.
+            let mut results: Vec<Option<ToolOutcome>> = (0..run.len()).map(|_| None).collect();
+            let mut foreground: Vec<(usize, ToolCall)> = Vec::new();
+            for (index, call) in run.iter().enumerate() {
+                if matches!(
+                    tools::describe_action(call),
+                    Some(tools::Action::Agent {
+                        background: true,
+                        ..
+                    })
+                ) {
+                    results[index] = Some(start_teammate(call, ws, config));
+                } else {
+                    foreground.push((index, call.clone()));
+                }
+            }
             // Chunked exactly like the read fan-out above: a chunk's futures
             // are polled together, so this is the hard cap on how many
             // children are ever in flight. `join_all` still yields results in
             // submission order, so the transcript order is unchanged.
-            for chunk in run.chunks(cap.max(1)) {
-                let futures = chunk.iter().map(|call| {
+            for chunk in foreground.chunks(cap.max(1)) {
+                let futures = chunk.iter().map(|(_, call)| {
                     let call = call.clone();
                     let ws = ws.clone();
                     let config = config.clone();
                     async move { run_subagent(&call, &ws, &config, progress).await }
                 });
-                outcomes.extend(futures::future::join_all(futures).await);
+                let finished = futures::future::join_all(futures).await;
+                for ((index, _), outcome) in chunk.iter().zip(finished) {
+                    results[*index] = Some(outcome);
+                }
             }
+            outcomes.extend(
+                results
+                    .into_iter()
+                    .map(|outcome| outcome.expect("every agent call produced an outcome")),
+            );
         } else {
             let call = &calls[i];
             outcomes.push(tools::execute_truncated(call, ws, &config.tools, truncated).await);
@@ -997,6 +1049,47 @@ mod tests {
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].content, "Looked fine.");
+    }
+
+    /// A background agent call returns immediately; its report is collected
+    /// from the teammate registry instead of the tool result.
+    #[tokio::test]
+    async fn a_background_agent_call_returns_a_job_and_its_report_is_collectable() {
+        let (_dir, ws) = workspace_with_hello();
+        let (endpoint, _bodies) = serve_rounds(vec![text_round("Background report.")]).await;
+        let config = config_for(&endpoint);
+        let call = agent_call(json!({
+            "task": "look around in the background",
+            "background": true
+        }));
+
+        let outcomes = run_calls(&[call], &ws, &config, false, None).await;
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            outcomes[0].content.contains("Started background teammate"),
+            "{}",
+            outcomes[0].content
+        );
+
+        let id = crate::teammates::list(ws.root())
+            .into_iter()
+            .find(|job| job.task == "look around in the background")
+            .map(|job| job.id)
+            .expect("the job is registered");
+        let mut collected = None;
+        for _ in 0..200 {
+            match crate::teammates::report(ws.root(), &id) {
+                Ok(text) => {
+                    collected = Some(text);
+                    break;
+                }
+                Err(e) if e.contains("still running") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(e) => panic!("unexpected report error: {e}"),
+            }
+        }
+        assert_eq!(collected.expect("a report"), "Background report.");
     }
 
     fn committed_workspace() -> (tempfile::TempDir, Workspace) {

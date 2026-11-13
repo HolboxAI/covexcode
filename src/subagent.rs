@@ -211,7 +211,10 @@ pub async fn run_subagent(
     config: &Config,
     progress: Option<(u64, &mpsc::Sender<(u64, StreamEvent)>)>,
 ) -> ToolOutcome {
-    let Some(tools::Action::Agent { task, agent_type }) = tools::describe_action(call) else {
+    let Some(tools::Action::Agent {
+        task, agent_type, ..
+    }) = tools::describe_action(call)
+    else {
         return ToolOutcome {
             call_id: call.id.clone(),
             display: "agent — bad arguments".to_string(),

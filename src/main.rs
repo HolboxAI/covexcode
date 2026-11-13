@@ -40,6 +40,7 @@ mod session_client;
 mod shell;
 mod subagent;
 mod tasks;
+mod teammates;
 mod telemetry;
 mod theme;
 mod tools;

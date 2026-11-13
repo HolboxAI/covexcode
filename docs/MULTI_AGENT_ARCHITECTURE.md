@@ -2,7 +2,7 @@
 
 Status: Phase 0 complete; Phase 1 complete; Phase 2 complete (JSONL store);
 Phase 3 complete (tool-level sandbox); Phase 4 complete; Phase 5 in progress
-(task DAG and mailbox)  
+(task DAG, mailbox, background teammates)  
 Date: 2026-11-12  
 Scope: `HolboxAI/covexcode` (the Rust CLI and agent runtime)
 
@@ -93,9 +93,16 @@ Landed on `main`:
   inside the worktree. Patch application is serial and verified before it
   touches the checkout; a patch that no longer applies exactly gets one
   three-way merge against the working tree, and only an unresolved overlap is
-  reported (with the checkout restored) rather than guessed at. Persistent
-  background teammates (a teammate that outlives one tool call) and a merge
-  agent that writes through overlapping hunks remain.
+  reported (with the checkout restored) rather than guessed at. Background
+  teammates are process-local tasks: `agent { background: true }` starts a
+  read-only child and returns a job id immediately, and `teammates`
+  list/report/stop manages them (jobs are scoped to one workspace). Running
+  jobs reuse the subagent concurrency limit so detached work cannot quietly
+  multiply the token bill. Cancelling the turn does not cancel a teammate;
+  `stop` is the explicit control. A writing type cannot be backgrounded yet,
+  because its patch would be applied while nobody is watching; forwarding
+  teammate progress to `/agents` and supervising jobs across process restarts
+  also remain, as does a merge agent that writes through overlapping hunks.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -103,9 +110,9 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's persistent teammate runtime and a merge
-agent for conflicts beyond a clean three-way merge. Phase 1 is complete;
-retiring the
+Remaining, in plan order: Phase 5's background-teammate event streaming,
+cross-restart supervision, and a merge agent for conflicts beyond a clean
+three-way merge. Phase 1 is complete; retiring the
 `COVEXCODE_CORE_SESSION` flag (making the engine the TUI's only path and
 deleting the old loop) is follow-up cleanup, not parity work.
 
