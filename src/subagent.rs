@@ -109,11 +109,12 @@ fn valid_agent_name(name: &str) -> bool {
 /// definition -- the original read-only child). A project definition with the
 /// same name overrides these, the same way it overrides another definition.
 ///
-/// `worker` and `tester` write in an isolated worktree; `reviewer` reads. The
-/// tester does not run the suite itself -- its tool surface is read-only for
-/// commands -- so its prompt asks for the command the parent should verify
-/// with, and a project can add `verify = "..."` to a definition when it wants
-/// the check run automatically.
+/// `worker` and `tester` write in an isolated worktree; `reviewer` reads;
+/// `merge` is the internal conflict resolver. The tester does not run the
+/// suite itself -- its tool surface is read-only for commands -- so its prompt
+/// asks for the command the parent should verify with, and a project can add
+/// `verify = "..."` to a definition when it wants the check run
+/// automatically.
 pub fn builtin(name: &str) -> Option<AgentDefinition> {
     let definition = |name: &str, description: &str, prompt: &str, writes: bool| AgentDefinition {
         name: name.to_string(),
@@ -151,12 +152,22 @@ pub fn builtin(name: &str) -> Option<AgentDefinition> {
              most severe first. If nothing is wrong, say so plainly. Do not modify anything.",
             false,
         )),
+        "merge" => Some(definition(
+            "merge",
+            "resolves merge conflict markers in an isolated worktree",
+            "This checkout contains merge conflict markers (<<<<<<<, =======, >>>>>>>) left by \
+             two agents that edited the same files. Resolve every conflict, preserving the \
+             intent of both sides; remove all markers and any duplicated lines. Read each \
+             conflicted file fully before editing and read it back after. Do not commit. Your \
+             resolution is captured as a patch and applied to the requester's checkout.",
+            true,
+        )),
         _ => None,
     }
 }
 
 /// Every type `agent` can be given without a project definition.
-pub const BUILTIN_AGENTS: &[&str] = &["explore", "worker", "tester", "reviewer"];
+pub const BUILTIN_AGENTS: &[&str] = &["explore", "worker", "tester", "reviewer", "merge"];
 
 /// The per-call fence for a child. Factored out of the loop so the one
 /// intentional widening -- a writing child may run its definition's verify
@@ -210,6 +221,20 @@ pub async fn run_subagent(
     workspace: &Workspace,
     config: &Config,
     progress: Option<(u64, &mpsc::Sender<(u64, StreamEvent)>)>,
+) -> ToolOutcome {
+    run_subagent_with(call, workspace, config, progress, true).await
+}
+
+/// [`run_subagent`], with the one piece of control the merge agent needs:
+/// whether a conflicting patch may start *another* child to resolve it. The
+/// merge child itself passes `false`, so a resolution that conflicts again
+/// falls back to the ordinary conflict report instead of recursing.
+pub async fn run_subagent_with(
+    call: &ToolCall,
+    workspace: &Workspace,
+    config: &Config,
+    progress: Option<(u64, &mpsc::Sender<(u64, StreamEvent)>)>,
+    allow_auto_merge: bool,
 ) -> ToolOutcome {
     let Some(tools::Action::Agent {
         task, agent_type, ..
@@ -483,6 +508,8 @@ pub async fn run_subagent(
                 ),
                 worktree.as_ref(),
                 config.tools.max_output_bytes,
+                config,
+                allow_auto_merge,
                 verify,
             )
             .await;
@@ -515,6 +542,8 @@ pub async fn run_subagent(
                 },
                 worktree.as_ref(),
                 config.tools.max_output_bytes,
+                config,
+                allow_auto_merge,
                 verify,
             )
             .await;
@@ -538,6 +567,8 @@ pub async fn run_subagent(
                     "The subagent spent its whole budget without writing a report.".to_string(),
                     worktree.as_ref(),
                     config.tools.max_output_bytes,
+                    config,
+                    allow_auto_merge,
                     verify,
                 )
                 .await;
@@ -605,6 +636,8 @@ async fn finish_subagent(
     mut content: String,
     worktree: Option<&crate::worktree::Worktree>,
     max_patch_bytes: usize,
+    config: &Config,
+    allow_auto_merge: bool,
     verify: Option<(&str, u64)>,
 ) -> ToolOutcome {
     if let Some(worktree) = worktree {
@@ -656,20 +689,81 @@ async fn finish_subagent(
                             Some("applied after a three-way merge with your current files")
                         }
                         Ok(crate::worktree::Applied::Conflict(reason)) => {
-                            content.push_str(&format!(
-                                "\n\nThe patch was NOT applied because it conflicts with the \
-                                 current files: {reason}\nThe child's worktree is at {} and was \
-                                 left in place so its work is not lost.",
-                                worktree.path().display()
-                            ));
-                            if include {
-                                content.push_str(&format!(
-                                    "\n\n--- patch ({} file{plural}) ---\n{}",
-                                    patch.files.len(),
-                                    patch.diff
-                                ));
+                            let attempt = if allow_auto_merge && config.tools.merge_agent {
+                                Some(resolve_conflict(worktree, &patch.diff, config, verify).await)
+                            } else {
+                                None
+                            };
+                            match attempt {
+                                Some(Ok(merged)) => match worktree.apply(&merged) {
+                                    Ok(crate::worktree::Applied::Clean) => {
+                                        Some("applied after an automatic merge resolution")
+                                    }
+                                    Ok(crate::worktree::Applied::Merged) => Some(
+                                        "applied after an automatic merge resolution and a \
+                                         three-way merge",
+                                    ),
+                                    Ok(crate::worktree::Applied::Conflict(second)) => {
+                                        content.push_str(&format!(
+                                            "\n\nThe patch still conflicts after an automatic \
+                                             merge attempt: {second}\nOriginal conflict: \
+                                             {reason}\nThe child's worktree is at {} and was left \
+                                             in place.",
+                                            worktree.path().display()
+                                        ));
+                                        if include {
+                                            content.push_str(&format!(
+                                                "\n\n--- patch ({} file{plural}) ---\n{}",
+                                                patch.files.len(),
+                                                patch.diff
+                                            ));
+                                        }
+                                        None
+                                    }
+                                    Err(error) => {
+                                        content.push_str(&format!(
+                                            "\n\nThe automatic merge produced a patch that could \
+                                             not be applied ({error}); the child's worktree is at \
+                                             {} and was left in place.",
+                                            worktree.path().display()
+                                        ));
+                                        None
+                                    }
+                                },
+                                Some(Err(merge_error)) => {
+                                    content.push_str(&format!(
+                                        "\n\nThe patch was NOT applied because it conflicts with \
+                                         the current files: {reason}\nAn automatic merge attempt \
+                                         did not resolve it: {merge_error}\nThe child's worktree \
+                                         is at {} and was left in place so its work is not lost.",
+                                        worktree.path().display()
+                                    ));
+                                    if include {
+                                        content.push_str(&format!(
+                                            "\n\n--- patch ({} file{plural}) ---\n{}",
+                                            patch.files.len(),
+                                            patch.diff
+                                        ));
+                                    }
+                                    None
+                                }
+                                None => {
+                                    content.push_str(&format!(
+                                        "\n\nThe patch was NOT applied because it conflicts with \
+                                         the current files: {reason}\nThe child's worktree is at \
+                                         {} and was left in place so its work is not lost.",
+                                        worktree.path().display()
+                                    ));
+                                    if include {
+                                        content.push_str(&format!(
+                                            "\n\n--- patch ({} file{plural}) ---\n{}",
+                                            patch.files.len(),
+                                            patch.diff
+                                        ));
+                                    }
+                                    None
+                                }
                             }
-                            None
                         }
                         Err(error) => {
                             content.push_str(&format!(
@@ -712,6 +806,128 @@ async fn finish_subagent(
         diff: None,
         rollback: None,
     }
+}
+
+/// Try to resolve `patch` against the requester's current working tree with
+/// a merge agent.
+///
+/// The requester's checkout may hold other agents' applied patches, so the
+/// original child's worktree cannot be used for the merge: it starts at HEAD,
+/// not at the current files. Instead:
+///
+/// 1. Snapshot the current working tree as a temporary commit (tracked and
+///    untracked files, without touching the real index).
+/// 2. Create a worktree at that snapshot and apply the child's patch with
+///    `git apply --3way`; the overlap that could not be applied in the real
+///    checkout becomes ordinary conflict markers here.
+/// 3. Commit the marker state and run a bounded `merge` child in a worktree of
+///    its own, so its edits are isolated.
+/// 4. Run the original verify command (if any) on the resolved tree, then
+///    diff that tree against the snapshot. The caller applies this diff to the
+///    real checkout, which is still at the snapshot state.
+///
+/// On any failure the temporary worktrees are removed and the caller falls
+/// back to reporting the conflict. The merge child is run with auto-merge
+/// disabled, so a resolution that conflicts again cannot recurse.
+async fn resolve_conflict(
+    source: &crate::worktree::Worktree,
+    patch: &str,
+    config: &Config,
+    verify: Option<(&str, u64)>,
+) -> Result<String, String> {
+    let repo = source.repo().to_path_buf();
+    let base = crate::config::Config::config_dir().join("worktrees");
+    // Snapshot the *requester's* checkout, not the child's worktree: the
+    // child's tree already contains the change we are trying to merge.
+    let snapshot = crate::worktree::snapshot_working_tree(&repo)
+        .map_err(|e| format!("the working tree could not be snapshotted: {e}"))?;
+
+    let staged = crate::worktree::Worktree::create_at(&base, &repo, "merge-in", &snapshot)?;
+    let conflicted = match staged.apply_with_conflicts(patch) {
+        Ok(conflicted) => conflicted,
+        Err(e) => {
+            staged.remove();
+            return Err(format!("the patch could not be staged for merging: {e}"));
+        }
+    };
+    if !conflicted {
+        // The snapshot moved past whatever blocked the real apply; a clean
+        // three-way result is already the answer.
+        let diff = staged.diff_against(&snapshot)?;
+        staged.remove();
+        return Ok(diff);
+    }
+
+    let marker_commit = match staged.snapshot() {
+        Ok(commit) => commit,
+        Err(e) => {
+            staged.remove();
+            return Err(format!("the conflict state could not be snapshotted: {e}"));
+        }
+    };
+    staged.remove();
+    let resolver = crate::worktree::Worktree::create_at(&base, &repo, "merge", &marker_commit)?;
+    let workspace = match Workspace::new(resolver.path()) {
+        Ok(workspace) => workspace,
+        Err(e) => {
+            resolver.remove();
+            return Err(format!("the merge worktree could not be opened: {e}"));
+        }
+    };
+
+    let merge_call = ToolCall {
+        id: "call_merge".to_string(),
+        kind: "function".to_string(),
+        function: crate::llm::FunctionCall {
+            name: tools::AGENT.to_string(),
+            arguments: serde_json::json!({
+                "task": "Resolve the merge conflict markers in this checkout. Two agents \
+                         changed the same files: one's patch has just been applied on top of \
+                         the other's current files. Resolve every conflict, preserving the \
+                         intent of both sides, and remove all markers. Do not commit.",
+                "agent_type": "merge"
+            })
+            .to_string(),
+        },
+    };
+    let outcome = Box::pin(run_subagent_with(
+        &merge_call,
+        &workspace,
+        config,
+        None,
+        false,
+    ))
+    .await;
+    let resolved = outcome.content.contains("applied cleanly")
+        || outcome.content.contains("three-way merge");
+    if !resolved || outcome.content.starts_with("Error:") {
+        resolver.remove();
+        return Err(format!(
+            "the merge agent did not produce a clean resolution: {}",
+            brief(&outcome.content, 240)
+        ));
+    }
+
+    if let Some((command, timeout_secs)) = verify {
+        if let Err(failure) = resolver
+            .verify(command, std::time::Duration::from_secs(timeout_secs))
+            .await
+        {
+            resolver.remove();
+            return Err(format!(
+                "the merged result failed verify (`{command}`): {}",
+                clip_verify(&failure)
+            ));
+        }
+    }
+
+    let merged = resolver.diff_against(&snapshot);
+    resolver.remove();
+    let merged = merged?;
+    if merged.contains("<<<<<<<") || merged.contains(">>>>>>>") {
+        return Err("the merge agent left conflict markers in the result".to_string());
+    }
+    Ok(merged)
 }
 
 /// Verify output is the child's problem report, not a file transfer; the
@@ -805,7 +1021,10 @@ mod tests {
             builtin("explore").is_none(),
             "explore is the absence of a definition, not a builtin record"
         );
-        assert_eq!(BUILTIN_AGENTS, &["explore", "worker", "tester", "reviewer"]);
+        assert_eq!(
+            BUILTIN_AGENTS,
+            &["explore", "worker", "tester", "reviewer", "merge"]
+        );
     }
 
     #[test]

@@ -447,6 +447,15 @@ pub struct ToolsConfig {
     /// let verified, isolated patches land unattended.
     #[serde(default)]
     pub background_writes: bool,
+    /// When a writing child's patch conflicts, let a merge agent resolve the
+    /// overlapping hunks in an isolated snapshot of the current checkout.
+    ///
+    /// On by default: a conflict otherwise leaves the child's work unapplied.
+    /// The merge pass is bounded by the subagent step/token budgets, and a
+    /// failed resolution still falls back to the old conflict report with the
+    /// worktree retained. Set `false` to keep every conflict manual.
+    #[serde(default = "yes")]
+    pub merge_agent: bool,
     /// Retired in favour of `approval`. Read so an old config still loads,
     /// then discarded.
     ///
@@ -696,6 +705,7 @@ impl Default for ToolsConfig {
             approval: ApprovalMode::default(),
             sandbox: SandboxPolicy::default(),
             background_writes: false,
+            merge_agent: true,
             require_approval: None,
             auto_approve_read_only: None,
             command_timeout_secs: default_command_timeout(),
@@ -1764,6 +1774,15 @@ mod tests {
             toml::from_str("[llm]\nendpoint = \"http://x\"\n[tools]\nbackground_writes = true\n")
                 .expect("parses");
         assert!(parsed.tools.background_writes);
+    }
+
+    #[test]
+    fn merge_agent_is_on_by_default_and_can_be_turned_off() {
+        assert!(Config::default().tools.merge_agent);
+        let parsed: Config =
+            toml::from_str("[llm]\nendpoint = \"http://x\"\n[tools]\nmerge_agent = false\n")
+                .expect("parses");
+        assert!(!parsed.tools.merge_agent);
     }
 
     /// The compact threshold is derived from the model, not a fixed 80k that

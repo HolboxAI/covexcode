@@ -1296,6 +1296,98 @@ mod tests {
         );
     }
 
+    /// A conflicting patch is handed to the merge agent, which rewrites the
+    /// overlapping hunk in an isolated snapshot of the current checkout; the
+    /// result is applied like any other patch.
+    #[tokio::test]
+    async fn an_overlapping_patch_is_resolved_by_the_merge_agent() {
+        let _home = crate::config::test_support::IsolatedHome::new();
+        let (dir, ws) = committed_workspace();
+        worker_definition(dir.path(), None);
+        // The requester's checkout moved off HEAD, so the child's line-2 edit
+        // cannot apply exactly.
+        std::fs::write(dir.path().join("hello.txt"), "one\nPARENT\nthree\n").unwrap();
+
+        let (endpoint, _bodies) = serve_rounds(vec![
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"one\nCHILD\nthree\n"}"#,
+            ),
+            text_round("Changed the middle line."),
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"one\nRESOLVED\nthree\n"}"#,
+            ),
+            text_round("Resolved the conflict."),
+        ])
+        .await;
+        let config = config_for(&endpoint);
+
+        let outcomes = run_calls(
+            &[agent_call(json!({
+                "task": "change the middle line",
+                "agent_type": "worker"
+            }))],
+            &ws,
+            &config,
+            false,
+            None,
+        )
+        .await;
+
+        let content = &outcomes[0].content;
+        assert!(
+            content.contains("automatic merge resolution"),
+            "the conflict must go through the merge agent: {content}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "one\nRESOLVED\nthree\n",
+            "the resolved hunk reached the checkout"
+        );
+    }
+
+    /// The merge agent is on by default but can be switched off; a conflict
+    /// then behaves exactly as before and the checkout is untouched.
+    #[tokio::test]
+    async fn the_merge_agent_can_be_turned_off() {
+        let _home = crate::config::test_support::IsolatedHome::new();
+        let (dir, ws) = committed_workspace();
+        worker_definition(dir.path(), None);
+        std::fs::write(dir.path().join("hello.txt"), "one\nPARENT\nthree\n").unwrap();
+
+        let (endpoint, _bodies) = serve_rounds(vec![
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"hello.txt","content":"one\nCHILD\nthree\n"}"#,
+            ),
+            text_round("Changed the middle line."),
+        ])
+        .await;
+        let mut config = config_for(&endpoint);
+        config.tools.merge_agent = false;
+
+        let outcomes = run_calls(
+            &[agent_call(json!({
+                "task": "change the middle line",
+                "agent_type": "worker"
+            }))],
+            &ws,
+            &config,
+            false,
+            None,
+        )
+        .await;
+
+        let content = &outcomes[0].content;
+        assert!(content.contains("NOT applied"), "{content}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "one\nPARENT\nthree\n",
+            "with no merge agent, a conflict must not touch the checkout"
+        );
+    }
+
     /// A failing verify command stops the patch: the requester's checkout is
     /// untouched and the failure output is in the result.
     #[tokio::test]
