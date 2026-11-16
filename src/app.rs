@@ -654,10 +654,9 @@ pub struct App {
     /// engine when core-session mode is on, then clears this.
     pub pending_resume: Option<std::path::PathBuf>,
     /// True when `main.rs` is driving this app through the session engine.
-    /// Every session with a workspace is engine-backed; only a no-workspace
-    /// session (tools disabled or an invalid directory) stays on the local
-    /// fallback. Commands whose implementation has not moved consult this to
-    /// say so instead of acting on a journal the engine owns.
+    /// Every session is engine-backed now; commands whose implementation has
+    /// not moved consult this to say so instead of acting on a journal the
+    /// engine owns.
     pub core_session: bool,
     /// `/rollback` in core mode: the turn filter to ask the engine about
     /// (`0` = every change, otherwise "restore to before this turn").

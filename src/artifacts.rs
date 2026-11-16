@@ -337,7 +337,7 @@ pub(crate) fn remembered_id(path: &Path) -> Option<String> {
 
 /// Whether anything at or under `root` has ever been published -- unlike
 /// `remembered_id`, not an exact-key lookup. `root` here is a *workspace*
-/// root (see `agent.rs`'s `schemas` call), and `Workspace::new` resolves a
+/// root (see `headless.rs`'s schema check), and `Workspace::new` resolves a
 /// published single file to its containing project directory, not the file
 /// itself (see `workspace.rs`) -- so the registry key for a project
 /// published as one file (`project/todo.html`) is never equal to that
@@ -348,6 +348,9 @@ pub(crate) fn remembered_id(path: &Path) -> Option<String> {
 /// reasoning as `remembered_id`: an expired preview link does not make the
 /// tools that manage it stop being relevant to a workspace that has
 /// genuinely published from before.
+///
+/// Test-only: the engine's schema check uses `ids_published_under` instead.
+#[cfg(test)]
 pub(crate) fn any_published_under(root: &Path) -> bool {
     let Ok(root) = root.canonicalize() else {
         return false;

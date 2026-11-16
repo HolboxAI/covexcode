@@ -1,3 +1,6 @@
+/// The batch-executor harness the subagent tests were written around. The
+/// production loop it once held is gone; every session runs in `headless`.
+#[cfg(test)]
 mod agent;
 mod app;
 mod approval;
@@ -63,7 +66,6 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
     LeaveAlternateScreen,
 };
-use llm::StreamEvent;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
@@ -223,6 +225,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some(ws) = workspace.as_ref() {
         projects::record_access(ws.root());
     }
+    // Every session is engine-backed, and the engine needs a workspace even
+    // for chat-only use (tools disabled, or an unreadable configured
+    // directory). Fall back to the current directory for that session; the
+    // status line still reports why the configured workspace is off.
+    let Some(engine_workspace) = workspace.clone().or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|dir| Workspace::new(dir).ok())
+    }) else {
+        eprintln!("{workspace_status}");
+        eprintln!("No usable directory to start a session in.");
+        return Ok(());
+    };
 
     // Detached, not awaited: a slow or unreachable telemetry endpoint must
     // never delay the terminal coming up. See telemetry.rs -- this is a
@@ -352,52 +367,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    // Everything said in this conversation lands in a session file as it
-    // happens; `--resume` reloads the last one before the first keystroke.
-    // The log itself creates no file until there is a message to put in it.
-    let mut session_log = session::SessionLog::new(&app.workspace_root);
     if resume {
         app.resume_latest();
     }
-    let (tx, mut rx) = mpsc::channel::<(u64, StreamEvent)>(256);
-    // A second channel rather than more variants on `StreamEvent`: a
-    // deployment is not the model talking, and folding it into the LLM
-    // transport's event type would make every match there carry cases that
-    // cannot occur.
+    // A channel rather than more variants on `StreamEvent`: a deployment is
+    // not the model talking, and folding it into the LLM transport's event
+    // type would make every match there carry cases that cannot occur.
     let (deploy_tx, mut deploy_rx) = mpsc::channel::<deploy::DeployEvent>(256);
-    // And a third, for the same reason again: `/hosted` asks the hosting
+    // And another, for the same reason again: `/hosted` asks the hosting
     // control plane about several projects at once, which is neither the model
     // talking nor a deployment running. One message, sent once.
     let (hosted_tx, mut hosted_rx) = mpsc::channel::<Vec<backend::Mine>>(8);
     let (feedback_tx, mut feedback_rx) = mpsc::channel::<Result<(), String>>(8);
 
-    // The session engine drives every TUI session with a workspace. The old
-    // `App` agent loop only remains for a session whose tools/workspace are
-    // disabled -- it could not run an agent there anyway -- and is slated for
-    // deletion; every conversation-changing command is engine-backed.
-    let mut core = workspace.as_ref().map(|ws| {
-        // The engine gets the same recording App just loaded (if any), so a
-        // resumed conversation is not one-sided. Taking the marker also stops
-        // the loop below from restoring it a second time.
-        let history = app
-            .pending_resume
-            .take()
-            .map(|path| session::load_chat(&path))
-            .filter(|messages| !messages.is_empty());
-        core_tui::CoreTui::start_with_history(ws.clone(), app.config.clone(), history)
-    });
-    if core.is_some() {
-        app.core_session = true;
-    }
+    // Every session runs through the engine now; there is no App-owned agent
+    // loop left to drive. The engine gets the same recording App just loaded
+    // (if any), so a resumed conversation is not one-sided.
+    let history = app
+        .pending_resume
+        .take()
+        .map(|path| session::load_chat(&path))
+        .filter(|messages| !messages.is_empty());
+    let mut core =
+        core_tui::CoreTui::start_with_history(engine_workspace, app.config.clone(), history);
+    app.core_session = true;
 
     let result = run_app(
         &mut terminal,
         &mut app,
-        workspace.as_ref(),
-        &mut session_log,
         &mut core,
-        tx,
-        &mut rx,
         deploy_tx,
         &mut deploy_rx,
         hosted_tx,
@@ -681,11 +679,7 @@ async fn run_app(
     // backend -- see `reattach_terminal`.
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    workspace: Option<&Workspace>,
-    session_log: &mut session::SessionLog,
-    core: &mut Option<core_tui::CoreTui>,
-    tx: mpsc::Sender<(u64, StreamEvent)>,
-    rx: &mut mpsc::Receiver<(u64, StreamEvent)>,
+    core: &mut core_tui::CoreTui,
     deploy_tx: mpsc::Sender<deploy::DeployEvent>,
     deploy_rx: &mut mpsc::Receiver<deploy::DeployEvent>,
     hosted_tx: mpsc::Sender<Vec<backend::Mine>>,
@@ -725,30 +719,17 @@ async fn run_app(
             }
         }
         // A key that took the app out of a busy state (Esc, a confirmed quit)
-        // must also stop the engine turn: in core mode that task owns the
-        // request, and `App`'s own abort handle is never set.
-        if let Some(core) = core.as_mut() {
-            if was_busy && !app.is_busy() {
-                core.cancel(app);
-            }
+        // must also stop the engine turn.
+        if was_busy && !app.is_busy() {
+            core.cancel(app);
         }
 
-        // Drain every token that has arrived; doing only one per frame caps
-        // throughput at ~60 tokens/sec and looks like the app is stalling.
-        // The dispatch itself (and the stale-request guard) lives in
-        // `agent::handle_event` -- the loop's job is only to pump the channel.
-        while let Ok((id, event)) = rx.try_recv() {
-            agent::handle_event(app, id, event);
-        }
-
-        // The core-mode equivalent of the drain above: engine events become
-        // App state through the bridge, never through `agent::handle_event`.
-        if let Some(core) = core.as_mut() {
-            core.drain(app);
-            // The user may have answered an approval prompt this tick; App
-            // recorded the choice, the bridge sends it to the engine.
-            core.answer_queued_decision(app);
-        }
+        // Engine events become App state through the bridge; the loop's job
+        // is only to pump them.
+        core.drain(app);
+        // The user may have answered an approval prompt this tick; App
+        // recorded the choice, the bridge sends it to the engine.
+        core.answer_queued_decision(app);
 
         // Deployment progress. Same shape as the token drain above, and drained
         // to exhaustion for the same reason: a build emits output in bursts,
@@ -882,42 +863,28 @@ async fn run_app(
             app.quota.save();
             app.quota_dirty = false;
         }
-        // The session record, same place as the other files this loop owns.
-        // A length comparison almost every tick; messages hit the disk the
-        // tick they appear, so a Ctrl-C loses nothing said before it.
-        //
-        // In core mode the engine records its own conversation (see
-        // `HeadlessSession::persist`), so writing App's transcript too would
-        // leave two session files for one conversation. `/new` and a resumed
-        // recording still have to reach the engine, though, or the next
-        // prompt would carry the conversation the user just replaced.
+        // The engine records its own conversation (see
+        // `HeadlessSession::persist`); App's transcript is not written twice.
+        // `/new` and a resumed recording still have to reach the engine,
+        // though, or the next prompt would carry the conversation the user
+        // just replaced.
         let resume_recording = app.pending_resume.take();
         let reset_log = app.session_reset;
         app.session_reset = false;
-        match core.as_mut() {
-            Some(core) => {
-                if let Some(path) = resume_recording {
-                    let messages = session::load_chat(&path);
-                    if messages.is_empty() {
-                        core.reset(app);
-                        app.note(
-                            "That recording is empty or unreadable; the engine conversation was \
-                             reset instead."
-                                .to_string(),
-                        );
-                    } else {
-                        core.restore(app, messages);
-                    }
-                } else if reset_log {
-                    core.reset(app);
-                }
+        if let Some(path) = resume_recording {
+            let messages = session::load_chat(&path);
+            if messages.is_empty() {
+                core.reset(app);
+                app.note(
+                    "That recording is empty or unreadable; the engine conversation was reset \
+                     instead."
+                        .to_string(),
+                );
+            } else {
+                core.restore(app, messages);
             }
-            None => {
-                if reset_log {
-                    session_log.reset();
-                }
-                session_log.append(&app.messages);
-            }
+        } else if reset_log {
+            core.reset(app);
         }
         // Same reasoning again: `App` marks the plan dirty, this loop writes
         // it. A failed write is reported rather than swallowed -- the whole
@@ -932,83 +899,53 @@ async fn run_app(
             }
         }
 
-        // `/rollback` in core mode: the engine owns the journal, so ask it
-        // for the undo plan and show the same confirmation dialog App's own
-        // journal would produce. The request is answered on a later tick,
-        // after the user confirms.
+        // `/rollback`: the engine owns the journal, so ask it for the undo
+        // plan and show the same confirmation dialog App's own journal would
+        // produce. The request is answered on a later tick, after the user
+        // confirms.
         if let Some(target) = app.core_rollback_query.take() {
-            if let Some(core) = core.as_mut() {
-                match core.list_changes().await {
-                    Some(changes) => app.show_core_rollback(
-                        (target > 0).then_some(target),
-                        changes.changes,
-                        changes.shell_warning,
-                    ),
-                    None => app.note(
-                        "The engine session is gone; the undo plan is unavailable.".to_string(),
-                    ),
-                }
+            match core.list_changes().await {
+                Some(changes) => app.show_core_rollback(
+                    (target > 0).then_some(target),
+                    changes.changes,
+                    changes.shell_warning,
+                ),
+                None => app.note(
+                    "The engine session is gone; the undo plan is unavailable.".to_string(),
+                ),
             }
         }
 
-        // `/diff` in core mode: the engine's journal is where the before-
-        // content lives, so fetch its plan and hand it to the same renderer
-        // App's own journal uses.
+        // `/diff`: the engine's journal is where the before-content lives, so
+        // fetch its plan and hand it to the same renderer App's own journal
+        // uses.
         if std::mem::take(&mut app.core_diff_query) {
-            if let Some(core) = core.as_mut() {
-                match core.change_steps().await {
-                    Some(steps) => app.show_core_diff(steps),
-                    None => app.note(
-                        "The engine session is gone; /diff is unavailable.".to_string(),
-                    ),
-                }
+            match core.change_steps().await {
+                Some(steps) => app.show_core_diff(steps),
+                None => app.note("The engine session is gone; /diff is unavailable.".to_string()),
             }
         }
 
         // `/rollback`, once the user has said yes to it. Here rather than in
         // `App` for the same reason the plan file and the usage log are:
         // `App` performs no I/O, which is what lets its tests run without a
-        // disk. Inline rather than spawned -- this is a handful of small
-        // writes to files that were open moments ago, not a build -- and
-        // before the agent steps below, so a rollback always lands before
-        // whatever the next turn does.
-        if let Some(steps) = app.rollback_request.take() {
+        // disk.
+        if app.rollback_request.take().is_some() {
             let target_turn = app.pending_rollback_query.take();
-            match core.as_mut() {
-                Some(core) => match core.rollback(target_turn).await {
-                    Some(response) => app.finish_core_rollback(response.summary, target_turn),
-                    None => app.note(
-                        "The engine session is gone; nothing was rolled back.".to_string(),
-                    ),
-                },
-                None => app.finish_query_rollback(rollback::apply(&steps), target_turn),
+            match core.rollback(target_turn).await {
+                Some(response) => app.finish_core_rollback(response.summary, target_turn),
+                None => app.note("The engine session is gone; nothing was rolled back.".to_string()),
             }
         }
 
-        // The agent loop's two active steps: fire the request `App` queued,
-        // and run what the user allowed. Both are no-ops unless `App` is in
-        // the matching state, and both live in `agent.rs` -- this loop only
-        // decides *when* they get a chance to run, not what they do.
-        //
-        // When the session engine owns the turn (every session with a
-        // workspace), firing goes to the engine client instead;
-        // `execute_approved` stays a no-op there because the engine runs its
-        // own tools.
-        //
         // A provider/model switch or completed login must reach the running
         // engine before the prompt fired this tick, or that prompt would go
         // to the endpoint the engine was started with.
         if app.config_dirty {
             app.config_dirty = false;
-            if let Some(core) = core.as_mut() {
-                let _ = core.update_config(app.config.clone()).await;
-            }
+            let _ = core.update_config(app.config.clone()).await;
         }
-        match core.as_mut() {
-            Some(core) => core.fire(app),
-            None => agent::fire_request(app, workspace, &tx),
-        }
-        agent::execute_approved(app, workspace, &tx);
+        core.fire(app);
 
         if app.should_exit {
             break;

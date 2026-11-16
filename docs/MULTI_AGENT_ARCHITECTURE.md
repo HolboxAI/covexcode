@@ -25,7 +25,7 @@ Landed on `main`:
   endpoint: `/new`, `/compact`, `/rollback`, `/diff`, `/subagents`,
   `/provider`, `/model`, and resuming (`/resume`, `/sessions`, startup
   `--resume`). Phase 1's TUI-as-client exit criterion is met; the old `App`
-  loop remains only for a no-workspace session and is slated for deletion.
+  loop has been deleted, so the engine is the only execution path.
 - **Phase 2**: a `SessionRegistry` with one actor per session, shared by every
   connection a `--listen` process accepts. `session/list`, `session/attach`,
   `session/close` and `session/cancel` work across connections, status changes
@@ -137,10 +137,13 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 6 performance/hardening work, plus deleting
-the old `App` loop (which now only serves a no-workspace session). Phase 1 is
-complete; the `COVEXCODE_CORE_SESSION` flag is retired. Deleting the loop is
-follow-up cleanup, not parity work.
+Remaining, in plan order: Phase 6 performance/hardening work. Phase 1 is
+complete; the `COVEXCODE_CORE_SESSION` flag is retired. The old `App` agent
+loop has been deleted: every session starts the engine, including chat-only
+use without a readable workspace, so there is no second execution path left
+to parity-match. Only the engine's batch executor remains in production; the
+old executor survives solely as the harness the subagent integration tests
+were written around.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.

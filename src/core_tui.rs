@@ -1,13 +1,9 @@
-//! The bridge that drives the TUI through [`crate::session_client`] instead
-//! of `App`'s own agent loop.
-//!
-//! Every TUI session with a workspace runs through the engine: text, tool
-//! results, usage and approval prompts are real and stream in normally, and
-//! `/new`, `/compact`, `/rollback`, `/diff`, `/resume`, `/sessions`, startup
-//! `--resume`, `/provider`, `/model`, login, the `/subagents` trail and the
-//! `/agents` panel are mirrored into the engine. The old `App` loop remains
-//! only for a session whose tools/workspace are disabled -- where no agent can
-//! run at all -- and deleting it is follow-up cleanup.
+//! The bridge that drives the TUI through [`crate::session_client`]. The
+//! engine owns every turn -- text, tool results, usage and approval prompts
+//! are real and stream in normally, and `/new`, `/compact`, `/rollback`,
+//! `/diff`, `/resume`, `/sessions`, startup `--resume`, `/provider`, `/model`,
+//! login, the `/subagents` trail and the `/agents` panel are mirrored into the
+//! engine. The App-owned loop this used to run beside has been deleted.
 
 use crate::app::{App, AppState};
 use crate::approval::ApprovalRequest;
@@ -67,13 +63,9 @@ pub struct CoreTui {
 }
 
 impl CoreTui {
-    pub fn start(workspace: Workspace, config: crate::config::Config) -> Self {
-        Self::start_with_history(workspace, config, None)
-    }
-
-    /// Same as [`CoreTui::start`], but seeds the engine with a recorded
-    /// conversation (`--resume`). The TUI transcript is loaded by App from
-    /// the same file; this is the engine's copy.
+    /// Start the engine and seed it with a recorded conversation, if any
+    /// (`--resume`). The TUI transcript is loaded by App from the same file;
+    /// this is the engine's copy.
     pub fn start_with_history(
         workspace: Workspace,
         config: crate::config::Config,
@@ -141,7 +133,7 @@ impl CoreTui {
     }
 
     /// Start the turn `App::submit` queued. A no-op unless the app is in
-    /// `Sending`, mirroring `agent::fire_request`.
+    /// `Sending`.
     pub fn fire(&mut self, app: &mut App) {
         if app.state != AppState::Sending {
             return;
@@ -169,8 +161,8 @@ impl CoreTui {
         let images = message.images.clone();
         let mode = Some(app.mode);
 
-        // Same bookkeeping `agent::fire_request` performs, so the spinner,
-        // elapsed clock and streaming output behave identically.
+        // Bookkeeping so the spinner, elapsed clock and streaming output
+        // behave the same as any other turn.
         app.request_id += 1;
         app.request_started = Some(std::time::Instant::now());
         app.state = AppState::Streaming;
@@ -505,7 +497,7 @@ mod tests {
 
     fn core_with_workspace() -> (tempfile::TempDir, CoreTui, App) {
         let (dir, ws) = workspace();
-        let mut core = CoreTui::start(ws, crate::config::Config::default());
+        let mut core = CoreTui::start_with_history(ws, crate::config::Config::default(), None);
         core.active = true;
         let mut app = App::new(crate::config::Config::default());
         app.state = AppState::Streaming;
@@ -724,7 +716,7 @@ mod tests {
         // `fire` itself only reads App state; the engine actor is spawned by
         // `start` but receives nothing until `fire` sends it.
         let (_dir, ws) = workspace();
-        let mut core = CoreTui::start(ws, crate::config::Config::default());
+        let mut core = CoreTui::start_with_history(ws, crate::config::Config::default(), None);
         let mut app = App::new(crate::config::Config::default());
         app.messages.push(Message::new(Role::User, "hi there"));
         app.state = AppState::Sending;
@@ -748,7 +740,7 @@ mod tests {
         ])
         .await;
         let config = config_for(&endpoint);
-        let mut core = CoreTui::start(ws, config.clone());
+        let mut core = CoreTui::start_with_history(ws, config.clone(), None);
         let mut app = App::new(config);
         app.messages
             .push(Message::new(Role::User, "clean the build dir"));

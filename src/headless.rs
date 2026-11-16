@@ -680,12 +680,6 @@ impl HeadlessSession {
         }
     }
 
-    /// A cloneable handle a client can use to answer approval requests by the
-    /// engine-local id from `SessionEvent::ApprovalRequested`.
-    pub fn approval_handle(&self) -> ApprovalHandle {
-        self.approvals.clone()
-    }
-
     /// A cloneable handle that applies serializable [`SessionCommand`]s --
     /// cancel and approval answers today, the surface a daemon exposes.
     pub fn command_handle(&self) -> SessionCommandHandle {
@@ -1029,15 +1023,15 @@ impl HeadlessSession {
             if self.cancel.is_cancelled() {
                 return self.finish_turn(StopReason::Cancelled);
             }
+            // `[tools] enabled = false` is a chat-only session. The engine
+            // still needs a Workspace to run in, but the model must not see
+            // the tool schemas or the coding-assistant prompt at all -- the
+            // same request the old no-workspace path sent.
+            let tools_enabled = self.config.tools.enabled;
             let budget_left =
                 self.config.tools.max_steps == 0 || self.tool_steps < self.config.tools.max_steps;
-            if !budget_left {
-                // Same reasoning as agent::fire_request: withholding the
-                // schemas is what actually stops a runaway loop, not asking
-                // nicely in the prompt.
-            }
 
-            let schemas = if budget_left {
+            let schemas = if tools_enabled && budget_left {
                 tools::schemas_for(
                     self.mode,
                     self.active_plan.is_some(),
@@ -1049,20 +1043,22 @@ impl HeadlessSession {
             } else {
                 Vec::new()
             };
-            let system = tools::system_prompt(
-                &self.workspace,
-                &self.config.tools,
-                self.tool_steps,
-                self.mode,
-            );
             let mut history = self.messages.clone();
-            history.insert(0, ChatMessage::text("system", system));
-            if let Some(status) = tools::turn_status(
-                &self.config.tools,
-                self.tool_steps,
-                self.active_plan.as_ref(),
-            ) {
-                history.push(ChatMessage::text("user", status));
+            if tools_enabled {
+                let system = tools::system_prompt(
+                    &self.workspace,
+                    &self.config.tools,
+                    self.tool_steps,
+                    self.mode,
+                );
+                history.insert(0, ChatMessage::text("system", system));
+                if let Some(status) = tools::turn_status(
+                    &self.config.tools,
+                    self.tool_steps,
+                    self.active_plan.as_ref(),
+                ) {
+                    history.push(ChatMessage::text("user", status));
+                }
             }
 
             self.request_id += 1;
@@ -1475,7 +1471,6 @@ impl HeadlessSession {
                             .await;
                     }
                     Some((_, StreamEvent::AgentActivity { .. })) => {}
-                    Some((_, StreamEvent::ToolsFinished(_))) => {}
                     Some((_, StreamEvent::Done)) | None => break None,
                     Some((_, StreamEvent::Error(e))) => break Some(e),
                 },
@@ -1547,6 +1542,19 @@ impl HeadlessSession {
         browser_interact: &mpsc::Sender<BrowserInteractAsk>,
     ) -> Vec<(String, String, Vec<llm::ImageAttachment>)> {
         let mut results = Vec::with_capacity(calls.len());
+        // `enabled = false` means no tool may run, even if a provider invents
+        // a call for a schema it was never sent. Answering each call keeps the
+        // tool-call/result pairing valid so the next round can simply answer.
+        if !self.config.tools.enabled {
+            for call in &calls {
+                results.push((
+                    call.id.clone(),
+                    "Error: tools are disabled (enabled = false under [tools]).".to_string(),
+                    Vec::new(),
+                ));
+            }
+            return results;
+        }
         let mut i = 0;
         while i < calls.len() {
             // Inline edit is file-scoped and approval-free. write_file/edit_file
@@ -3087,6 +3095,106 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// `[tools] enabled = false` is a chat-only session. Starting the engine
+    /// anyway (which every TUI session now does) must send the provider the
+    /// same bare request the old no-workspace path did -- no schemas, no
+    /// coding-assistant system prompt.
+    #[tokio::test]
+    async fn disabled_tools_send_a_chat_only_request() {
+        let (_dir, ws) = workspace();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let request = read_request(&mut socket).await;
+            let _ = captured_tx.send(request);
+            let _ = socket.write_all(text_round("Hello!").as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+        let mut config = config_for(&format!("http://{addr}"));
+        config.tools.enabled = false;
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, _updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "hi".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        let request = captured_rx.await.expect("request was captured");
+        assert!(
+            !request.contains("\"tools\""),
+            "tools were disabled but schemas were sent: {request}"
+        );
+        assert!(
+            !request.contains("read_file") && !request.contains("\"role\":\"system\""),
+            "tools were disabled but the coding prompt was sent: {request}"
+        );
+        assert!(request.contains("hi"), "the user message must still be sent");
+    }
+
+    /// A provider can hallucinate a tool call even when it was never sent a
+    /// schema. With tools disabled the engine must answer that call instead
+    /// of executing it, then let the next round produce a normal answer.
+    #[tokio::test]
+    async fn disabled_tools_refuse_calls_instead_of_running_them() {
+        let (dir, ws) = workspace();
+        let target = dir.path().join("created.txt");
+        let endpoint = serve_rounds(vec![
+            tool_call_round(
+                tools::WRITE_FILE,
+                r#"{"path":"created.txt","content":"oops"}"#,
+            ),
+            text_round("I could not write that."),
+        ])
+        .await;
+        let mut config = config_for(&endpoint);
+        config.tools.enabled = false;
+        let mut session = HeadlessSession::new(SessionId("s1".to_string()), ws, config);
+        let (updates_tx, mut updates_rx) = mpsc::channel(16);
+        let (permissions_tx, _permissions_rx) = mpsc::channel(16);
+        let (browser_tx, _browser_rx) = mpsc::channel(16);
+        let (browser_interact_tx, _browser_interact_rx) = mpsc::channel(16);
+
+        let stop = session
+            .prompt(
+                "write a file".to_string(),
+                Vec::new(),
+                None,
+                &updates_tx,
+                &permissions_tx,
+                &browser_tx,
+                &browser_interact_tx,
+            )
+            .await;
+
+        assert_eq!(stop, StopReason::EndTurn);
+        assert!(!target.exists(), "a disabled tool wrote to disk");
+        let mut text = String::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            if let SessionUpdate::AgentMessageChunk {
+                content: ContentBlock::Text { text: chunk },
+                ..
+            } = update
+            {
+                text.push_str(&chunk);
+            }
+        }
+        assert!(text.contains("could not write"), "{text}");
     }
 
     /// A completed headless turn is recorded where `/sessions` and a restart

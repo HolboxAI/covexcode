@@ -473,9 +473,9 @@ pub async fn run_subagent_with(
                     Some((_, StreamEvent::ToolCalls(c, _))) => calls = c,
                     Some((_, StreamEvent::Usage(u))) => usage = Some(u),
                     // Notices ("answer was truncated") are addressed to a
-                    // user, and this loop has none; ToolsFinished and
-                    // AgentActivity never arrive here -- the child runs its
-                    // tools inline below, and only *sends* activity, upward.
+                    // user, and this loop has none; AgentActivity never
+                    // arrives here -- the child runs its tools inline below,
+                    // and only *sends* activity, upward.
                     // A child's reasoning is dropped along with the rest:
                     // the parent sees only the child's final report, so
                     // surfacing its thinking would put a second, competing
@@ -484,7 +484,6 @@ pub async fn run_subagent_with(
                         _,
                         StreamEvent::Notice(_)
                         | StreamEvent::Reasoning(_)
-                        | StreamEvent::ToolsFinished(_)
                         | StreamEvent::AgentActivity { .. },
                     )) => {}
                     Some((_, StreamEvent::Done)) | None => break None,

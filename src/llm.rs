@@ -314,10 +314,6 @@ pub enum StreamEvent {
     /// cap hit is a truncated write wearing valid JSON, and the tool runner
     /// needs to know that before it trusts the content.
     ToolCalls(Vec<ToolCall>, bool),
-    /// Not from the endpoint: the local command runner reports back on the same
-    /// channel, so the event loop has one place to drain and one stale-id guard
-    /// covering both sources.
-    ToolsFinished(Vec<crate::tools::ToolOutcome>),
     /// Not from the endpoint either: a running subagent saying what it just
     /// did -- one event per tool call the child makes, carrying the parent
     /// call's id, the child call's one-line label, and which round the child
@@ -1903,7 +1899,6 @@ mod tests {
                 StreamEvent::Token(_) => "token",
                 StreamEvent::Reasoning(_) => "reasoning",
                 StreamEvent::ToolCalls(..) => "tools",
-                StreamEvent::ToolsFinished(_) => "finished",
                 StreamEvent::AgentActivity { .. } => "activity",
                 StreamEvent::Usage(_) => "usage",
                 StreamEvent::Done => "done",

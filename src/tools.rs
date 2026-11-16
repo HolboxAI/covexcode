@@ -3085,6 +3085,11 @@ pub fn write_target(workspace: &Workspace, call: &ToolCall) -> Option<PathBuf> {
 /// call can observe another's half-written file. A non-write call fences the
 /// run, and so does a repeat of an earlier target -- a second write to the
 /// same file is ordered after the first rather than racing it.
+///
+/// Test-only since the engine took over every session: the engine's own
+/// batch splitter in `headless.rs` owns the production fan-out, while the
+/// subagent suite drives this copy.
+#[cfg(test)]
 pub fn parallel_write_run(
     workspace: &Workspace,
     calls: &[ToolCall],
