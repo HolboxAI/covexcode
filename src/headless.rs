@@ -1,8 +1,7 @@
-//! A headless, RPC-driven counterpart to `App`'s agent loop -- what
-//! `protocol.rs`'s ACP types actually get driven by. `App` itself is
-//! untouched by this module; see `approval.rs`'s `Verdict`/`verdict_for`
-//! docs for why the two don't share state, only the one piece of logic
-//! (`verdict_for`) where drift would be dangerous.
+//! The session engine -- the execution core behind `--acp`/`--listen` and
+//! the TUI's `core_tui` bridge. `App` is the TUI's state and rendering, not
+//! an execution path; see `approval.rs`'s `Verdict`/`verdict_for` docs for
+//! the one piece of logic they share, where drift would be dangerous.
 //!
 //! Deliberately narrower than `App` for a first working version, matching
 //! an independent review's explicit recommendation (see `approval.rs`):
@@ -19,8 +18,8 @@
 //!   (`deploy: false` in `tools::schemas_for`), so the model never sees the
 //!   tool at all -- refusing a call that was never offered, rather than
 //!   offering one and always refusing it.
-//! - Subagents are supported through the shared read-only `explore` child in
-//!   `subagent.rs`. Its per-call activity is not streamed yet; the client
+//! - Subagents are supported through `subagent.rs`'s child loop. Per-call
+//!   activity streams as `SessionEvent::SubagentActivity`; the client also
 //!   sees the `agent` call start and the child's final report, which is the
 //!   same report the parent model receives.
 //! - No compaction. `App::finish_compaction`'s logic isn't replicated here;
@@ -1616,9 +1615,9 @@ impl HeadlessSession {
             );
 
             // A contiguous run of auto-approved pure reads is fanned out
-            // concurrently -- the same fence and split `agent::run_calls`
-            // uses for `App`, so the two paths agree on what is safe to
-            // overlap. Everything else stays one-at-a-time below.
+            // concurrently -- the fence/split rules are the ones the
+            // test-only `agent::run_calls` harness also encodes.
+            // Everything else stays one-at-a-time below.
             if matches!(&verdict, Verdict::AutoApprove)
                 && crate::read_policy::is_pure_read_call(&calls[i])
             {

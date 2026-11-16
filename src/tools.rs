@@ -2663,7 +2663,7 @@ pub enum Action {
     /// construction, like `Read`: the child is offered nothing but reading
     /// tools and its commands are filtered through the same `is_read_only`
     /// allowlist the approval layer trusts, so there is nothing a prompt
-    /// would protect. See `agent::run_subagent`.
+    /// would protect. See `subagent::run_subagent`.
     Agent {
         task: String,
         agent_type: String,
@@ -3630,7 +3630,7 @@ fn gh_api_is_read_only(args: &[&str]) -> bool {
 /// threads. `execute_list_dir`, `execute_glob` and `execute_grep_search` are
 /// plain sync `fn`s doing `std::fs` inline; leaving them on the worker thread
 /// meant one call blocked the entire worker it landed on, so the read
-/// fan-out in `agent::run_calls` could occupy every worker and stall
+/// fan-out in `headless::decide_and_run` could occupy every worker and stall
 /// token streaming and the UI rather than overlapping. Offloading them here
 /// is what makes that fan-out genuinely concurrent: the blocking I/O lives on
 /// the blocking pool, the async workers keep driving the stream and the event
@@ -3727,8 +3727,8 @@ pub async fn execute_truncated(
         DB_QUERY => execute_db_query(call, workspace, config).await,
         LIST_CHANGE_REQUESTS => execute_list_change_requests(call, workspace, config).await,
         RESOLVE_CHANGE_REQUEST => execute_resolve_change_request(call, workspace, config).await,
-        // Never reached: `agent::execute_approved` intercepts agent calls and
-        // runs the child loop itself, because spawning one takes the LLM
+        // Never reached: the engine's `run_agent_call` intercepts agent calls
+        // and runs the child loop itself, because spawning one takes the LLM
         // config and this runner deliberately has no access to it. Handled
         // anyway for the same reason as the plan tools below: a routing
         // mistake should produce a sentence the model can act on.
@@ -3739,11 +3739,11 @@ pub async fn execute_truncated(
              read_file/grep_search/glob instead."
                 .to_string(),
         ),
-        // Never reached: `app::advance_approvals` resolves this one itself,
-        // because accepting it changes `App`'s mode and the runner has no
-        // access to `App`. Handled anyway so a routing mistake produces a
-        // sentence the model can act on rather than "unknown tool", which
-        // would send it hunting for a tool it just correctly used.
+        // Never reached: the engine's `decide_and_run` resolves this one
+        // itself, because accepting it changes the session's mode and this
+        // runner has no access to that. Handled anyway so a routing mistake
+        // produces a sentence the model can act on rather than "unknown tool",
+        // which would send it hunting for a tool it just correctly used.
         EXIT_PLAN_MODE => outcome(
             &call.id,
             "plan — not handled".to_string(),

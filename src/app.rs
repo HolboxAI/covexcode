@@ -720,21 +720,18 @@ pub struct App {
     pub overlay_cursor: usize,
     /// Calls still awaiting a yes or no, front first.
     pub pending_tools: VecDeque<ToolCall>,
-    /// Calls the user allowed, waiting for the event loop to spawn them.
+    /// Calls the user allowed, waiting for the App-owned harness to run them
+    /// (tests only now; the engine runs its own approved batch).
     pub approved_tools: Vec<ToolCall>,
     /// Whether the LLM response `pending_tools`/`approved_tools` came from was
     /// cut off by the token budget (`finish_reason == "length"`) rather than
-    /// finishing on its own. Set by `request_tools_truncated` and read by
-    /// `agent::execute_approved` just before running the batch, so
-    /// `write_file`/`edit_file` can refuse content that arrived truncated
-    /// instead of writing it to disk as if it were whole. One flag per batch,
-    /// not per call: every call in a batch came from the same response.
+    /// finishing on its own. Set by `request_tools_truncated` for the
+    /// App-owned approval harness (tests only now); the engine tracks its own
+    /// copy in `headless.rs`.
     pub truncated_response: bool,
     /// A snapshot of `approved_tools` taken the moment execution starts, kept
-    /// around purely for display. `main.rs` drains `approved_tools` as soon as
-    /// it spawns the runner task, so by the next frame that list is empty --
-    /// without this copy "Running N commands…" would show N for one frame and
-    /// then silently go blank while the commands were still running.
+    /// around purely for display in the App-owned harness. The engine draws
+    /// its tool cards from `core_tui`'s trail instead.
     pub running_tools: Vec<ToolCall>,
     /// What each subagent did, one entry per `agent` call this session,
     /// appended to live as `AgentActivity` events arrive from the runner.
@@ -751,8 +748,7 @@ pub struct App {
     /// back to `AwaitingInput` (`finish_stream`, `fail_stream`, `cancel`).
     pub busy_started: Option<std::time::Instant>,
     /// When the request currently in flight was sent, for the elapsed figure
-    /// beside the spinner. Stamped in `agent::fire_request`, the one place a
-    /// request actually goes out.
+    /// beside the spinner. Stamped when `core_tui` fires the turn.
     ///
     /// Separate from `busy_started` because they answer different questions
     /// and one number cannot honestly be labelled as the other. A turn that
@@ -2142,9 +2138,9 @@ impl App {
     /// The model asked to run something. Commit whatever prose it streamed
     /// alongside the request, then start asking the user about each command.
     ///
-    /// `#[cfg(test)]`: the real event loop always knows whether the response
-    /// was truncated and calls `request_tools_truncated` directly (see
-    /// `agent::handle_event`); this untruncated shorthand exists purely so the
+    /// `#[cfg(test)]`: this is part of the App-owned approval harness the
+    /// subagent tests still drive. The production engine runs its own batch
+    /// in `headless.rs`; this untruncated shorthand exists purely so the
     /// hundreds of existing tests that construct calls by hand -- and are not
     /// about this feature -- do not all need an extra `, false`.
     #[cfg(test)]
@@ -3899,13 +3895,13 @@ impl App {
     }
 
     /// Apply the user's answer to the request currently on screen -- the one
-    /// function every approval decision flows through, however it was asked.
-    /// Keys arrive here today; a channel's responses will arrive here when
-    /// the agent loop runs behind one.
+    /// function every approval decision flows through. Engine prompts record
+    /// the answer here for `main.rs` to send; the rest of this method is the
+    /// App-owned approval harness the tests drive.
     pub fn decide(&mut self, decision: crate::approval::Decision) {
-        // In core-session mode the engine owns the call, not this struct:
-        // record the answer for `main.rs` to send and let the engine continue
-        // the turn. `pending_tools` is empty here by construction.
+        // The engine owns the call, not this struct: record the answer for
+        // `main.rs` to send and let the engine continue the turn.
+        // `pending_tools` is empty here by construction.
         if let Some(request_id) = self.core_approval.take() {
             self.core_decision = Some((request_id, decision.is_allowed()));
             self.overlay = None;
@@ -9678,9 +9674,8 @@ mod tests {
         command_call(id, "rm -rf build")
     }
 
-    /// `request_tools_truncated` is what `agent::handle_event` actually calls;
-    /// the flag it records has to survive into `truncated_response` so
-    /// `execute_approved` can read it back before running the batch.
+    /// `request_tools_truncated` records the response's truncation for the
+    /// App-owned harness; the flag has to survive into `truncated_response`.
     #[test]
     fn request_tools_truncated_records_whether_the_response_was_cut_off() {
         let mut a = streaming_app();
