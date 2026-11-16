@@ -2,13 +2,17 @@
 name = "covexcode"
 version = "1.11.97"
 edition = "2021"
-# Two binaries exist (src/main.rs + src/bin/mcp-fake-server.rs); without this,
-# a bare `cargo run` fails with "could not determine which binary to run".
+# Several binaries exist (src/main.rs + src/bin/*); without this, a bare
+# `cargo run` fails with "could not determine which binary to run".
 default-run = "covexcode"
 
 [features]
 default = ["cli"]
 cli = ["dep:ratatui", "dep:crossterm"]
+# The benchmark harness shares the runtime modules but is not part of a
+# release: gating it keeps every normal build (and the six-target release
+# matrix) from paying to compile a third copy of them.
+bench = []
 
 [[bin]]
 name = "covexcode"
@@ -18,6 +22,11 @@ required-features = ["cli"]
 [[bin]]
 name = "covexcode-agent"
 path = "src/bin/covexcode-agent.rs"
+
+[[bin]]
+name = "cx-bench"
+path = "src/bin/cx-bench.rs"
+required-features = ["bench"]
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
