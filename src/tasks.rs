@@ -119,6 +119,7 @@ fn with_store<T>(
     locked_store::update("tasks", workspace, write, Store::new, f)
 }
 
+#[cfg(test)]
 fn data_path(workspace: &Path) -> PathBuf {
     locked_store::data_path("tasks", workspace)
 }

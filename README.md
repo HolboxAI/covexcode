@@ -260,9 +260,10 @@ means the destructive tier is now carrying more of that weight on its own.
 
 `agent` delegates one focused task to a child and returns only its final
 report. The built-in types are `explore` (read-only research), `reviewer`
-(read-only review), and `worker`/`tester` (writing in an isolated worktree). A
-project can add named agents under `.covexcode/agents/`, and you can add them
-under `~/.covexcode/agents/`; the project wins on a name collision.
+(read-only review), `worker`/`tester` (writing in an isolated worktree), and
+`merge` (internal: resolves overlapping patch hunks). A project can add named
+agents under `.covexcode/agents/`, and you can add them under
+`~/.covexcode/agents/`; the project wins on a name collision.
 
 ```toml
 # .covexcode/agents/reviewer.toml
@@ -319,9 +320,13 @@ worktree at HEAD (the repository needs at least one commit), may call
 A clean patch is applied to your checkout automatically. If it no longer
 applies exactly — often because another child edited the same file nearby —
 one three-way merge is attempted against your current files, keeping both
-edits when the merge is clean. A genuine conflict is reported with the patch
-and the retained worktree path, and nothing is written. A writing agent is
-asked about before it runs, and is refused in plan mode and under
+edits when the merge is clean. If hunks truly overlap, a bounded `merge`
+agent resolves the conflict markers inside a snapshot of your current
+checkout, re-runs the writing agent's `verify` command, and applies the
+resolved result. Set `[tools] merge_agent = false` to keep conflicts manual.
+Either way, if resolution fails, the patch is reported with the retained
+worktree path and nothing is written. A writing agent is asked about before
+it runs, and is refused in plan mode and under
 `[tools] sandbox = "read-only"`.
 
 A writing definition may also declare `verify = "cargo check"` (or any

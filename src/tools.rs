@@ -1029,7 +1029,8 @@ pub fn schemas_for(
                  questions. explore and reviewer cannot change anything; worker and tester \
                  work in an isolated git worktree and return a patch that is applied when it \
                  is clean. Use worker for a scoped change, tester for tests, reviewer for a \
-                 read-only review."
+                 read-only review. merge is used internally to resolve conflict markers and \
+                 is rarely worth calling directly."
             ),
             "parameters": {
                 "type": "object",
@@ -1045,10 +1046,11 @@ pub fn schemas_for(
                         "type": "string",
                         "description": "What kind of subagent. Defaults to 'explore' \
                                         (read-only research). Built-ins: explore, worker \
-                                        and tester (writing, isolated git worktree) and \
-                                        reviewer (read-only). A project can define more \
-                                        under .covexcode/agents; the system prompt lists \
-                                        them when it does."
+                                        and tester (writing, isolated git worktree), \
+                                        reviewer (read-only) and merge (resolves conflict \
+                                        markers). A project can define more under \
+                                        .covexcode/agents; the system prompt lists them \
+                                        when it does."
                     },
                     "background": {
                         "type": "boolean",

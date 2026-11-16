@@ -79,6 +79,18 @@ impl Worktree {
                     .to_string(),
             );
         }
+        Self::add(base, &repo, label, "HEAD")
+    }
+
+    /// Create a detached worktree of `repo` at an arbitrary commit. Used by
+    /// the merge agent: the commit is a snapshot of the requester's working
+    /// tree, so the worktree starts from exactly the state a patch must be
+    /// merged into.
+    pub fn create_at(base: &Path, repo: &Path, label: &str, commit: &str) -> Result<Self, String> {
+        Self::add(base, repo, label, commit)
+    }
+
+    fn add(base: &Path, repo: &Path, label: &str, rev: &str) -> Result<Self, String> {
         std::fs::create_dir_all(base)
             .map_err(|e| format!("could not create {}: {e}", base.display()))?;
         let safe: String = label
@@ -100,12 +112,55 @@ impl Worktree {
         let path_arg = path
             .to_str()
             .ok_or_else(|| "the worktree path is not valid UTF-8".to_string())?;
-        git(&repo, &["worktree", "add", "--detach", path_arg, "HEAD"])?;
-        Ok(Self { path, repo })
+        git(repo, &["worktree", "add", "--detach", path_arg, rev])?;
+        Ok(Self {
+            path,
+            repo: repo.to_path_buf(),
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn repo(&self) -> &Path {
+        &self.repo
+    }
+
+    /// A commit whose tree is exactly this worktree's current files (tracked
+    /// and untracked, minus ignored), parented on HEAD. The user's real index
+    /// is never touched: a throwaway one is synced to the working tree first.
+    pub fn snapshot(&self) -> Result<String, String> {
+        snapshot_working_tree(&self.path)
+    }
+
+    /// The patch that turns `commit` into this worktree's current files.
+    /// Rename detection is off so the patch names both sides of a rename.
+    pub fn diff_against(&self, commit: &str) -> Result<String, String> {
+        git(&self.path, &["diff", commit, "--no-renames", "--binary"])
+    }
+
+    /// Apply `diff` in this (fresh, clean) worktree with three-way fallback.
+    /// Returns `true` when git had to write conflict markers. Unlike
+    /// [`apply`](Self::apply), markers are wanted here: the merge agent's
+    /// input is the conflicted file.
+    pub fn apply_with_conflicts(&self, diff: &str) -> Result<bool, String> {
+        let _guard = APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        match git_stdin(&self.path, &["apply", "--3way", "--binary", "-"], diff) {
+            Ok(_) => Ok(false),
+            Err(_) if self.has_conflict_markers() => Ok(true),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn has_conflict_markers(&self) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(&self.path)
+            .args(["grep", "-l", "-I", "-e", "^<<<<<<< "])
+            .output()
+            .map(|output| output.status.success() && !output.stdout.is_empty())
+            .unwrap_or(false)
     }
 
     /// Stage everything and return the staged diff, including new files.
@@ -461,6 +516,68 @@ fn git_with_index(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Commit this working tree as a snapshot commit parented on HEAD, without
+/// touching the user's index. The tree includes tracked modifications and
+/// untracked files (ignored files are excluded), which is exactly the
+/// requester state a conflicting patch must be merged into.
+pub fn snapshot_working_tree(worktree: &Path) -> Result<String, String> {
+    let index =
+        TempIndex::new().ok_or_else(|| "could not prepare a temporary index".to_string())?;
+    git_with_index(worktree, &["read-tree", "HEAD"], None, index.path())?;
+    git_with_index(worktree, &["add", "-A"], None, index.path())?;
+    let tree = git_with_index(worktree, &["write-tree"], None, index.path())?;
+    let tree = tree.trim().to_string();
+    let args = [
+        "commit-tree",
+        tree.as_str(),
+        "-p",
+        "HEAD",
+        "-m",
+        "covexcode merge base",
+    ];
+    // A repository does not need a configured identity for this object: the
+    // snapshot is internal and removed with its worktree.
+    let sha = git_env(
+        worktree,
+        &args,
+        &[
+            ("GIT_AUTHOR_NAME", "covexcode"),
+            ("GIT_AUTHOR_EMAIL", "covexcode@localhost"),
+            ("GIT_COMMITTER_NAME", "covexcode"),
+            ("GIT_COMMITTER_EMAIL", "covexcode@localhost"),
+        ],
+    )?;
+    Ok(sha.trim().to_string())
+}
+
+/// `git`, with extra environment variables and no stdin.
+fn git_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = stderr.trim();
+        return Err(if message.is_empty() {
+            format!("git {} failed", args.join(" "))
+        } else {
+            message.to_string()
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Put the snapshotted files back after a failed merge. Returns the paths
 /// that could not be restored, so the caller can say so rather than claim a
 /// clean rollback.
@@ -606,6 +723,38 @@ mod tests {
             "the new file from a rejected patch is not created"
         );
         worktree.remove();
+    }
+
+    /// The merge agent starts from a commit of the requester's current files,
+    /// including untracked ones, without touching the real index.
+    #[test]
+    fn a_snapshot_commit_captures_tracked_and_untracked_files() {
+        let (_dir, root) = repo();
+        std::fs::write(root.join("tracked.txt"), "dirty\n").expect("dirty the tracked file");
+        std::fs::write(root.join("untracked.txt"), "new\n").expect("create untracked");
+
+        let base = tempfile::tempdir().expect("base");
+        let sha = snapshot_working_tree(&root).expect("snapshot");
+        let snapshot =
+            Worktree::create_at(base.path(), &root, "snap", &sha).expect("snapshot worktree");
+        assert_eq!(
+            std::fs::read_to_string(snapshot.path().join("tracked.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(snapshot.path().join("untracked.txt")).unwrap(),
+            "new\n"
+        );
+
+        std::fs::write(snapshot.path().join("tracked.txt"), "resolved\n").unwrap();
+        let diff = snapshot.diff_against(&sha).expect("diff against snapshot");
+        assert!(diff.contains("resolved"), "{diff}");
+        assert!(
+            !diff.contains("untracked.txt"),
+            "it was already in the snapshot"
+        );
+
+        snapshot.remove();
     }
 
     /// The snapshot/restore path reads paths from `--numstat -z`; a space in

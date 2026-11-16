@@ -1,9 +1,10 @@
 # Multi-agent CLI architecture
 
 Status: Phase 0 complete; Phase 1 complete; Phase 2 complete (JSONL store);
-Phase 3 complete (tool-level sandbox); Phase 4 complete; Phase 5 in progress
-(task DAG, mailbox, background teammates)  
-Date: 2026-11-12  
+Phase 3 complete (tool-level sandbox); Phase 4 complete; Phase 5 complete
+(task DAG, mailbox, verifier/merge agent, background teammates); Phase 6 in
+progress (performance/hardening)  
+Date: 2026-11-16  
 Scope: `HolboxAI/covexcode` (the Rust CLI and agent runtime)
 
 ## Implementation status
@@ -94,8 +95,16 @@ Landed on `main`:
   by the child itself while it works, so the implement → fix loop happens
   inside the worktree. Patch application is serial and verified before it
   touches the checkout; a patch that no longer applies exactly gets one
-  three-way merge against the working tree, and only an unresolved overlap is
-  reported (with the checkout restored) rather than guessed at. Background
+  three-way merge against the working tree. A true overlap then goes to the
+  merge agent: the current checkout is snapshotted as a temporary commit
+  (tracked and untracked files, real index untouched), the child's patch is
+  applied there to materialize conflict markers, a bounded `merge` child
+  resolves them in another isolated worktree, the original verify command runs
+  on the resolved tree, and the result is diffed against the snapshot and
+  applied to the checkout. If resolution or verification fails, the checkout
+  stays untouched and the conflict is reported as before. `[tools]
+  merge_agent = false` disables the automatic pass.
+  Background
   teammates are process-local tasks: `agent { background: true }` starts a
   read-only child and returns a job id immediately, and `teammates`
   list/report/stop manages them (jobs are scoped to one workspace). Running
@@ -119,8 +128,8 @@ Landed on `main`:
   the worktree, verify, and three-way-merge path. A running job does not
   survive its process, but its record does: `teammates` shows it as
   interrupted (pid liveness, or the 24-hour stale cutoff) and `retry` re-runs
-  the stored call in the new process as a fresh job. A merge agent that writes
-  through overlapping hunks remains.
+  the stored call in the new process as a fresh job. Phase 5 is functionally
+  complete.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -128,10 +137,10 @@ writes survive a crash mid-turn; and the files stay readable with `cat`. A
 database becomes worthwhile when fork/audit/query over events is a real
 requirement, not before.
 
-Remaining, in plan order: Phase 5's merge agent for conflicts beyond a clean
-three-way merge. Phase 1 is complete; the `COVEXCODE_CORE_SESSION` flag is
-retired, and deleting the old `App` loop (which now only serves a no-workspace
-session) is follow-up cleanup, not parity work.
+Remaining, in plan order: Phase 6 performance/hardening work, plus deleting
+the old `App` loop (which now only serves a no-workspace session). Phase 1 is
+complete; the `COVEXCODE_CORE_SESSION` flag is retired. Deleting the loop is
+follow-up cleanup, not parity work.
 
 The bullets in section 1 describe the tree before this work; they are kept as
 the baseline the plan was written against.
