@@ -107,6 +107,24 @@ What is covered:
 The runner's tests spawn real processes, but only `sh`/`cmd` — never `vercel`
 or `netlify`. Nothing in `cargo test` reaches the network or deploys anything.
 
+### 1c. Performance smoke tests (`cx-bench`)
+
+`cx-bench` is feature-gated so it never slows down normal builds:
+
+```bash
+cargo run --features bench --bin cx-bench -- --check --quick
+cargo run --features bench --bin cx-bench -- --json   # before/after artifact
+```
+
+It drives real `HeadlessSession`s against a local mock LLM, so it measures the
+engine's own serialization, event fan-out, tool dispatch and persistence rather
+than a single function. The scenarios are streamed TTFT and turn time, a
+`read_file` tool round, two sibling subagents at concurrency 1 vs 2, and one vs
+eight concurrent sessions. `--check` gates the scaling ratios (subagents must
+overlap; eight sessions must beat one) and a generous hang budget. It does not
+gate absolute wall-clock speed, which is not stable on shared CI runners. CI
+runs the `--quick` variant in the Test job.
+
 ### 2. System Requirements Tests
 - ✅ Cargo/Rust must be installed
 - ✅ Config directory can be created (~/.covexcode)

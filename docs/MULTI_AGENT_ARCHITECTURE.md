@@ -130,6 +130,14 @@ Landed on `main`:
   interrupted (pid liveness, or the 24-hour stale cutoff) and `retry` re-runs
   the stored call in the new process as a fresh job. Phase 5 is functionally
   complete.
+- **Phase 6 (started)**: `cx-bench` drives real `HeadlessSession`s against a
+  local mock LLM and reports TTFT, turn and tool latency, sibling-subagent
+  speedup, and concurrent-session throughput. `--check` is a CI smoke gate on
+  scaling ratios and a hang budget, deliberately not on absolute machine
+  speed. Run it with `cargo run --features bench --bin cx-bench -- --check`
+  (add `--json` for a before/after artifact). The feature gate keeps the
+  harness -- and its third copy of the runtime modules -- out of release
+  builds.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -325,7 +333,7 @@ Replace the one-shot-only path with a `ShellManager`:
 | Change | Why it matters | Current location |
 | --- | --- | --- |
 | Reuse one HTTP client | Avoids a TLS handshake and pool rebuild every model round | `src/llm.rs:548` |
-| Parallel `agent` calls | Today each subagent is awaited sequentially | `src/agent.rs:338` |
+| Parallel `agent` calls | Sibling research tasks run concurrently, bounded by `subagent_concurrency` | `src/headless.rs` |
 | Per-file write locks + scheduler | Makes independent edits safe to parallelize | tool runtime |
 | Persistent PTY shells | Removes process-spawn cost per command | `src/tools.rs:3364` |
 | Prompt caching / stable prefix | Keeps system prompt and tool schemas byte-identical; add provider cache controls where supported | provider layer |
@@ -335,16 +343,17 @@ Replace the one-shot-only path with a `ShellManager`:
 
 Measure before and after:
 
-- p50/p95 time-to-first-token;
-- turn wall time and tool latency;
-- tokens per completed task and cache-hit rate;
+- p50/p95 time-to-first-token -- `cx-bench` stream scenario;
+- turn wall time and tool latency -- `cx-bench` tool scenario;
+- tokens per completed task and cache-hit rate -- not measured yet; the mock
+  does not report usage, and cache-hit rate needs a real provider;
 - subagent speedup (independent tasks should finish in about `max(t)`, not
-  `sum(t)`);
-- merge-conflict rate;
-- concurrent-session throughput.
+  `sum(t)`) -- `cx-bench` subagents scenario, serial vs parallel;
+- merge-conflict rate -- not measured yet; needs scripted worktree conflicts;
+- concurrent-session throughput -- `cx-bench` sessions scenario.
 
-Add a `cx-bench` harness and CI performance budgets. Do not claim a speedup
-without a before/after trace.
+`cx-bench --json` is the before/after artifact. Do not claim a speedup
+without one.
 
 ## 6. Migration plan
 

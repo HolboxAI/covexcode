@@ -397,7 +397,12 @@ chat-completions endpoint.
 cargo build --release        # build
 RUST_LOG=debug covexcode     # run with debug logging
 cargo test                   # test
+cargo run --features bench --bin cx-bench -- --json  # performance baseline
 ```
+
+`cx-bench` drives real engine sessions against a local mock LLM. Use
+`--check` for the CI smoke gate, or `--json` to keep a before/after artifact
+for a performance change.
 
 ## License
 
