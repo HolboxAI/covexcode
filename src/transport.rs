@@ -136,6 +136,20 @@ struct WorkspaceRequest {
     cwd: String,
 }
 
+/// One background teammate, addressed by its stable job id.
+#[derive(serde::Deserialize)]
+struct TeammateRequest {
+    cwd: String,
+    id: String,
+}
+
+/// `mailbox/inbox`: whose unread messages to return.
+#[derive(serde::Deserialize)]
+struct MailboxRequest {
+    cwd: String,
+    owner: String,
+}
+
 /// `session/resume`: a path from `session/recordings`, plus the workspace it
 /// must belong to. The workspace check is deliberate -- resuming a recording
 /// into a project it was never about would silently mix two histories.
@@ -774,7 +788,22 @@ impl Router {
                     // cannot tell that apart from real support. This capability
                     // is the positive signal to gate on -- absent it, a client
                     // should refuse to send servers rather than report success.
-                    agent_capabilities: json!({ "session": {}, "mcp": true, "promptCapabilities": { "image": images } }),
+                    agent_capabilities: json!({
+                        "session": {},
+                        "mcp": true,
+                        "promptCapabilities": { "image": images },
+                        // Custom (not ACP v1): the multi-agent surface. A
+                        // client that does not know these keys ignores them;
+                        // one that does can light up its agents/tasks panel
+                        // without probing each method for "not found".
+                        "covexcode": {
+                            "subagents": true,
+                            "teammates": true,
+                            "tasks": true,
+                            "mailbox": true,
+                            "mergeAgent": true,
+                        },
+                    }),
                     auth_methods: Vec::new(),
                     agent_info: Some(Implementation {
                         name: "covexcode".to_string(),
@@ -958,6 +987,67 @@ impl Router {
                     .await
                     .map_err(|_| (-32002, "session actor gone".to_string()))?;
                 Ok(serde_json::to_value(response).expect("serializes"))
+            }
+            // Custom (not ACP v1): the multi-agent registries, for an IDE's
+            // agent/task/mailbox panels. These are local reads of the same
+            // locked documents the tools use -- no LLM round trip, no
+            // duplicate parsing in the client, and no dependency on a turn
+            // being in flight.
+            "teammates/list" => {
+                let req: WorkspaceRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let jobs = crate::teammates::list(workspace.root());
+                Ok(serde_json::json!({ "jobs": jobs }))
+            }
+            "teammates/report" => {
+                let req: TeammateRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let report = crate::teammates::report(workspace.root(), &req.id)
+                    .map_err(|e| (-32000, e))?;
+                Ok(serde_json::json!({ "report": report }))
+            }
+            "teammates/stop" => {
+                let req: TeammateRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let message = crate::teammates::stop(workspace.root(), &req.id)
+                    .map_err(|e| (-32000, e))?;
+                Ok(serde_json::json!({ "summary": message }))
+            }
+            "teammates/retry" => {
+                let req: TeammateRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let started = crate::teammates::retry(workspace.root(), &req.id, &self.config)
+                    .map_err(|e| (-32000, e))?;
+                Ok(serde_json::json!({ "id": started.id, "name": started.name }))
+            }
+            "tasks/list" => {
+                let req: WorkspaceRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let tasks = crate::tasks::list(workspace.root()).map_err(|e| (-32000, e))?;
+                Ok(serde_json::json!({ "tasks": tasks }))
+            }
+            "mailbox/inbox" => {
+                let req: MailboxRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let messages = crate::mailbox::inbox(workspace.root(), &req.owner)
+                    .map_err(|e| (-32000, e))?;
+                Ok(serde_json::json!({ "messages": messages }))
+            }
+            // The agent definitions a workspace can call, including the
+            // built-ins and any project/user files. Read-only: definitions
+            // are files on disk, not a registry the client can mutate.
+            "session/agents" => {
+                let req: WorkspaceRequest = serde_json::from_value(params)
+                    .map_err(|e| (-32602, format!("invalid params: {e}")))?;
+                let workspace = Workspace::new(&req.cwd).map_err(|e| (-32000, e))?;
+                let definitions = crate::subagent::catalog(workspace.root());
+                Ok(serde_json::json!({ "agents": definitions }))
             }
             other => Err((-32601, format!("method not found: {other}"))),
         }
@@ -2334,5 +2424,102 @@ mod tests {
         assert!(registry
             .get(&SessionId("missing".to_string()))
             .is_none());
+    }
+
+    /// The multi-agent registries are queryable over ACP without a prompt:
+    /// an IDE panel must be able to show tasks, unread mail, agent
+    /// definitions and teammates on demand, not only while a turn streams.
+    #[tokio::test]
+    async fn agent_registries_answer_over_acp() {
+        let _isolated = crate::config::test_support::IsolatedHome::new();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir
+            .path()
+            .canonicalize()
+            .expect("canonical")
+            .to_string_lossy()
+            .into_owned();
+
+        crate::tasks::create(
+            std::path::Path::new(&root),
+            Some("t1".to_string()),
+            "wire the panel".to_string(),
+            "show the DAG in the IDE".to_string(),
+            Vec::new(),
+            vec!["src/ui".to_string()],
+        )
+        .expect("task created");
+        crate::mailbox::send(
+            std::path::Path::new(&root),
+            "lead",
+            "worker",
+            "check the parser",
+        )
+        .expect("message sent");
+
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(16);
+        let mut router = Router::new(Config::default(), outgoing_tx);
+
+        let init = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": 1 }
+            })))
+            .await
+            .expect("initialize answers");
+        let capabilities: serde_json::Value =
+            serde_json::from_str(init.trim()).expect("valid JSON");
+        assert_eq!(
+            capabilities["result"]["agentCapabilities"]["covexcode"]["teammates"],
+            true
+        );
+
+        let tasks = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tasks/list",
+                "params": { "cwd": root }
+            })))
+            .await
+            .expect("tasks/list answers");
+        let tasks: serde_json::Value = serde_json::from_str(tasks.trim()).expect("valid JSON");
+        assert_eq!(tasks["result"]["tasks"][0]["id"], "t1");
+        assert_eq!(tasks["result"]["tasks"][0]["status"], "pending");
+
+        let inbox = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "mailbox/inbox",
+                "params": { "cwd": root, "owner": "worker" }
+            })))
+            .await
+            .expect("mailbox/inbox answers");
+        let inbox: serde_json::Value = serde_json::from_str(inbox.trim()).expect("valid JSON");
+        assert_eq!(inbox["result"]["messages"][0]["body"], "check the parser");
+
+        let jobs = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 4, "method": "teammates/list",
+                "params": { "cwd": root }
+            })))
+            .await
+            .expect("teammates/list answers");
+        let jobs: serde_json::Value = serde_json::from_str(jobs.trim()).expect("valid JSON");
+        assert_eq!(jobs["result"]["jobs"].as_array().unwrap().len(), 0);
+
+        let agents = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 5, "method": "session/agents",
+                "params": { "cwd": root }
+            })))
+            .await
+            .expect("session/agents answers");
+        let agents: serde_json::Value = serde_json::from_str(agents.trim()).expect("valid JSON");
+        let names: Vec<&str> = agents["result"]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|agent| agent["name"].as_str())
+            .collect();
+        assert!(names.contains(&"explore"), "{names:?}");
+        assert!(names.contains(&"merge"), "{names:?}");
     }
 }

@@ -120,7 +120,11 @@ Landed on `main`:
   teammate has returned; keeping it off the per-prompt channel is what stops
   the transport's drain from waiting for the child. The TUI's `/teammates`
   command reads the same registry locally, so a person can check job status
-  without spending a model turn.
+  without spending a model turn. ACP advertises the multi-agent surface under
+  `agentCapabilities.covexcode` and answers `teammates/list|report|stop|retry`,
+  `tasks/list`, `mailbox/inbox` and `session/agents` directly from the same
+  locked stores, so an IDE panel does not need to parse the files itself or
+  wait for a turn.
   Cancelling the turn does not cancel a teammate; `stop` is the explicit
   control. A writing type is refused as a teammate by default, because its
   patch would be applied while nobody is watching; the explicit

@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 /// One user-defined agent. Read-only unless `writes = true`, which puts the
 /// child in an isolated git worktree and returns its changes as a patch.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct AgentDefinition {
     pub name: String,
     pub description: String,
@@ -168,6 +168,35 @@ pub fn builtin(name: &str) -> Option<AgentDefinition> {
 
 /// Every type `agent` can be given without a project definition.
 pub const BUILTIN_AGENTS: &[&str] = &["explore", "worker", "tester", "reviewer", "merge"];
+
+/// The full agent picker: built-ins plus project/user definitions, sorted by
+/// name. `definitions` alone is intentionally custom-only (it is the loader);
+/// a UI needs the default `explore` and the other built-ins too.
+pub fn catalog(workspace_root: &Path) -> Vec<AgentDefinition> {
+    let mut definitions = definitions(workspace_root);
+    if !definitions.iter().any(|definition| definition.name == "explore") {
+        // `explore` has no prompt of its own: it is the default read-only
+        // child, and `run_subagent` builds its system prompt from the shared
+        // research template.
+        definitions.push(AgentDefinition {
+            name: "explore".to_string(),
+            description: "researches the codebase and reports, read-only".to_string(),
+            prompt: String::new(),
+            writes: false,
+            verify: None,
+        });
+    }
+    for name in BUILTIN_AGENTS {
+        if *name == "explore" || definitions.iter().any(|definition| definition.name == *name) {
+            continue;
+        }
+        if let Some(definition) = builtin(name) {
+            definitions.push(definition);
+        }
+    }
+    definitions.sort_by(|a, b| a.name.cmp(&b.name));
+    definitions
+}
 
 /// The per-call fence for a child. Factored out of the loop so the one
 /// intentional widening -- a writing child may run its definition's verify

@@ -117,7 +117,7 @@ pub enum Activity {
 /// not block on the teammate itself.
 pub type ActivitySink = Arc<dyn Fn(&str, Activity) + Send + Sync>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct View {
     pub id: String,
     pub name: String,
