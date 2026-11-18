@@ -55,6 +55,7 @@ pub const WRITE_FILE: &str = "write_file";
 pub const LIST_DIR: &str = "list_dir";
 pub const GLOB: &str = "glob";
 pub const GREP_SEARCH: &str = "grep_search";
+pub const REPO_MAP: &str = "repo_map";
 pub const EDIT_FILE: &str = "edit_file";
 pub const GET_DESIGN_STARTER: &str = "get_design_starter";
 pub const CHECK_CONTRAST: &str = "check_contrast";
@@ -515,6 +516,38 @@ pub fn schemas_for(
                         }
                     },
                     "required": ["pattern"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": REPO_MAP,
+                "description": format!(
+                    "A compact map of the repository: the most relevant files, grouped by \
+                     directory, with their top-level symbols (functions, types, classes). Use \
+                     this once at the start of unfamiliar work to decide where to read, instead \
+                     of globbing and grepping blindly. Pass `query` words to focus the ranking \
+                     on paths or symbols related to the task. Read-only; skips {}.",
+                    SKIP_DIRS.join(", ")
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Optional words to rank files by: a feature name, module, or symbol."
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional subtree to map, relative to the project root."
+                        },
+                        "max_files": {
+                            "type": "integer",
+                            "description": "Maximum files to include, 20-500. Defaults to 120."
+                        }
+                    },
+                    "required": []
                 }
             }
         }),
@@ -1462,7 +1495,7 @@ pub fn subagent_schemas() -> Vec<Value> {
 /// only ones it can execute even if it hallucinates another. `mailbox` is
 /// here because it is how a teammate speaks to the lead without waiting for
 /// its final report; it writes only coordination state in the config dir.
-pub const SUBAGENT_TOOLS: &[&str] = &[RUN_COMMAND, READ_FILE, LIST_DIR, GLOB, GREP_SEARCH, MAILBOX];
+pub const SUBAGENT_TOOLS: &[&str] = &[RUN_COMMAND, READ_FILE, LIST_DIR, GLOB, GREP_SEARCH, REPO_MAP, MAILBOX];
 
 /// Why `call` may not run inside a subagent, or `Ok` if it may.
 ///
@@ -1671,8 +1704,8 @@ pub fn subagent_system_prompt(
          Project directory: {root}\n\
          Operating system: {os}. {os_hint}\n\
          \n\
-         Tools: {READ_FILE}(path, offset?, limit?), {LIST_DIR}(path?), {GLOB}(pattern), \
-         {GREP_SEARCH}(pattern, path?, context?), and {RUN_COMMAND} for read-only commands \
+         Tools: {REPO_MAP}(query?), {READ_FILE}(path, offset?, limit?), {LIST_DIR}(path?), \
+         {GLOB}(pattern), {GREP_SEARCH}(pattern, path?, context?), and {RUN_COMMAND} for read-only commands \
          only (`git log`, `cargo tree`, ...) -- anything that could change files, state or \
          the network is refused, so do not try.{budget_line}",
         root = workspace.root().display(),
@@ -1843,10 +1876,11 @@ pub fn system_prompt(
            {RUN_COMMAND} instead of only telling the user how. This is still just another \
            command: it waits for the same approval as everything else, it does not skip the \
            prompt.\n\
-         - Explore with {LIST_DIR} and {GLOB} before guessing at paths, and search contents \
-           with {GREP_SEARCH} before guessing at what a file says. Prefer all three over \
-           `ls`/`find`/`grep` through {RUN_COMMAND}: they need no approval, so they cost the \
-           user nothing to answer.\n\
+         - On unfamiliar work, start with {REPO_MAP} (optionally with a query) to see the \
+           layout and top-level symbols before opening files. Then explore with {LIST_DIR} and \
+           {GLOB} before guessing at paths, and search contents with {GREP_SEARCH} before \
+           guessing at what a file says. Prefer all four over `ls`/`find`/`grep` through \
+           {RUN_COMMAND}: they need no approval, so they cost the user nothing to answer.\n\
          - When the user points at something on screen without naming it (\"this option\", \"the \
            leftmost pane\", \"the button at the very bottom\"), do not guess a target. Resolve it \
            against the real page or UI first; if you still cannot tell what they mean, ask one short \
@@ -2254,6 +2288,16 @@ struct GrepSearchArgs {
 }
 
 #[derive(Deserialize)]
+struct RepoMapArgs {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    max_files: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct EditSpanArgs {
     old_string: String,
     new_string: String,
@@ -2589,6 +2633,10 @@ pub enum Action {
         pattern: String,
         path: Option<String>,
     },
+    /// Read-only: a ranked file/symbol map, no contents.
+    RepoMap {
+        path: Option<String>,
+    },
     /// Changes a file, so it is approved like `Write` -- but shows only the
     /// spans being replaced, which is the whole reason to prefer it. Always
     /// holds at least one span; several when the model batched its edits to
@@ -2801,6 +2849,10 @@ impl Action {
                 None => format!("grep {pattern}"),
             },
             Action::Edit { path, .. } => format!("edit {path}"),
+            Action::RepoMap { path } => match path {
+                Some(path) => format!("map {path}"),
+                None => "map repository".to_string(),
+            },
             Action::Search { query, .. } => format!("search \"{query}\""),
             Action::DesignStarter => "design starter".to_string(),
             Action::CheckContrast { pairs } => format!(
@@ -2942,6 +2994,7 @@ pub fn is_read_only_action(action: &Action) -> bool {
         | Action::List { .. }
         | Action::Glob { .. }
         | Action::Grep { .. }
+        | Action::RepoMap { .. }
         | Action::Search { .. }
         | Action::DesignStarter
         | Action::CheckContrast { .. }
@@ -2964,6 +3017,7 @@ pub fn plan_mode_block(action: &Action) -> Option<String> {
         | Action::List { .. }
         | Action::Glob { .. }
         | Action::Grep { .. }
+        | Action::RepoMap { .. }
         | Action::Search { .. }
         | Action::DesignStarter
         | Action::CheckContrast { .. }
@@ -3201,6 +3255,15 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
                 pattern,
                 path: args
                     .path
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty()),
+            })
+        }
+        REPO_MAP => {
+            let args = serde_json::from_str::<RepoMapArgs>(&call.function.arguments).ok();
+            Some(Action::RepoMap {
+                path: args
+                    .and_then(|a| a.path)
                     .map(|p| p.trim().to_string())
                     .filter(|p| !p.is_empty()),
             })
@@ -3716,6 +3779,7 @@ pub async fn execute_truncated(
         LIST_DIR => run_blocking(call, workspace, execute_list_dir).await,
         GLOB => run_blocking(call, workspace, execute_glob).await,
         GREP_SEARCH => run_blocking(call, workspace, execute_grep_search).await,
+        REPO_MAP => run_blocking(call, workspace, execute_repo_map).await,
         EDIT_FILE => execute_edit_file(call, workspace, truncated),
         GET_DESIGN_STARTER => execute_get_design_starter(call),
         CHECK_CONTRAST => execute_check_contrast(call),
@@ -5557,6 +5621,229 @@ fn collect_grep_files(dir: &Path, workspace_root: &Path, out: &mut Vec<PathBuf>)
     }
 }
 
+/// Extensions whose files can contribute symbols to `repo_map`. Everything
+/// else is mapped by name only.
+const SYMBOL_EXTENSIONS: &[&str] = &[
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt", "swift", "c", "h",
+    "cpp", "hpp", "cc", "cs", "rb", "php", "sh", "bash", "zsh",
+];
+
+/// Names whose presence says "this is a real file, not just another leaf".
+fn is_important_map_name(name: &str) -> bool {
+    matches!(
+        name,
+        "README.md"
+            | "README"
+            | "Cargo.toml"
+            | "package.json"
+            | "pyproject.toml"
+            | "go.mod"
+            | "Makefile"
+            | "Dockerfile"
+            | "config.toml"
+    ) || name.starts_with("main.") || name.starts_with("lib.") || name == "mod.rs"
+}
+
+/// A file the model should see in the map, with the symbols worth naming.
+struct MapEntry {
+    relative: String,
+    depth: usize,
+    score: usize,
+    symbols: Vec<String>,
+}
+
+fn map_symbols(path: &Path) -> Vec<String> {
+    let Some(extension) = path.extension().and_then(|e| e.to_str()) else {
+        return Vec::new();
+    };
+    if !SYMBOL_EXTENSIONS.contains(&extension) {
+        return Vec::new();
+    }
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Vec::new();
+    };
+    if metadata.len() > 256 * 1024 {
+        return Vec::new();
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let patterns: &[&str] = match extension {
+        "rs" => &[
+            r"(?m)^\s*pub(?:\([^)]*\))?\s+(?:async\s+)?(?:fn|struct|enum|trait|mod|type|const)\s+([A-Za-z_]\w*)",
+        ],
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => &[
+            r"(?m)^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|interface|type|enum)\s+([A-Za-z_$][\w$]*)",
+        ],
+        "py" => &[r"(?m)^\s*(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)"],
+        "go" => &[r"(?m)^(?:func|type)\s+([A-Za-z_]\w*)"],
+        "java" | "kt" | "cs" | "swift" => &[
+            r"(?m)^\s*(?:public|private|protected|internal|open|final|static|abstract)?\s*(?:class|interface|enum|struct|fun|func)\s+([A-Za-z_]\w*)",
+        ],
+        _ => &[],
+    };
+    let mut symbols = Vec::new();
+    for pattern in patterns {
+        let Ok(regex) = regex::Regex::new(pattern) else {
+            continue;
+        };
+        for capture in regex.captures_iter(&content).take(8) {
+            if let Some(name) = capture.get(1) {
+                let name = name.as_str().to_string();
+                if !symbols.contains(&name) {
+                    symbols.push(name);
+                }
+            }
+        }
+    }
+    symbols.truncate(8);
+    symbols
+}
+
+/// Read-only ranked map: paths by relevance, plus top-level symbols for the
+/// source files. It never sends file bodies -- `read_file` does that.
+fn execute_repo_map(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
+    let args = serde_json::from_str::<RepoMapArgs>(&call.function.arguments).unwrap_or(RepoMapArgs {
+        query: None,
+        path: None,
+        max_files: None,
+    });
+    let requested = args
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .unwrap_or(".");
+    let root = match resolve_in_workspace(workspace, requested) {
+        Ok(root) => root,
+        Err(error) => {
+            return outcome(
+                &call.id,
+                format!("map {requested} — {error}"),
+                format!("Error: {error}"),
+            )
+        }
+    };
+    let max_files = args
+        .max_files
+        .unwrap_or(120)
+        .clamp(20, 500);
+    let query: Vec<String> = args
+        .query
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|term| !term.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let mut files = Vec::new();
+    collect_grep_files(&root, workspace.root(), &mut files);
+    let scanned = files.len();
+    let mut entries: Vec<MapEntry> = Vec::new();
+    for path in files.into_iter().take(4000) {
+        let Ok(relative_path) = path.strip_prefix(workspace.root()) else {
+            continue;
+        };
+        let relative = relative_path
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let Some(name) = relative.rsplit('/').next() else {
+            continue;
+        };
+        if name == "Cargo.lock"
+            || name == "package-lock.json"
+            || name == "yarn.lock"
+            || name == "pnpm-lock.yaml"
+            || name.ends_with(".min.js")
+            || name.ends_with(".min.css")
+        {
+            continue;
+        }
+        let depth = relative.matches('/').count();
+        let lower = relative.to_lowercase();
+        let symbols = map_symbols(&path);
+        let mut score = 20usize.saturating_sub(depth);
+        if is_important_map_name(name) {
+            score += 8;
+        }
+        if SYMBOL_EXTENSIONS.iter().any(|ext| name.ends_with(&format!(".{ext}"))) {
+            score += 6;
+        }
+        if !query.is_empty() {
+            let symbol_hit = symbols
+                .iter()
+                .any(|symbol| query.iter().any(|term| symbol.to_lowercase().contains(term)));
+            if query.iter().any(|term| lower.contains(term)) {
+                score += 40;
+            }
+            if symbol_hit {
+                score += 30;
+            }
+            if !lower.contains(&query[0]) && !symbol_hit {
+                score = score.saturating_sub(5);
+            }
+        }
+        entries.push(MapEntry {
+            relative,
+            depth,
+            score,
+            symbols,
+        });
+    }
+    entries.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.depth.cmp(&b.depth))
+            .then_with(|| a.relative.cmp(&b.relative))
+    });
+    entries.truncate(max_files);
+
+    let mut body = format!(
+        "Repository map: {} file(s) scanned, showing {}.\n",
+        scanned,
+        entries.len()
+    );
+    if !query.is_empty() {
+        body.push_str(&format!("Ranked for: {}\n", query.join(" ")));
+    }
+    body.push('\n');
+    let mut current_dir = String::new();
+    for entry in &entries {
+        let directory = entry
+            .relative
+            .rsplit_once('/')
+            .map(|(directory, _)| directory)
+            .unwrap_or("");
+        if directory != current_dir {
+            current_dir = directory.to_string();
+            if directory.is_empty() {
+                body.push_str(".\n");
+            } else {
+                body.push_str(directory);
+                body.push_str("/\n");
+            }
+        }
+        let file = entry
+            .relative
+            .rsplit_once('/')
+            .map(|(_, file)| file)
+            .unwrap_or(&entry.relative);
+        body.push_str(&format!("  {file}"));
+        if !entry.symbols.is_empty() {
+            body.push_str(" — ");
+            body.push_str(&entry.symbols.join(", "));
+        }
+        body.push('\n');
+    }
+    outcome(
+        &call.id,
+        format!("map {requested} — {} file(s)", entries.len()),
+        clip(&body, 16_000),
+    )
+}
+
 /// `grep_search` -- find lines by what they say, the way `glob` finds files by
 /// what they are called.
 fn execute_grep_search(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
@@ -6855,6 +7142,40 @@ mod tests {
     }
 
     // ---- what /rollback is handed -----------------------------------------
+
+    /// The map ranks a query match first, names its symbols, and never leaks
+    /// build output or lockfiles.
+    #[tokio::test]
+    async fn repo_map_ranks_query_matches_and_names_symbols() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(
+            root.join("src/parser.rs"),
+            "pub fn parse_config() {}\npub struct Parser;\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/main.rs"), "pub fn main() {}\n").unwrap();
+        std::fs::write(root.join("README.md"), "# readme\n").unwrap();
+        std::fs::write(root.join("package-lock.json"), "{}").unwrap();
+        std::fs::write(root.join("target/debug/hidden.rs"), "pub fn hidden() {}\n").unwrap();
+        let ws = Workspace::new(root).expect("workspace");
+
+        let out = execute(
+            &tool_call(REPO_MAP, json!({"query": "parser", "max_files": 20})),
+            &ws,
+            &ToolsConfig::default(),
+        )
+        .await;
+
+        assert!(out.content.contains("parser.rs — parse_config, Parser"), "{}", out.content);
+        let parser_at = out.content.find("parser.rs").expect("parser file");
+        let main_at = out.content.find("main.rs").expect("main file");
+        assert!(parser_at < main_at, "the query match ranks first:\n{}", out.content);
+        assert!(!out.content.contains("hidden.rs"), "build output is skipped");
+        assert!(!out.content.contains("package-lock"), "lockfiles are skipped");
+    }
 
     /// End to end, through the real tools: create a file, edit an existing one
     /// twice, then undo the lot. The one test that would catch a break
@@ -9375,6 +9696,7 @@ mod tests {
                 LIST_DIR,
                 GLOB,
                 GREP_SEARCH,
+                REPO_MAP,
                 EDIT_FILE,
                 UPDATE_TODOS,
                 GET_DESIGN_STARTER,

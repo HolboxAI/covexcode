@@ -912,9 +912,11 @@ impl From<&InternalToolCall> for ToolCallId {
 /// this match only decides `ToolKind`.
 fn tool_kind_for(action: &Action) -> ToolKind {
     match action {
-        Action::Read { .. } | Action::List { .. } | Action::Glob { .. } | Action::Grep { .. } => {
-            ToolKind::Read
-        }
+        Action::Read { .. }
+        | Action::List { .. }
+        | Action::Glob { .. }
+        | Action::Grep { .. }
+        | Action::RepoMap { .. } => ToolKind::Read,
         Action::Write { .. } | Action::Edit { .. } => ToolKind::Edit,
         Action::Command { .. } => ToolKind::Execute,
         Action::Search { .. } | Action::DesignStarter | Action::CheckContrast { .. } => {
