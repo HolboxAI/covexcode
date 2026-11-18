@@ -697,7 +697,20 @@ async fn run_app(
 
         // Keyboard / paste input.
         let was_busy = app.is_busy();
-        if event::poll(Duration::from_millis(16))? {
+        // An idle window has nothing to animate: the spinner, streaming text
+        // and deploy panel only exist while a turn or overlay is active. A
+        // keystroke wakes `poll` immediately regardless of timeout, so the
+        // longer idle window costs no input latency; it only sets how quickly
+        // a background-teammate update is noticed when nothing else is
+        // happening. This is a backoff, not the full event-driven loop the
+        // speed plan describes -- that needs the engine channel in the same
+        // `select!`, which is a separate change.
+        let poll_after = if app.is_busy() || app.overlay.is_some() {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(250)
+        };
+        if event::poll(poll_after)? {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);

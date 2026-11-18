@@ -347,7 +347,7 @@ Replace the one-shot-only path with a `ShellManager`:
 | Prompt caching / stable prefix | Keeps system prompt and tool schemas byte-identical; add provider cache controls where supported | provider layer |
 | Model routing | Fast model for explore/plan, stronger model for implementation | orchestrator |
 | Repo map (index v0) + LSP | Less context and fewer exploratory turns | `repo_map` in `src/tools.rs`; LSP would be new `cx-index` |
-| Event-driven UI and async log writer | Removes 16 ms polling and per-tick file I/O | `src/main.rs`, `src/session.rs` |
+| Event-driven UI and async log writer | Removes 16 ms polling and per-tick file I/O; idle poll backoff landed (16 ms active, 250 ms idle), full `select!` still to do | `src/main.rs`, `src/session.rs` |
 
 Measure before and after:
 
