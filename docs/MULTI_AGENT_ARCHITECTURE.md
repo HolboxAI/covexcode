@@ -135,8 +135,8 @@ Landed on `main`:
   the stored call in the new process as a fresh job. Phase 5 is functionally
   complete.
 - **Phase 6 (started)**: `cx-bench` drives real `HeadlessSession`s against a
-  local mock LLM and reports TTFT, turn and tool latency, sibling-subagent
-  speedup, and concurrent-session throughput. `--check` is a CI smoke gate on
+  local mock LLM and reports TTFT, turn and tool latency, token counts,
+  cache-hit rate, sibling-subagent speedup, and concurrent-session throughput. `--check` is a CI smoke gate on
   scaling ratios and a hang budget, deliberately not on absolute machine
   speed. Run it with `cargo run --features bench --bin cx-bench -- --check`
   (add `--json` for a before/after artifact). The feature gate keeps the
@@ -349,8 +349,9 @@ Measure before and after:
 
 - p50/p95 time-to-first-token -- `cx-bench` stream scenario;
 - turn wall time and tool latency -- `cx-bench` tool scenario;
-- tokens per completed task and cache-hit rate -- not measured yet; the mock
-  does not report usage, and cache-hit rate needs a real provider;
+- tokens per completed task and cache-hit rate -- `cx-bench` stream scenario,
+  from the endpoint's usage chunk; `usage_update` now carries the cached share
+  of the prompt, so a provider that reports it yields a real cache-hit rate;
 - subagent speedup (independent tasks should finish in about `max(t)`, not
   `sum(t)`) -- `cx-bench` subagents scenario, serial vs parallel;
 - merge-conflict rate -- not measured yet; needs scripted worktree conflicts;

@@ -156,6 +156,8 @@ struct Chunk {
 struct Reply {
     delay: Duration,
     chunks: Vec<Chunk>,
+    /// `(prompt, completion, cached)` as the mock endpoint reports it.
+    usage: Option<(u64, u64, u64)>,
 }
 
 impl Reply {
@@ -166,6 +168,7 @@ impl Reply {
                 payload: content_event(text),
                 delay: Duration::ZERO,
             }],
+            usage: None,
         }
     }
 
@@ -179,6 +182,7 @@ impl Reply {
         Self {
             delay: Duration::ZERO,
             chunks,
+            usage: None,
         }
     }
 
@@ -189,7 +193,16 @@ impl Reply {
                 payload: tool_calls_event(calls),
                 delay: Duration::ZERO,
             }],
+            usage: None,
         }
+    }
+
+    /// Report token usage the way an OpenAI-compatible endpoint does: one
+    /// final chunk with no choices. `cached` is the cached share of the
+    /// prompt, so the report can show a cache-hit rate.
+    fn with_usage(mut self, prompt: u64, completion: u64, cached: u64) -> Self {
+        self.usage = Some((prompt, completion, cached));
+        self
     }
 }
 
@@ -197,6 +210,21 @@ fn content_event(text: &str) -> String {
     format!(
         "data: {}\n\n",
         json!({"choices": [{"delta": {"content": text}}]})
+    )
+}
+
+fn usage_event(prompt: u64, completion: u64, cached: u64) -> String {
+    format!(
+        "data: {}\n\n",
+        json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": prompt + completion,
+                "prompt_tokens_details": { "cached_tokens": cached },
+            }
+        })
     )
 }
 
@@ -256,6 +284,15 @@ async fn start_mock(handler: Handler) -> String {
                         tokio::time::sleep(chunk.delay).await;
                     }
                 }
+                if let Some((prompt, completion, cached)) = reply.usage {
+                    if socket
+                        .write_all(usage_event(prompt, completion, cached).as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 let _ = socket.write_all(b"data: [DONE]\n\n").await;
                 let _ = socket.shutdown().await;
             });
@@ -294,6 +331,9 @@ struct Turn {
     ttft: Duration,
     total: Duration,
     tool_latency: Option<Duration>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cached_tokens: u64,
 }
 
 fn bench_config(endpoint: &str) -> Config {
@@ -353,6 +393,9 @@ async fn run_turn(workspace: Workspace, config: Config, prompt: &str) -> Turn {
     let mut ttft = None;
     let mut tool_starts: HashMap<String, Instant> = HashMap::new();
     let mut tool_latency = None;
+    let mut prompt_tokens = 0;
+    let mut completion_tokens = 0;
+    let mut cached_tokens = 0;
     while let Some(event) = events_rx.recv().await {
         match event {
             SessionEvent::TextDelta { .. } => {
@@ -371,6 +414,17 @@ async fn run_turn(workspace: Workspace, config: Config, prompt: &str) -> Turn {
                         Some(tool_latency.unwrap_or(Duration::ZERO).max(began.elapsed()));
                 }
             }
+            SessionEvent::UsageUpdated {
+                used,
+                prompt_tokens: prompt_side,
+                cached_tokens: cached_side,
+                ..
+            } => {
+                let prompt = prompt_side.unwrap_or(0);
+                prompt_tokens += prompt;
+                completion_tokens += used.saturating_sub(prompt);
+                cached_tokens += cached_side.unwrap_or(0);
+            }
             SessionEvent::TurnFinished { .. } => break,
             _ => {}
         }
@@ -386,6 +440,9 @@ async fn run_turn(workspace: Workspace, config: Config, prompt: &str) -> Turn {
         ttft: ttft.unwrap_or(total),
         total,
         tool_latency,
+        prompt_tokens,
+        completion_tokens,
+        cached_tokens,
     }
 }
 
@@ -432,19 +489,39 @@ fn best(values: Vec<Duration>) -> Duration {
 
 // ---------------------------------------------------------------- scenarios
 
+#[derive(Clone, Copy, Default)]
+struct TokenSummary {
+    prompt: f64,
+    completion: f64,
+    cached: f64,
+}
+
 async fn stream_scenario(
     workspace: &Workspace,
     config: &Config,
     runs: usize,
-) -> (Summary, Summary) {
+) -> (Summary, Summary, TokenSummary) {
     let mut ttft = Vec::with_capacity(runs);
     let mut total = Vec::with_capacity(runs);
+    let mut tokens = TokenSummary::default();
     for _ in 0..runs {
         let turn = run_turn(workspace.clone(), config.clone(), "stream a short answer").await;
         ttft.push(turn.ttft);
         total.push(turn.total);
+        tokens.prompt += turn.prompt_tokens as f64;
+        tokens.completion += turn.completion_tokens as f64;
+        tokens.cached += turn.cached_tokens as f64;
     }
-    (summarize(ttft), summarize(total))
+    let runs = runs.max(1) as f64;
+    (
+        summarize(ttft),
+        summarize(total),
+        TokenSummary {
+            prompt: tokens.prompt / runs,
+            completion: tokens.completion / runs,
+            cached: tokens.cached / runs,
+        },
+    )
 }
 
 async fn tool_scenario(workspace: &Workspace, config: &Config, runs: usize) -> (Summary, Summary) {
@@ -556,11 +633,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Streaming: a fixed cadence is what makes TTFT exercise the live path
     // instead of a single buffered write.
     let stream_endpoint = start_mock(Arc::new(|_| {
-        Reply::streamed(STREAM_TOKENS, Duration::from_millis(1))
+        Reply::streamed(STREAM_TOKENS, Duration::from_millis(1)).with_usage(
+            1200,
+            STREAM_TOKENS as u64,
+            600,
+        )
     }))
     .await;
     let stream_config = bench_config(&stream_endpoint);
-    let (stream_ttft, stream_total) =
+    let (stream_ttft, stream_total, stream_tokens) =
         stream_scenario(&workspace, &stream_config, stream_runs).await;
 
     // A read-only tool round: first request asks for read_file, the one after
@@ -587,6 +668,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     payload: content_event("child report"),
                     delay: Duration::ZERO,
                 }],
+                usage: None,
             }
         } else if request.contains("\"role\":\"tool\"") {
             Reply::text("both reports are in")
@@ -617,6 +699,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             payload: content_event("ok"),
             delay: Duration::ZERO,
         }],
+        usage: None,
     }))
     .await;
     let session_config = bench_config(&session_endpoint);
@@ -646,6 +729,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "stream": {
                     "ttft_ms": {"p50": micros(stream_ttft.p50) / 1000.0, "p95": micros(stream_ttft.p95) / 1000.0, "max": micros(stream_ttft.max) / 1000.0},
                     "turn_ms": {"p50": millis(stream_total.p50), "p95": millis(stream_total.p95), "max": millis(stream_total.max)},
+                    "tokens": {
+                        "prompt": stream_tokens.prompt,
+                        "completion": stream_tokens.completion,
+                        "cached": stream_tokens.cached,
+                        "cache_hit_rate": if stream_tokens.prompt > 0.0 { stream_tokens.cached / stream_tokens.prompt } else { 0.0 },
+                    },
                 },
                 "tool": {
                     "latency_ms": {"p50": millis(tool_latency.p50), "p95": millis(tool_latency.p95), "max": millis(tool_latency.max)},
@@ -681,6 +770,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             millis(stream_ttft.p95),
             millis(stream_total.p50),
             millis(stream_total.p95),
+        );
+        let cache_hit = if stream_tokens.prompt > 0.0 {
+            stream_tokens.cached / stream_tokens.prompt * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "tokens     prompt {:>6.0}  completion {:>5.0}  cached {:>5.0}  (cache hit {cache_hit:.1}%)",
+            stream_tokens.prompt, stream_tokens.completion, stream_tokens.cached,
         );
         println!(
             "tool       latency p50 {:>6.2}ms  p95 {:>6.2}ms   turn p50 {:>7.2}ms  p95 {:>7.2}ms",

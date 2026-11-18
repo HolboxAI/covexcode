@@ -400,12 +400,14 @@ impl<'a> UpdateSink<'a> {
                 used,
                 size,
                 prompt_tokens,
+                cached_tokens,
             } => Some(SessionEvent::UsageUpdated {
                 session_id,
                 turn: self.turn,
                 used: *used,
                 size: *size,
                 prompt_tokens: *prompt_tokens,
+                cached_tokens: *cached_tokens,
             }),
             _ => None,
         }
@@ -3992,6 +3994,7 @@ mod tests {
                 used: 15,
                 size: 0,
                 prompt_tokens: Some(10),
+                cached_tokens: None,
             }
         );
     }
@@ -4038,6 +4041,7 @@ mod tests {
                 used: 15,
                 size: 131_072,
                 prompt_tokens: Some(10),
+                cached_tokens: None,
             }
         );
     }

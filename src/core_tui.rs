@@ -285,12 +285,16 @@ impl CoreTui {
             SessionEvent::UsageUpdated {
                 used,
                 prompt_tokens,
+                cached_tokens,
                 ..
             } => {
                 let prompt = prompt_tokens.unwrap_or(0) as usize;
                 app.record_exact_usage(ApiUsage {
                     prompt_tokens: prompt,
                     completion_tokens: (used as usize).saturating_sub(prompt),
+                    prompt_tokens_details: crate::llm::PromptTokensDetails {
+                        cached_tokens: cached_tokens.unwrap_or(0) as usize,
+                    },
                     ..Default::default()
                 });
             }
@@ -702,6 +706,7 @@ mod tests {
                 used: 300,
                 size: 131_072,
                 prompt_tokens: Some(200),
+                cached_tokens: None,
             },
         );
 
