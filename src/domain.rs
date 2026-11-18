@@ -293,6 +293,9 @@ pub enum SessionEvent {
         /// The model's context window, `0` when unknown.
         size: u64,
         prompt_tokens: Option<u64>,
+        /// Prompt tokens the endpoint served from its context cache; `None`
+        /// when it reported no cache figure. Already included in `prompt_tokens`.
+        cached_tokens: Option<u64>,
     },
     ApprovalRequested {
         session_id: SessionId,
@@ -425,6 +428,7 @@ mod tests {
             used: 120,
             size: 200_000,
             prompt_tokens: Some(100),
+            cached_tokens: None,
         };
         let json = serde_json::to_string(&usage).unwrap();
         assert!(json.contains("\"type\":\"usage_updated\""), "{json}");

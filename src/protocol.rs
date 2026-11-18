@@ -404,6 +404,12 @@ pub enum SessionUpdate {
         /// usage) have no prompt figure to send.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_tokens: Option<u64>,
+        /// How much of `prompt_tokens` the endpoint served from its context
+        /// cache. Discounted prompt tokens, already included in the prompt
+        /// figure; reported separately so a client can show the cache-hit
+        /// rate. Optional for the same reason as `prompt_tokens`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_tokens: Option<u64>,
     },
 }
 
@@ -1000,6 +1006,8 @@ impl ApiUsage {
             used: self.total() as u64,
             size,
             prompt_tokens: (self.prompt_tokens > 0).then_some(self.prompt_tokens as u64),
+            cached_tokens: (self.cached_prompt_tokens() > 0)
+                .then_some(self.cached_prompt_tokens() as u64),
         }
     }
 }
@@ -1308,7 +1316,8 @@ mod tests {
                 "sessionUpdate": "usage_update",
                 "used": 15,
                 "size": 131072,
-                "prompt_tokens": 10
+                "prompt_tokens": 10,
+                "cached_tokens": 7
             })
         );
     }
