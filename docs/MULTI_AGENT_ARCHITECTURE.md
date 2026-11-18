@@ -142,7 +142,10 @@ Landed on `main`:
   speed. Run it with `cargo run --features bench --bin cx-bench -- --check`
   (add `--json` for a before/after artifact). The feature gate keeps the
   harness -- and its third copy of the runtime modules -- out of release
-  builds.
+  builds. The first repo-index slice has landed too: `repo_map` returns a
+  ranked file layout with top-level symbols (query-aware, build output and
+  lockfiles skipped), so an unfamiliar task can start from a map instead of
+  blind globbing.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only
@@ -343,7 +346,7 @@ Replace the one-shot-only path with a `ShellManager`:
 | Persistent PTY shells | Removes process-spawn cost per command | `src/tools.rs:3364` |
 | Prompt caching / stable prefix | Keeps system prompt and tool schemas byte-identical; add provider cache controls where supported | provider layer |
 | Model routing | Fast model for explore/plan, stronger model for implementation | orchestrator |
-| Repo index + LSP | Less context and fewer exploratory turns | new `cx-index` |
+| Repo map (index v0) + LSP | Less context and fewer exploratory turns | `repo_map` in `src/tools.rs`; LSP would be new `cx-index` |
 | Event-driven UI and async log writer | Removes 16 ms polling and per-tick file I/O | `src/main.rs`, `src/session.rs` |
 
 Measure before and after:

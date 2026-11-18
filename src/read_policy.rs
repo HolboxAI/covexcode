@@ -11,7 +11,7 @@ use crate::tools;
 
 pub(crate) fn is_pure_read_call(call: &ToolCall) -> bool {
 	match call.function.name.as_str() {
-		tools::READ_FILE | tools::LIST_DIR | tools::GLOB | tools::GREP_SEARCH => true,
+		tools::READ_FILE | tools::LIST_DIR | tools::GLOB | tools::GREP_SEARCH | tools::REPO_MAP => true,
 		tools::RUN_COMMAND => matches!(
 			tools::describe_action(call),
 			Some(tools::Action::Command { command, .. }) if tools::is_read_only(&command)
