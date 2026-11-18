@@ -1,6 +1,6 @@
 [package]
 name = "covexcode"
-version = "1.12.1"
+version = "1.12.2"
 edition = "2021"
 # Several binaries exist (src/main.rs + src/bin/*); without this, a bare
 # `cargo run` fails with "could not determine which binary to run".
