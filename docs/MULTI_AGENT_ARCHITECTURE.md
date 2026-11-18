@@ -136,7 +136,8 @@ Landed on `main`:
   complete.
 - **Phase 6 (started)**: `cx-bench` drives real `HeadlessSession`s against a
   local mock LLM and reports TTFT, turn and tool latency, token counts,
-  cache-hit rate, sibling-subagent speedup, and concurrent-session throughput. `--check` is a CI smoke gate on
+  cache-hit rate, sibling-subagent speedup, concurrent-session throughput, and
+  synthetic patch-conflict outcomes. `--check` is a CI smoke gate on
   scaling ratios and a hang budget, deliberately not on absolute machine
   speed. Run it with `cargo run --features bench --bin cx-bench -- --check`
   (add `--json` for a before/after artifact). The feature gate keeps the
@@ -354,7 +355,9 @@ Measure before and after:
   of the prompt, so a provider that reports it yields a real cache-hit rate;
 - subagent speedup (independent tasks should finish in about `max(t)`, not
   `sum(t)`) -- `cx-bench` subagents scenario, serial vs parallel;
-- merge-conflict rate -- not measured yet; needs scripted worktree conflicts;
+- merge-conflict rate -- `cx-bench` synthetic overlap/disjoint patch pairs
+  (a regression harness for the apply path; real agent collision rates still
+  need recorded runs);
 - concurrent-session throughput -- `cx-bench` sessions scenario.
 
 `cx-bench --json` is the before/after artifact. Do not claim a speedup

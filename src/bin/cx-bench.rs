@@ -125,7 +125,8 @@ use headless::HeadlessSession;
 use protocol::SessionId;
 use serde_json::json;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -559,6 +560,118 @@ async fn concurrent_once(workspace: &Workspace, base: &Config, sessions: usize) 
     start.elapsed()
 }
 
+// ---------------------------------------------------------------- conflicts
+
+#[derive(Clone, Copy, Default)]
+struct ConflictStats {
+    overlap_conflicts: usize,
+    overlap_total: usize,
+    disjoint_conflicts: usize,
+    disjoint_total: usize,
+}
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} failed to start: {e}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn commit_base(dir: &Path, content: &str) -> String {
+    git_in(dir, &["init", "-q"]);
+    git_in(dir, &["config", "user.email", "bench@example.com"]);
+    git_in(dir, &["config", "user.name", "cx-bench"]);
+    std::fs::write(dir.join("a.txt"), content).expect("write base file");
+    git_in(dir, &["add", "-A"]);
+    git_in(dir, &["commit", "-qm", "base"]);
+    git_in(dir, &["rev-parse", "HEAD"])
+}
+
+/// Two synthetic patches whose outcomes are known: one pair edits the same
+/// line (must conflict), the other edits opposite ends of one file (must
+/// apply cleanly through the three-way fallback). This exercises the same
+/// worktree/snapshot/apply path a writing subagent uses, without a model.
+///
+/// It is a regression harness for the *apply* path, not a claim about how
+/// often real agents collide; that needs recorded runs.
+fn conflict_scenario(runs: usize) -> ConflictStats {
+    const BASE: &str = "one\ntwo\nthree\nfour\nfive\nsix\n";
+    let dir = temporary_dir("conflicts");
+    let base = commit_base(&dir, BASE);
+    let worktrees = dir.join("worktrees");
+    std::fs::create_dir_all(&worktrees).expect("worktrees dir");
+    let mut stats = ConflictStats::default();
+
+    for index in 0..runs {
+        for overlap in [true, false] {
+            let first = worktree::Worktree::create_at(
+                &worktrees,
+                &dir,
+                &format!("first-{index}-{overlap}"),
+                &base,
+            )
+            .expect("first worktree");
+            let second = worktree::Worktree::create_at(
+                &worktrees,
+                &dir,
+                &format!("second-{index}-{overlap}"),
+                &base,
+            )
+            .expect("second worktree");
+            let target = worktree::Worktree::create_at(
+                &worktrees,
+                &dir,
+                &format!("target-{index}-{overlap}"),
+                &base,
+            )
+            .expect("target worktree");
+
+            let (first_text, second_text) = if overlap {
+                (
+                    "one\nFIRST\nthree\nfour\nfive\nsix\n",
+                    "one\nSECOND\nthree\nfour\nfive\nsix\n",
+                )
+            } else {
+                (
+                    "FIRST\ntwo\nthree\nfour\nfive\nsix\n",
+                    "one\ntwo\nthree\nfour\nfive\nSECOND\n",
+                )
+            };
+            std::fs::write(first.path().join("a.txt"), first_text).expect("first edit");
+            std::fs::write(second.path().join("a.txt"), second_text).expect("second edit");
+            let first_patch = first.diff_against(&base).expect("first diff");
+            let second_patch = second.diff_against(&base).expect("second diff");
+
+            target
+                .apply_with_conflicts(&first_patch)
+                .expect("first applies");
+            let conflicted = target
+                .apply_with_conflicts(&second_patch)
+                .expect("second applies or conflicts");
+            if overlap {
+                stats.overlap_total += 1;
+                stats.overlap_conflicts += usize::from(conflicted);
+            } else {
+                stats.disjoint_total += 1;
+                stats.disjoint_conflicts += usize::from(conflicted);
+            }
+
+            first.remove();
+            second.remove();
+            target.remove();
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    stats
+}
+
 // ---------------------------------------------------------------- main
 
 struct Args {
@@ -714,6 +827,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let throughput_speedup = (8.0 / eight.as_secs_f64().max(f64::MIN_POSITIVE))
         / (1.0 / one.as_secs_f64().max(f64::MIN_POSITIVE));
 
+    let conflict_runs = if args.quick { 3 } else { 5 };
+    let conflicts = conflict_scenario(conflict_runs);
+
     let subagent_ok = speedup >= if args.quick { 1.25 } else { 1.4 };
     let sessions_ok = throughput_speedup >= 2.0;
     let stream_ok = stream_total.p95 < HANG_BUDGET;
@@ -749,6 +865,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "one_ms": millis(one),
                     "eight_ms": millis(eight),
                     "throughput_speedup": throughput_speedup,
+                },
+                "conflicts": {
+                    "overlap_conflicts": conflicts.overlap_conflicts,
+                    "overlap_total": conflicts.overlap_total,
+                    "disjoint_conflicts": conflicts.disjoint_conflicts,
+                    "disjoint_total": conflicts.disjoint_total,
                 },
                 "checks": {
                     "subagent_speedup": subagent_ok,
@@ -796,6 +918,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "sessions   1: {:>7.1}ms  8: {:>7.1}ms   throughput {throughput_speedup:.2}x",
             millis(one),
             millis(eight),
+        );
+        println!(
+            "conflicts  overlapping {}/{}   disjoint {}/{}",
+            conflicts.overlap_conflicts,
+            conflicts.overlap_total,
+            conflicts.disjoint_conflicts,
+            conflicts.disjoint_total,
         );
         if args.check {
             println!(
