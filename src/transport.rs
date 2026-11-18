@@ -2522,4 +2522,96 @@ mod tests {
         assert!(names.contains(&"explore"), "{names:?}");
         assert!(names.contains(&"merge"), "{names:?}");
     }
+
+    /// Load: the registry can hold many live sessions at once, list them all,
+    /// and close them without leaking entries.
+    #[tokio::test]
+    async fn many_sessions_can_be_created_listed_and_closed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cwd = dir.path().display().to_string();
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(1024);
+        let mut router = Router::new(Config::default(), outgoing_tx);
+
+        let mut ids = Vec::new();
+        for id in 0..50 {
+            let line = router
+                .handle(classify(&json!({
+                    "jsonrpc": "2.0", "id": id + 1, "method": "session/new",
+                    "params": { "cwd": cwd, "mcpServers": [] }
+                })))
+                .await
+                .expect("session/new answers");
+            let value: serde_json::Value = serde_json::from_str(line.trim()).expect("valid JSON");
+            ids.push(
+                value["result"]["sessionId"]
+                    .as_str()
+                    .expect("session id")
+                    .to_string(),
+            );
+        }
+        assert_eq!(ids.len(), 50);
+
+        let listed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1000, "method": "session/list", "params": {}
+            })))
+            .await
+            .expect("session/list answers");
+        let value: serde_json::Value = serde_json::from_str(listed.trim()).expect("valid JSON");
+        assert_eq!(value["result"]["sessions"].as_array().unwrap().len(), 50);
+
+        for (index, id) in ids.iter().enumerate() {
+            router
+                .handle(classify(&json!({
+                    "jsonrpc": "2.0", "id": 2000 + index, "method": "session/close",
+                    "params": { "sessionId": id }
+                })))
+                .await
+                .expect("session/close answers");
+        }
+        let listed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3000, "method": "session/list", "params": {}
+            })))
+            .await
+            .expect("session/list answers");
+        let value: serde_json::Value = serde_json::from_str(listed.trim()).expect("valid JSON");
+        assert_eq!(value["result"]["sessions"].as_array().unwrap().len(), 0);
+    }
+
+    /// Fault: bad params for a registry method return an error line and leave
+    /// the connection usable for the next request.
+    #[tokio::test]
+    async fn malformed_registry_params_do_not_kill_the_connection() {
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(16);
+        let mut router = Router::new(Config::default(), outgoing_tx);
+
+        let error = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "teammates/list", "params": {}
+            })))
+            .await
+            .expect("error line");
+        let value: serde_json::Value = serde_json::from_str(error.trim()).expect("valid JSON");
+        assert_eq!(value["error"]["code"], -32602);
+
+        let missing = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tasks/list",
+                "params": { "cwd": "/definitely/not/a/real/workspace/cx-bench" }
+            })))
+            .await
+            .expect("error line");
+        let value: serde_json::Value = serde_json::from_str(missing.trim()).expect("valid JSON");
+        assert!(value["error"]["code"].as_i64().is_some());
+
+        let listed = router
+            .handle(classify(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "session/list", "params": {}
+            })))
+            .await
+            .expect("the next request still answers");
+        let value: serde_json::Value = serde_json::from_str(listed.trim()).expect("valid JSON");
+        assert_eq!(value["result"]["sessions"].as_array().unwrap().len(), 0);
+    }
 }
