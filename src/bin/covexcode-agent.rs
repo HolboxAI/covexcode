@@ -45,6 +45,8 @@ mod headless;
 mod llm;
 #[path = "../locked_store.rs"]
 mod locked_store;
+#[path = "../lsp.rs"]
+mod lsp;
 #[path = "../mailbox.rs"]
 mod mailbox;
 #[path = "../mcp.rs"]

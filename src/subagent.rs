@@ -460,7 +460,9 @@ pub async fn run_subagent_with(
             if write_mode {
                 tools::subagent_write_schemas()
             } else {
-                tools::subagent_schemas()
+                tools::subagent_schemas(
+                    config.lsp.enabled && !config.lsp.servers.is_empty(),
+                )
             }
         } else {
             Vec::new()
@@ -648,7 +650,12 @@ pub async fn run_subagent_with(
             // -- an unanswered tool call leaves the transcript invalid and
             // fails the *next* request instead of this one.
             let content = match gate {
-                Ok(()) => tools::execute(c, &child_workspace, &config.tools).await.content,
+                Ok(()) => {
+                    let lsp = config.lsp.enabled.then_some(&config.lsp);
+                    tools::execute_with_lsp(c, &child_workspace, &config.tools, lsp)
+                        .await
+                        .content
+                }
                 Err(reason) => reason,
             };
             history.push(ChatMessage {

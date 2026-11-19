@@ -145,7 +145,10 @@ Landed on `main`:
   builds. The first repo-index slice has landed too: `repo_map` returns a
   ranked file layout with top-level symbols (query-aware, build output and
   lockfiles skipped), so an unfamiliar task can start from a map instead of
-  blind globbing.
+  blind globbing. LSP phase 1 is in: with `[lsp] enabled = true` and a
+  configured server, the `lsp` tool returns diagnostics for one file; the
+  client is lazy, bounded by timeouts, and restarts a crashed server on the
+  next call. Definition/references/hover remain phase 2.
 
 Deliberate deviation: Phase 2's event store is the TUI's JSONL format, not
 SQLite. It keeps one store for `/sessions`, the CLI, and ACP; append-only

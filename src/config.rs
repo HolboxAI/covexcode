@@ -26,6 +26,50 @@ pub struct Config {
     /// Same again for `[compact]`.
     #[serde(default)]
     pub compact: CompactConfig,
+    /// Same again for `[lsp]`. Disabled by default: starting a language
+    /// server is an explicit opt-in, not something a tool should do on its
+    /// own.
+    #[serde(default)]
+    pub lsp: LspConfig,
+}
+
+/// Language servers the `lsp` tool may start. Each server is selected by the
+/// file extension that appears in its `extensions` list.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LspConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub servers: std::collections::BTreeMap<String, LspServerConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LspServerConfig {
+    /// The executable to spawn. No PATH probing beyond the normal spawn; a
+    /// missing command is reported as text, never installed.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// File extensions (without the dot) this server handles. Required in
+    /// practice -- an empty list means the server is configured but never
+    /// selected.
+    #[serde(default)]
+    pub extensions: Vec<String>,
+}
+
+impl LspConfig {
+    /// The server configured for `extension`, first match by server name so
+    /// the choice is deterministic when two servers claim the same extension.
+    pub fn server_for(&self, extension: &str) -> Option<(&str, &LspServerConfig)> {
+        let extension = extension.trim_start_matches('.');
+        self.servers.iter().find_map(|(name, server)| {
+            server
+                .extensions
+                .iter()
+                .any(|ext| ext.trim_start_matches('.').eq_ignore_ascii_case(extension))
+                .then_some((name.as_str(), server))
+        })
+    }
 }
 
 /// When the conversation compacts itself. `/compact` by hand is always
@@ -1513,6 +1557,7 @@ mod tests {
                     context_window: 131_072,
                 },
                 tools: ToolsConfig::default(),
+                lsp: LspConfig::default(),
             };
             config.save().expect("save should succeed");
 
@@ -1786,6 +1831,47 @@ mod tests {
             toml::from_str("[llm]\nendpoint = \"http://x\"\n[tools]\nmerge_agent = false\n")
                 .expect("parses");
         assert!(!parsed.tools.merge_agent);
+    }
+
+    #[test]
+    fn lsp_is_disabled_without_configuration() {
+        let config = Config::default();
+        assert!(!config.lsp.enabled);
+        assert!(config.lsp.servers.is_empty());
+        assert!(config.lsp.server_for("rs").is_none());
+    }
+
+    #[test]
+    fn lsp_servers_parse_and_resolve_by_extension() {
+        let parsed: Config = toml::from_str(
+            r#"
+            [llm]
+            endpoint = "http://x"
+
+            [lsp]
+            enabled = true
+
+            [lsp.servers.rust]
+            command = "rust-analyzer"
+
+            [lsp.servers.typescript]
+            command = "typescript-language-server"
+            args = ["--stdio"]
+            extensions = ["ts", "tsx"]
+            "#,
+        )
+        .expect("parses");
+        assert!(parsed.lsp.enabled);
+        assert_eq!(
+            parsed.lsp.server_for("rs").map(|(name, _)| name),
+            None,
+            "a server with no extensions is never selected"
+        );
+        let (name, server) = parsed.lsp.server_for("TS").expect("extension match");
+        assert_eq!(name, "typescript");
+        assert_eq!(server.command, "typescript-language-server");
+        assert_eq!(server.args, ["--stdio"]);
+        assert_eq!(parsed.lsp.server_for(".tsx").map(|(name, _)| name), Some("typescript"));
     }
 
     /// The compact threshold is derived from the model, not a fixed 80k that
