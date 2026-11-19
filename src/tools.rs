@@ -119,7 +119,27 @@ impl Mode {
 /// Directories whose contents are build output or dependencies rather than the
 /// project. Walking them turns a `glob` into thousands of irrelevant results and
 /// buries whatever the model was looking for.
-pub const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "dist", "build"];
+pub const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "out",
+    "coverage",
+    "vendor",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".cache",
+];
 
 /// Ceiling on `glob` results, so a careless `**/*` cannot fill the context
 /// window with paths.
