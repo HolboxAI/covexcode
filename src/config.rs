@@ -569,6 +569,9 @@ pub struct ToolsConfig {
     #[serde(default = "default_subagent_concurrency")]
     pub subagent_concurrency: usize,
     /// Model read-only subagents use. `None` keeps the parent's model.
+    /// `"fast"` selects the configured provider's fast checkpoint
+    /// (`deepseek-v4-flash` / `gpt-5.6-luna`); a custom endpoint has no
+    /// checkpoint and keeps the parent. Any other value is used verbatim.
     /// Pointing research at a fast, cheap model gives the concurrency above
     /// its biggest win: a child's job is reading and summarizing, and it
     /// usually takes several rounds.

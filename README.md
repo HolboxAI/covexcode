@@ -275,7 +275,8 @@ prompt = "You are a meticulous reviewer. Look for..."
 The definition's prompt is appended to the built-in read-only prompt, so a
 definition changes what the child is asked to do, not what it is able to do.
 Sibling `agent` calls run concurrently (default 4, `tools.subagent_concurrency`),
-and `tools.subagent_model` can route research to a faster model. `/agents`
+and `tools.subagent_model` can route research to a faster model (`"fast"` picks
+the provider's cheap checkpoint). `/agents`
 opens a live panel of running and finished children; `/subagents` replays the
 same trail in the transcript.
 
