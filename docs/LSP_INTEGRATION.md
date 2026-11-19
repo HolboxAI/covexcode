@@ -1,7 +1,7 @@
 # LSP integration
 
-Status: phases 1–2 implemented (diagnostics, definition, references, hover);
-phases 3–4 proposed  
+Status: phases 1–3 implemented (diagnostics, definition, references, hover,
+and warm document symbols in `repo_map`); phase 4 proposed  
 Date: 2026-11-19  
 Scope: `HolboxAI/covexcode` runtime, inherited by the IDE through the bundled
 sidecar
@@ -99,9 +99,10 @@ extensions = ["ts", "tsx", "js", "jsx"]
   so ACP/IDE gets it automatically.
 - `transport.rs`: advertise `agentCapabilities.covexcode.lsp = true`; the IDE
   can gate a future diagnostics view on it.
-- `repo_map`: later, use outgoing `textDocument/documentSymbol` results instead
-  of regex extraction when a server is configured. Keep the regex index as the
-  fallback and the fast path.
+- `repo_map`: the top three files ask an **already-running** server for
+  `textDocument/documentSymbol`; the regex index still ranks the files and is
+  the fallback everywhere else. A cold or busy server is skipped rather than
+  waited on, so the map never pays `initialize` or an indexing stall.
 
 ## Phases
 
@@ -110,8 +111,10 @@ extensions = ["ts", "tsx", "js", "jsx"]
 2. **`definition` + `references` + `hover`** — implemented: UTF-16 conversion
    at the boundary, 5-second query timeouts, bounded rendering, notifications
    interleaved with replies handled without spinning.
-3. **Repo-map symbol source** — document symbols when configured; regex
-   fallback unchanged.
+3. **Repo-map symbol source** — implemented: warm servers answer
+   `documentSymbol` for the top-ranked files; the regex index remains the
+   ranking source and fallback, and a cold server is never spawned or waited
+   on by the map.
 4. **IDE surface** — a diagnostics count/list in the chat tool card or a
    dedicated view, gated on the capability flag. The IDE needs no new ACP
    transport work: the tool result already streams as a normal tool call.
@@ -120,8 +123,8 @@ extensions = ["ts", "tsx", "js", "jsx"]
 
 - A fake LSP server embedded in `src/lsp.rs` tests (a small Python stdio
   program) answers `initialize`, `didOpen`, `definition`, `references`,
-  `hover`, and emits diagnostics; tests spawn it through a real
-  `LspServerConfig`. They skip when no Python interpreter is available.
+  `hover`, `documentSymbol`, and emits diagnostics; tests spawn it through a
+  real `LspServerConfig`. They skip when no Python interpreter is available.
 - Timeout and crash tests: server that accepts but never answers; server that
   exits mid-request.
 - UTF-16 position tests with emoji and combining characters.
