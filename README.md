@@ -237,6 +237,13 @@ max_steps = 40           # tool calls per turn before it pauses and asks you to
 [deploy]
 enabled = true            # false removes the deploy_project tool entirely
 
+[lsp]
+enabled = false           # true offers the read-only `lsp` diagnostics tool
+
+[lsp.servers.rust]
+command = "rust-analyzer"
+extensions = ["rs"]
+
 [update]
 check_on_start = true
 

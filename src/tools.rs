@@ -39,7 +39,7 @@
 //! non-zero exit, a missing file, a failed search, or bad arguments are
 //! information, not a reason to abandon the turn.
 
-use crate::config::ToolsConfig;
+use crate::config::{LspConfig, ToolsConfig};
 use crate::danger;
 use crate::llm::ToolCall;
 use crate::workspace::Workspace;
@@ -59,6 +59,7 @@ pub const LIST_DIR: &str = "list_dir";
 pub const GLOB: &str = "glob";
 pub const GREP_SEARCH: &str = "grep_search";
 pub const REPO_MAP: &str = "repo_map";
+pub const LSP: &str = "lsp";
 pub const EDIT_FILE: &str = "edit_file";
 pub const GET_DESIGN_STARTER: &str = "get_design_starter";
 pub const CHECK_CONTRAST: &str = "check_contrast";
@@ -296,6 +297,7 @@ pub fn schemas(mode: Mode, active_plan: bool, deploy: bool, published: bool) -> 
         published,
         false,
         SchemaDiet::full(),
+        false,
     )
 }
 
@@ -377,6 +379,7 @@ pub fn schemas_for(
     published: bool,
     browser: bool,
     diet: SchemaDiet,
+    lsp: bool,
 ) -> Vec<Value> {
     let (shell_name, shell_flag) = shell();
     let mut schemas = vec![
@@ -1068,6 +1071,30 @@ pub fn schemas_for(
         }),
     ];
 
+    if lsp {
+        schemas.push(json!({
+            "type": "function",
+            "function": {
+                "name": LSP,
+                "description": "Ask the configured language server for diagnostics on one \
+                                 file -- the compiler-grade errors and warnings that a grep cannot \
+                                 know. Use it after editing a file, before claiming success. \
+                                 Read-only. Requires an [lsp.servers.*] entry whose extensions \
+                                 include the file's extension.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File to check, relative to the project root."
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }
+        }));
+    }
+
     schemas.push(json!({
         "type": "function",
         "function": {
@@ -1505,8 +1532,16 @@ pub fn schemas_for(
 /// until the plumbing has earned more), and `web_search` too: it sends the
 /// query to a third party, which is the parent's decision to make, not a
 /// child's.
-pub fn subagent_schemas() -> Vec<Value> {
-    let mut schemas = schemas(Mode::Normal, false, false, false);
+pub fn subagent_schemas(lsp: bool) -> Vec<Value> {
+    let mut schemas = schemas_for(
+        Mode::Normal,
+        false,
+        false,
+        false,
+        false,
+        SchemaDiet::full(),
+        lsp,
+    );
     schemas.retain(|schema| {
         let name = schema["function"]["name"].as_str().unwrap_or_default();
         SUBAGENT_TOOLS.contains(&name)
@@ -1518,7 +1553,16 @@ pub fn subagent_schemas() -> Vec<Value> {
 /// only ones it can execute even if it hallucinates another. `mailbox` is
 /// here because it is how a teammate speaks to the lead without waiting for
 /// its final report; it writes only coordination state in the config dir.
-pub const SUBAGENT_TOOLS: &[&str] = &[RUN_COMMAND, READ_FILE, LIST_DIR, GLOB, GREP_SEARCH, REPO_MAP, MAILBOX];
+pub const SUBAGENT_TOOLS: &[&str] = &[
+    RUN_COMMAND,
+    READ_FILE,
+    LIST_DIR,
+    GLOB,
+    GREP_SEARCH,
+    REPO_MAP,
+    LSP,
+    MAILBOX,
+];
 
 /// Why `call` may not run inside a subagent, or `Ok` if it may.
 ///
@@ -2321,6 +2365,11 @@ struct RepoMapArgs {
 }
 
 #[derive(Deserialize)]
+struct LspArgs {
+    path: String,
+}
+
+#[derive(Deserialize)]
 struct EditSpanArgs {
     old_string: String,
     new_string: String,
@@ -2660,6 +2709,10 @@ pub enum Action {
     RepoMap {
         path: Option<String>,
     },
+    /// Read-only: language-server diagnostics for one file.
+    Lsp {
+        path: String,
+    },
     /// Changes a file, so it is approved like `Write` -- but shows only the
     /// spans being replaced, which is the whole reason to prefer it. Always
     /// holds at least one span; several when the model batched its edits to
@@ -2876,6 +2929,7 @@ impl Action {
                 Some(path) => format!("map {path}"),
                 None => "map repository".to_string(),
             },
+            Action::Lsp { path } => format!("diagnostics {path}"),
             Action::Search { query, .. } => format!("search \"{query}\""),
             Action::DesignStarter => "design starter".to_string(),
             Action::CheckContrast { pairs } => format!(
@@ -3018,6 +3072,7 @@ pub fn is_read_only_action(action: &Action) -> bool {
         | Action::Glob { .. }
         | Action::Grep { .. }
         | Action::RepoMap { .. }
+        | Action::Lsp { .. }
         | Action::Search { .. }
         | Action::DesignStarter
         | Action::CheckContrast { .. }
@@ -3041,6 +3096,7 @@ pub fn plan_mode_block(action: &Action) -> Option<String> {
         | Action::Glob { .. }
         | Action::Grep { .. }
         | Action::RepoMap { .. }
+        | Action::Lsp { .. }
         | Action::Search { .. }
         | Action::DesignStarter
         | Action::CheckContrast { .. }
@@ -3290,6 +3346,11 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
                     .map(|p| p.trim().to_string())
                     .filter(|p| !p.is_empty()),
             })
+        }
+        LSP => {
+            let args: LspArgs = serde_json::from_str(&call.function.arguments).ok()?;
+            let path = args.path.trim().to_string();
+            (!path.is_empty()).then_some(Action::Lsp { path })
         }
         EDIT_FILE => {
             let args: EditFileArgs = serde_json::from_str(&call.function.arguments).ok()?;
@@ -3740,7 +3801,19 @@ async fn run_blocking(
 }
 
 pub async fn execute(call: &ToolCall, workspace: &Workspace, config: &ToolsConfig) -> ToolOutcome {
-    execute_truncated(call, workspace, config, false).await
+    execute_with_lsp(call, workspace, config, None).await
+}
+
+/// Same as [`execute`], with the optional LSP configuration the `lsp` tool
+/// needs. Kept as a separate entry point so the many existing callers (and
+/// every test) that do not have a full `Config` stay unchanged.
+pub async fn execute_with_lsp(
+    call: &ToolCall,
+    workspace: &Workspace,
+    config: &ToolsConfig,
+    lsp: Option<&LspConfig>,
+) -> ToolOutcome {
+    execute_truncated_with_lsp(call, workspace, config, false, lsp).await
 }
 
 /// Same as [`execute`], but additionally tells `write_file`/`edit_file`
@@ -3756,6 +3829,16 @@ pub async fn execute_truncated(
     workspace: &Workspace,
     config: &ToolsConfig,
     truncated: bool,
+) -> ToolOutcome {
+    execute_truncated_with_lsp(call, workspace, config, truncated, None).await
+}
+
+pub async fn execute_truncated_with_lsp(
+    call: &ToolCall,
+    workspace: &Workspace,
+    config: &ToolsConfig,
+    truncated: bool,
+    lsp: Option<&LspConfig>,
 ) -> ToolOutcome {
     // Belt and braces. `app::advance_approvals` already refuses blocked calls
     // before they can be queued, so reaching this is a bug -- but the cost of
@@ -3806,6 +3889,24 @@ pub async fn execute_truncated(
         GLOB => run_blocking(call, workspace, execute_glob).await,
         GREP_SEARCH => run_blocking(call, workspace, execute_grep_search).await,
         REPO_MAP => run_blocking(call, workspace, execute_repo_map).await,
+        LSP => {
+            let call_id = call.id.clone();
+            let call = call.clone();
+            let workspace = workspace.clone();
+            let lsp = lsp.cloned();
+            match tokio::task::spawn_blocking(move || {
+                execute_lsp(&call, &workspace, lsp.as_ref())
+            })
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => outcome(
+                    &call_id,
+                    "diagnostics — task failed".to_string(),
+                    format!("Error: the language-server task failed: {error}"),
+                ),
+            }
+        }
         EDIT_FILE => {
             invalidate_repo_index(workspace.root());
             execute_edit_file(call, workspace, truncated)
@@ -5887,6 +5988,105 @@ fn repo_path_matches(relative: &str, subtree: Option<&str>) -> bool {
     }
 }
 
+/// `lsp` -- diagnostics for one file through the configured language server.
+fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) -> ToolOutcome {
+    let Ok(args) = serde_json::from_str::<LspArgs>(&call.function.arguments) else {
+        return outcome(
+            &call.id,
+            "diagnostics — unusable arguments".to_string(),
+            format!(
+                r#"Error: could not read the arguments. Expected {{"path": "src/main.rs"}}, got: {}"#,
+                clip(&call.function.arguments, 200)
+            ),
+        );
+    };
+    let requested = args.path.trim();
+    if requested.is_empty() {
+        return outcome(
+            &call.id,
+            "diagnostics — empty path".to_string(),
+            "Error: path must not be empty.".to_string(),
+        );
+    }
+    let Some(lsp) = lsp.filter(|lsp| lsp.enabled) else {
+        return outcome(
+            &call.id,
+            format!("diagnostics {requested} — not enabled"),
+            "Error: language servers are not enabled. Set `[lsp] enabled = true` and configure \
+             a server under `[lsp.servers]` in ~/.covexcode/config.toml."
+                .to_string(),
+        );
+    };
+    let path = match resolve_in_workspace(workspace, requested) {
+        Ok(path) => path,
+        Err(error) => {
+            return outcome(
+                &call.id,
+                format!("diagnostics {requested} — {error}"),
+                format!("Error: {error}"),
+            )
+        }
+    };
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    let Some((server_name, server)) = lsp.server_for(extension) else {
+        return outcome(
+            &call.id,
+            format!("diagnostics {requested} — no server"),
+            format!(
+                "Error: no language server is configured for '.{extension}' files. Add an \
+                 extension to one of the `[lsp.servers.*]` entries in ~/.covexcode/config.toml."
+            ),
+        );
+    };
+    match crate::lsp::diagnostics(server_name, server, workspace.root(), &path) {
+        Ok(report) if report.timed_out => outcome(
+            &call.id,
+            format!("diagnostics {requested} — timed out"),
+            format!(
+                "The language server did not publish diagnostics for '{requested}' within 2 \
+                 seconds. This does not mean the file is clean; try again once it has finished \
+                 indexing."
+            ),
+        ),
+        Ok(report) if report.diagnostics.is_empty() => outcome(
+            &call.id,
+            format!("diagnostics {requested} — clean"),
+            format!("No diagnostics reported for '{requested}'."),
+        ),
+        Ok(report) => {
+            let mut body = String::new();
+            for diagnostic in &report.diagnostics {
+                let source = diagnostic
+                    .source
+                    .as_deref()
+                    .map(|source| format!(" [{source}]"))
+                    .unwrap_or_default();
+                body.push_str(&format!(
+                    "{requested}:{}:{} {}: {}{source}\n",
+                    diagnostic.line, diagnostic.column, diagnostic.severity, diagnostic.message
+                ));
+            }
+            outcome(
+                &call.id,
+                format!(
+                    "diagnostics {requested} — {} issue{}",
+                    report.diagnostics.len(),
+                    if report.diagnostics.len() == 1 { "" } else { "s" }
+                ),
+                clip(&body, 12_000),
+            )
+        }
+        Err(error) => outcome(
+            &call.id,
+            format!("diagnostics {requested} — error"),
+            format!("Error: {error}"),
+        ),
+    }
+}
+
 /// Read-only ranked map: paths by relevance, plus top-level symbols for the
 /// source files. It never sends file bodies -- `read_file` does that.
 fn execute_repo_map(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
@@ -7374,6 +7574,42 @@ mod tests {
         assert!(second.content.contains("reparsed_target"), "{}", second.content);
         assert!(!second.content.contains("parse_config"), "{}", second.content);
         assert!(!second.content.contains("main.rs"), "{}", second.content);
+    }
+
+    /// The tool is only offered when LSP is enabled and has at least one
+    /// server; otherwise the model is never invited to call it.
+    #[test]
+    fn lsp_schema_is_gated_on_configuration() {
+        let names = |lsp: bool| {
+            schemas_for(
+                Mode::Normal,
+                false,
+                false,
+                false,
+                false,
+                SchemaDiet::full(),
+                lsp,
+            )
+            .iter()
+            .any(|schema| schema["function"]["name"] == LSP)
+        };
+        assert!(!names(false));
+        assert!(names(true));
+    }
+
+    #[tokio::test]
+    async fn lsp_tool_explains_missing_configuration() {
+        let (_dir, ws, cfg) = fixture();
+        let call = tool_call(LSP, json!({"path": "hello.txt"}));
+        let out = execute_with_lsp(&call, &ws, &cfg, None).await;
+        assert!(out.content.contains("not enabled"), "{}", out.content);
+
+        let lsp = LspConfig {
+            enabled: true,
+            servers: Default::default(),
+        };
+        let out = execute_with_lsp(&call, &ws, &cfg, Some(&lsp)).await;
+        assert!(out.content.contains("no language server is configured"), "{}", out.content);
     }
 
     /// In a git work tree the index comes from `git ls-files`: tracked and
@@ -9661,7 +9897,7 @@ mod tests {
         assert!(!names.iter().any(|n| n == INTERACT_IN_BROWSER), "{names:?}");
 
         let with_browser: Vec<String> =
-            schemas_for(Mode::Normal, false, true, true, true, SchemaDiet::full())
+            schemas_for(Mode::Normal, false, true, true, true, SchemaDiet::full(), false)
                 .iter()
                 .map(|s| {
                     s["function"]["name"]
@@ -9956,7 +10192,7 @@ mod tests {
     }
 
     fn schema_names(diet: SchemaDiet) -> Vec<String> {
-        schemas_for(Mode::Normal, false, true, true, false, diet)
+        schemas_for(Mode::Normal, false, true, true, false, diet, false)
             .iter()
             .map(|s| {
                 s["function"]["name"]
@@ -10068,7 +10304,7 @@ mod tests {
     /// the child's schema list simply does not contain anything else.
     #[test]
     fn subagent_schemas_offer_exactly_the_read_only_slice() {
-        let names: Vec<String> = subagent_schemas()
+        let names: Vec<String> = subagent_schemas(true)
             .iter()
             .map(|s| {
                 s["function"]["name"]

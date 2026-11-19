@@ -802,6 +802,8 @@ impl Router {
                             "tasks": true,
                             "mailbox": true,
                             "mergeAgent": true,
+                            "lsp": self.config.lsp.enabled
+                                && !self.config.lsp.servers.is_empty(),
                         },
                     }),
                     auth_methods: Vec::new(),

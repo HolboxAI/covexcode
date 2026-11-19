@@ -1040,6 +1040,7 @@ impl HeadlessSession {
                     false, // published-artifact detection not wired yet
                     true,  // check_in_browser -- the one action only an ACP client can fulfill
                     tools::SchemaDiet::for_workspace(self.workspace.root()),
+                    self.config.lsp.enabled && !self.config.lsp.servers.is_empty(),
                 )
             } else {
                 Vec::new()
@@ -1664,7 +1665,11 @@ impl HeadlessSession {
                     let call = call.clone();
                     let workspace = self.workspace.clone();
                     let tools_config = self.config.tools.clone();
-                    async move { tools::execute(&call, &workspace, &tools_config).await }
+                    let lsp_config = self.config.lsp.clone();
+                    async move {
+                        let lsp = lsp_config.enabled.then_some(&lsp_config);
+                        tools::execute_with_lsp(&call, &workspace, &tools_config, lsp).await
+                    }
                 });
                 let outcomes = futures::future::join_all(futures).await;
 
@@ -1731,7 +1736,11 @@ impl HeadlessSession {
                         let call = call.clone();
                         let workspace = self.workspace.clone();
                         let tools_config = self.config.tools.clone();
-                        async move { tools::execute(&call, &workspace, &tools_config).await }
+                        let lsp_config = self.config.lsp.clone();
+                        async move {
+                            let lsp = lsp_config.enabled.then_some(&lsp_config);
+                            tools::execute_with_lsp(&call, &workspace, &tools_config, lsp).await
+                        }
                     });
                     outcomes.extend(futures::future::join_all(futures).await);
                 }
@@ -1856,8 +1865,14 @@ impl HeadlessSession {
                                 status: ToolCallStatus::InProgress,
                             }))
                             .await;
-                        let mut outcome =
-                            tools::execute(call, &self.workspace, &self.config.tools).await;
+                        let lsp = self.config.lsp.enabled.then_some(&self.config.lsp);
+                        let mut outcome = tools::execute_with_lsp(
+                            call,
+                            &self.workspace,
+                            &self.config.tools,
+                            lsp,
+                        )
+                        .await;
                         // Same call, same place in the flow as
                         // `App::push_tool_outcome`'s own -- before the
                         // outcome is taken apart, since `.content` moves out
@@ -2358,7 +2373,9 @@ impl HeadlessSession {
                     .await;
                 return (result, Vec::new());
             }
-            let mut outcome = tools::execute(call, &self.workspace, &self.config.tools).await;
+            let lsp = self.config.lsp.enabled.then_some(&self.config.lsp);
+            let mut outcome =
+                tools::execute_with_lsp(call, &self.workspace, &self.config.tools, lsp).await;
             if let Some(record) = outcome.rollback.take() {
                 self.rollback.record_turn(record, self.turn);
             }

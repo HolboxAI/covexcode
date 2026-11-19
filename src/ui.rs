@@ -2073,6 +2073,15 @@ fn tool_approval_parts(
             )));
             (" Map this repository? ", "map", "skip")
         }
+        Action::Lsp { path } => {
+            lines.push(Line::from(Span::styled(
+                path.clone(),
+                Style::default()
+                    .fg(theme::p().text)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            (" Run language-server diagnostics? ", "check", "skip")
+        }
         // Not reachable today: a subagent is read-only by construction, so it
         // is auto-approved in both modes. Kept because the match is exhaustive
         // by intent rather than by a catch-all arm -- the same reasoning

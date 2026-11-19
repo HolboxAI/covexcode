@@ -1,6 +1,6 @@
 # LSP integration
 
-Status: proposed, not started  
+Status: phase 1 implemented (diagnostics); phases 2–4 proposed  
 Date: 2026-11-19  
 Scope: `HolboxAI/covexcode` runtime, inherited by the IDE through the bundled
 sidecar

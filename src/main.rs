@@ -26,6 +26,7 @@ mod history;
 mod llm;
 mod locked_store;
 mod login;
+mod lsp;
 mod mailbox;
 mod mcp;
 mod message;

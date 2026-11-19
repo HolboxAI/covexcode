@@ -916,7 +916,8 @@ fn tool_kind_for(action: &Action) -> ToolKind {
         | Action::List { .. }
         | Action::Glob { .. }
         | Action::Grep { .. }
-        | Action::RepoMap { .. } => ToolKind::Read,
+        | Action::RepoMap { .. }
+        | Action::Lsp { .. } => ToolKind::Read,
         Action::Write { .. } | Action::Edit { .. } => ToolKind::Edit,
         Action::Command { .. } => ToolKind::Execute,
         Action::Search { .. } | Action::DesignStarter | Action::CheckContrast { .. } => {
