@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -5760,10 +5761,56 @@ fn invalidate_repo_index(root: &Path) {
 /// The workspace file list with cached symbols. Unchanged files reuse the
 /// previous extraction; changed, new and deleted files fall out of the
 /// metadata comparison naturally.
+/// Files a git work tree actually owns: tracked plus untracked-but-not-ignored
+/// files, relative to `root` (which may be the repo root or a subdirectory --
+/// `git -C` scopes the listing to it). `None` when this is not a usable git
+/// work tree or git is unavailable, so the caller falls back to a filesystem
+/// walk.
+///
+/// This is the fast path for `repo_map` in real repositories: it respects
+/// `.gitignore` exactly, so ignored build output and local caches never enter
+/// the index, and it does not need to `read_dir` every directory.
+fn git_repo_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut files = Vec::new();
+    for raw in output.stdout.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let Ok(relative) = std::str::from_utf8(raw) else {
+            continue;
+        };
+        let path = root.join(relative);
+        // Deleted-but-still-indexed files and submodules are not readable
+        // files; symlinks are skipped for the same reason the walker skips
+        // them -- a link must not pull the index outside the workspace.
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => files.push(path),
+            _ => {}
+        }
+    }
+    Some(files)
+}
+
 fn repository_index(workspace: &Workspace) -> Arc<Vec<IndexedFile>> {
     let root = workspace.root();
-    let mut paths = Vec::new();
-    collect_grep_files(root, root, &mut paths);
+    let mut paths = match git_repo_files(root) {
+        Some(files) => files,
+        None => {
+            let mut files = Vec::new();
+            collect_grep_files(root, root, &mut files);
+            files
+        }
+    };
+    paths.truncate(4000);
 
     let previous = repo_indexes()
         .lock()
@@ -7327,6 +7374,45 @@ mod tests {
         assert!(second.content.contains("reparsed_target"), "{}", second.content);
         assert!(!second.content.contains("parse_config"), "{}", second.content);
         assert!(!second.content.contains("main.rs"), "{}", second.content);
+    }
+
+    /// In a git work tree the index comes from `git ls-files`: tracked and
+    /// untracked non-ignored files are included, ignored files are not.
+    #[tokio::test]
+    async fn repo_map_respects_gitignore_in_a_repository() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "bench@example.com"]);
+        git(&["config", "user.name", "cx-bench"]);
+        std::fs::write(root.join(".gitignore"), "src/ignored.rs\n").unwrap();
+        std::fs::write(root.join("src/tracked.rs"), "pub fn tracked_fn() {}\n").unwrap();
+        std::fs::write(root.join("src/untracked.rs"), "pub fn untracked_fn() {}\n").unwrap();
+        std::fs::write(root.join("src/ignored.rs"), "pub fn ignored_fn() {}\n").unwrap();
+        git(&["add", ".gitignore", "src/tracked.rs"]);
+        git(&["commit", "-qm", "base"]);
+
+        let ws = Workspace::new(root).expect("workspace");
+        let out = execute(
+            &tool_call(REPO_MAP, json!({"max_files": 20})),
+            &ws,
+            &ToolsConfig::default(),
+        )
+        .await;
+
+        assert!(out.content.contains("tracked_fn"), "{}", out.content);
+        assert!(out.content.contains("untracked_fn"), "{}", out.content);
+        assert!(!out.content.contains("ignored_fn"), "{}", out.content);
     }
 
     /// End to end, through the real tools: create a file, edit an existing one
