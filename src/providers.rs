@@ -47,6 +47,17 @@ pub fn find_provider(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.id == id)
 }
 
+/// The fast/cheap checkpoint for a registry provider, for `subagent_model =
+/// "fast"` routing. `None` for a custom endpoint: choosing a model there
+/// would be guessing at credentials the registry knows nothing about.
+pub fn fast_model(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "deepseek" => Some("deepseek-v4-flash"),
+        "openai" => Some("gpt-5.6-luna"),
+        _ => None,
+    }
+}
+
 /// Whether the configured model accepts image prompt blocks.
 ///
 /// Model ids that explicitly say `vision` win first. For DeepSeek the model

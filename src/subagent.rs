@@ -221,6 +221,20 @@ fn child_call_allowed(
     allowed
 }
 
+/// Resolve `[tools] subagent_model`. `"fast"` is explicit shorthand for the
+/// provider's cheap checkpoint; a custom endpoint has no registry entry, so it
+/// keeps the parent model rather than guessing at a model id. Every other
+/// value is used verbatim.
+fn subagent_model(config: &Config) -> &str {
+    match config.tools.subagent_model.as_deref() {
+        Some(configured) if configured.eq_ignore_ascii_case("fast") => {
+            crate::providers::fast_model(&config.llm.provider).unwrap_or(&config.llm.model)
+        }
+        Some(configured) => configured,
+        None => &config.llm.model,
+    }
+}
+
 /// Run one read-only subagent to completion and return its report as the
 /// tool outcome. Phase 4 of `upgrade-plan.md`: a subagent is an agent loop
 /// whose "user" is the parent model.
@@ -381,12 +395,7 @@ pub async fn run_subagent_with(
 
     let max_steps = config.tools.subagent_max_steps;
     let token_budget = config.tools.subagent_token_budget;
-    // The parent's model unless the user pointed research at a faster one.
-    let model = config
-        .tools
-        .subagent_model
-        .as_deref()
-        .unwrap_or(&config.llm.model);
+    let model = subagent_model(config);
     let mut history = vec![
         ChatMessage::text("system", String::new()), // rewritten every round
         ChatMessage::text("user", task.clone()),
@@ -1110,5 +1119,29 @@ mod tests {
             assert!(definitions[0].writes);
             assert_eq!(definitions[0].verify.as_deref(), Some("cargo check"));
         });
+    }
+
+    #[test]
+    fn fast_subagent_model_routes_to_the_provider_checkpoint() {
+        let mut config = Config::default();
+        config.llm.model = "deepseek-v4-pro".to_string();
+        config.llm.provider = "deepseek".to_string();
+        config.tools.subagent_model = Some("fast".to_string());
+        assert_eq!(subagent_model(&config), "deepseek-v4-flash");
+
+        config.llm.provider = "openai".to_string();
+        config.llm.model = "gpt-5.6-sol".to_string();
+        assert_eq!(subagent_model(&config), "gpt-5.6-luna");
+
+        // A custom endpoint has no registry checkpoint: keep the parent.
+        config.llm.provider = "custom".to_string();
+        config.llm.model = "my-model".to_string();
+        assert_eq!(subagent_model(&config), "my-model");
+
+        // Any other value is used verbatim; None means the parent.
+        config.tools.subagent_model = Some("my-fast-model".to_string());
+        assert_eq!(subagent_model(&config), "my-fast-model");
+        config.tools.subagent_model = None;
+        assert_eq!(subagent_model(&config), "my-model");
     }
 }
