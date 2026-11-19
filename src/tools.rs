@@ -11336,6 +11336,53 @@ mod tests {
         assert_eq!(out.content, "new content\n");
     }
 
+    /// Fault: a permission-denied write must come back as a tool error, not a
+    /// panic or a silent success.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_write_into_a_read_only_directory_reports_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, ws, cfg) = fixture();
+        let readonly = dir.path().join("readonly");
+        std::fs::create_dir(&readonly).unwrap();
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let out = execute(&write_call("readonly/x.txt", "content"), &ws, &cfg).await;
+
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(out.content.to_lowercase().contains("error"), "{}", out.content);
+        assert!(!readonly.join("x.txt").exists());
+    }
+
+    /// Fault: an edit to a read-only file leaves the original untouched and
+    /// reports why.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_edit_to_a_read_only_file_reports_an_error_and_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, ws, cfg) = fixture();
+        let file = dir.path().join("hello.txt");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let out = execute(
+            &tool_call(
+                EDIT_FILE,
+                json!({"path": "hello.txt", "old_string": "two", "new_string": "TWO"}),
+            ),
+            &ws,
+            &cfg,
+        )
+        .await;
+
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(out.content.to_lowercase().contains("error"), "{}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "one\ntwo\nthree\n",
+            "a refused edit must not change the file"
+        );
+    }
+
     // ---- write/edit completeness guardrail ---------------------------------
     //
     // The bug this section covers: a reasoning model (DeepSeek in particular)
