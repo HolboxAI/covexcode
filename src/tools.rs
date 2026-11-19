@@ -1076,17 +1076,31 @@ pub fn schemas_for(
             "type": "function",
             "function": {
                 "name": LSP,
-                "description": "Ask the configured language server for diagnostics on one \
-                                 file -- the compiler-grade errors and warnings that a grep cannot \
-                                 know. Use it after editing a file, before claiming success. \
-                                 Read-only. Requires an [lsp.servers.*] entry whose extensions \
-                                 include the file's extension.",
+                "description": "Ask the configured language server about one file: diagnostics \
+                                 (compiler-grade errors and warnings), go-to-definition, \
+                                 find-references, or hover type/signature. Use diagnostics after \
+                                 editing, and navigation instead of guessing which symbol a call \
+                                 resolves to. Read-only. Requires an [lsp.servers.*] entry whose \
+                                 extensions include the file's extension.",
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["diagnostics", "definition", "references", "hover"],
+                            "description": "What to ask for. Defaults to diagnostics."
+                        },
                         "path": {
                             "type": "string",
-                            "description": "File to check, relative to the project root."
+                            "description": "File to inspect, relative to the project root."
+                        },
+                        "line": {
+                            "type": "integer",
+                            "description": "1-based line for definition/references/hover."
+                        },
+                        "column": {
+                            "type": "integer",
+                            "description": "1-based character column for definition/references/hover."
                         }
                     },
                     "required": ["path"]
@@ -2366,7 +2380,13 @@ struct RepoMapArgs {
 
 #[derive(Deserialize)]
 struct LspArgs {
+    #[serde(default)]
+    action: Option<String>,
     path: String,
+    #[serde(default)]
+    line: Option<u64>,
+    #[serde(default)]
+    column: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -2676,6 +2696,54 @@ const MIN_SEARCH_RESULTS: u32 = 1;
 const MAX_SEARCH_RESULTS: u32 = 10;
 const DEFAULT_SEARCH_RESULTS: u32 = 5;
 
+/// What an `lsp` call asks the language server for. Parsed once here so the
+/// label, the approval popup and the executor all agree on the spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LspAction {
+    Diagnostics,
+    Definition,
+    References,
+    Hover,
+}
+
+impl LspAction {
+    fn parse(s: Option<&str>) -> Self {
+        match s.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("definition") | Some("go_to_definition") | Some("go-to-definition") => {
+                LspAction::Definition
+            }
+            Some("references") | Some("find_references") | Some("find-references") => {
+                LspAction::References
+            }
+            Some("hover") => LspAction::Hover,
+            _ => LspAction::Diagnostics,
+        }
+    }
+
+    /// Navigation actions point at a position; diagnostics needs only a file.
+    pub fn needs_position(self) -> bool {
+        !matches!(self, LspAction::Diagnostics)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            LspAction::Diagnostics => "diagnostics",
+            LspAction::Definition => "definition",
+            LspAction::References => "references",
+            LspAction::Hover => "hover",
+        }
+    }
+
+    fn query_kind(self) -> Option<crate::lsp::QueryKind> {
+        match self {
+            LspAction::Diagnostics => None,
+            LspAction::Definition => Some(crate::lsp::QueryKind::Definition),
+            LspAction::References => Some(crate::lsp::QueryKind::References),
+            LspAction::Hover => Some(crate::lsp::QueryKind::Hover),
+        }
+    }
+}
+
 /// What a call is asking to do, in a form the approval popup and the
 /// transcript can render without knowing which tool produced it.
 #[derive(Clone, Debug, PartialEq)]
@@ -2709,9 +2777,13 @@ pub enum Action {
     RepoMap {
         path: Option<String>,
     },
-    /// Read-only: language-server diagnostics for one file.
+    /// Read-only: language-server diagnostics, definition, references or
+    /// hover for one file. Navigation actions carry the 1-based position.
     Lsp {
         path: String,
+        action: LspAction,
+        line: Option<u64>,
+        column: Option<u64>,
     },
     /// Changes a file, so it is approved like `Write` -- but shows only the
     /// spans being replaced, which is the whole reason to prefer it. Always
@@ -2929,7 +3001,18 @@ impl Action {
                 Some(path) => format!("map {path}"),
                 None => "map repository".to_string(),
             },
-            Action::Lsp { path } => format!("diagnostics {path}"),
+            Action::Lsp {
+                path,
+                action,
+                line,
+                column,
+            } => match (action, line, column) {
+                (LspAction::Diagnostics, _, _) => format!("diagnostics {path}"),
+                (action, Some(line), Some(column)) => {
+                    format!("{} {path}:{line}:{column}", action.name())
+                }
+                (action, _, _) => format!("{} {path}", action.name()),
+            },
             Action::Search { query, .. } => format!("search \"{query}\""),
             Action::DesignStarter => "design starter".to_string(),
             Action::CheckContrast { pairs } => format!(
@@ -3350,7 +3433,15 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
         LSP => {
             let args: LspArgs = serde_json::from_str(&call.function.arguments).ok()?;
             let path = args.path.trim().to_string();
-            (!path.is_empty()).then_some(Action::Lsp { path })
+            if path.is_empty() {
+                return None;
+            }
+            Some(Action::Lsp {
+                path,
+                action: LspAction::parse(args.action.as_deref()),
+                line: args.line,
+                column: args.column,
+            })
         }
         EDIT_FILE => {
             let args: EditFileArgs = serde_json::from_str(&call.function.arguments).ok()?;
@@ -5988,14 +6079,16 @@ fn repo_path_matches(relative: &str, subtree: Option<&str>) -> bool {
     }
 }
 
-/// `lsp` -- diagnostics for one file through the configured language server.
+/// `lsp` -- diagnostics or navigation for one file through the configured
+/// language server. The server process is started on first use and reused for
+/// the life of the CLI.
 fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) -> ToolOutcome {
     let Ok(args) = serde_json::from_str::<LspArgs>(&call.function.arguments) else {
         return outcome(
             &call.id,
-            "diagnostics — unusable arguments".to_string(),
+            "lsp — unusable arguments".to_string(),
             format!(
-                r#"Error: could not read the arguments. Expected {{"path": "src/main.rs"}}, got: {}"#,
+                r#"Error: could not read the arguments. Expected {{"path": "src/main.rs"}} or {{"action": "definition", "path": "src/main.rs", "line": 10, "column": 5}}, got: {}"#,
                 clip(&call.function.arguments, 200)
             ),
         );
@@ -6004,14 +6097,29 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
     if requested.is_empty() {
         return outcome(
             &call.id,
-            "diagnostics — empty path".to_string(),
+            "lsp — empty path".to_string(),
             "Error: path must not be empty.".to_string(),
+        );
+    }
+    let lsp_action = LspAction::parse(args.action.as_deref());
+    let position = match (args.line, args.column) {
+        (Some(line), Some(column)) if line >= 1 && column >= 1 => Some((line, column)),
+        _ => None,
+    };
+    if lsp_action.needs_position() && position.is_none() {
+        return outcome(
+            &call.id,
+            format!("{} {requested} — missing position", lsp_action.name()),
+            format!(
+                "Error: the '{}' action needs a 1-based `line` and `column` (both at least 1).",
+                lsp_action.name()
+            ),
         );
     }
     let Some(lsp) = lsp.filter(|lsp| lsp.enabled) else {
         return outcome(
             &call.id,
-            format!("diagnostics {requested} — not enabled"),
+            format!("{} {requested} — not enabled", lsp_action.name()),
             "Error: language servers are not enabled. Set `[lsp] enabled = true` and configure \
              a server under `[lsp.servers]` in ~/.covexcode/config.toml."
                 .to_string(),
@@ -6022,7 +6130,7 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
         Err(error) => {
             return outcome(
                 &call.id,
-                format!("diagnostics {requested} — {error}"),
+                format!("{} {requested} — {error}", lsp_action.name()),
                 format!("Error: {error}"),
             )
         }
@@ -6034,13 +6142,28 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
     let Some((server_name, server)) = lsp.server_for(extension) else {
         return outcome(
             &call.id,
-            format!("diagnostics {requested} — no server"),
+            format!("{} {requested} — no server", lsp_action.name()),
             format!(
                 "Error: no language server is configured for '.{extension}' files. Add an \
                  extension to one of the `[lsp.servers.*]` entries in ~/.covexcode/config.toml."
             ),
         );
     };
+    if let Some(kind) = lsp_action.query_kind() {
+        let (line, column) = position.expect("navigation actions were checked for a position");
+        return execute_lsp_query(
+            call,
+            requested,
+            lsp_action,
+            kind,
+            server_name,
+            server,
+            workspace,
+            &path,
+            line,
+            column,
+        );
+    }
     match crate::lsp::diagnostics(server_name, server, workspace.root(), &path) {
         Ok(report) if report.timed_out => outcome(
             &call.id,
@@ -6082,6 +6205,78 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
         Err(error) => outcome(
             &call.id,
             format!("diagnostics {requested} — error"),
+            format!("Error: {error}"),
+        ),
+    }
+}
+
+/// One definition/references/hover round trip, formatted for the transcript.
+/// `Location`s are already workspace-relative when the server pointed inside
+/// the workspace -- [`crate::lsp::uri_to_path`] arranged that.
+#[allow(clippy::too_many_arguments)]
+fn execute_lsp_query(
+    call: &ToolCall,
+    requested: &str,
+    lsp_action: LspAction,
+    kind: crate::lsp::QueryKind,
+    server_name: &str,
+    server: &crate::config::LspServerConfig,
+    workspace: &Workspace,
+    path: &Path,
+    line: u64,
+    column: u64,
+) -> ToolOutcome {
+    match crate::lsp::query(
+        kind,
+        server_name,
+        server,
+        workspace.root(),
+        path,
+        line,
+        column,
+    ) {
+        Ok(crate::lsp::QueryReport::Locations(locations)) if locations.is_empty() => outcome(
+            &call.id,
+            format!("{} {requested}:{line}:{column} — none", lsp_action.name()),
+            format!(
+                "No {} found for '{requested}' at {line}:{column}.",
+                lsp_action.name()
+            ),
+        ),
+        Ok(crate::lsp::QueryReport::Locations(locations)) => {
+            let mut body = String::new();
+            for location in &locations {
+                body.push_str(&format!(
+                    "{}:{}:{}\n",
+                    location.path, location.line, location.column
+                ));
+            }
+            outcome(
+                &call.id,
+                format!(
+                    "{} {requested}:{line}:{column} — {} location{}",
+                    lsp_action.name(),
+                    locations.len(),
+                    if locations.len() == 1 { "" } else { "s" }
+                ),
+                clip(&body, 12_000),
+            )
+        }
+        Ok(crate::lsp::QueryReport::Hover(Some(text))) => outcome(
+            &call.id,
+            format!("hover {requested}:{line}:{column}"),
+            clip(&text, 12_000),
+        ),
+        Ok(crate::lsp::QueryReport::Hover(None)) => outcome(
+            &call.id,
+            format!("hover {requested}:{line}:{column} — none"),
+            format!(
+                "The language server has no hover information for '{requested}' at {line}:{column}."
+            ),
+        ),
+        Err(error) => outcome(
+            &call.id,
+            format!("{} {requested}:{line}:{column} — error", lsp_action.name()),
             format!("Error: {error}"),
         ),
     }
@@ -7610,6 +7805,35 @@ mod tests {
         };
         let out = execute_with_lsp(&call, &ws, &cfg, Some(&lsp)).await;
         assert!(out.content.contains("no language server is configured"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn lsp_navigation_requires_a_position() {
+        let (_dir, ws, cfg) = fixture();
+        let call = tool_call(LSP, json!({"action": "definition", "path": "hello.txt"}));
+        let out = execute_with_lsp(&call, &ws, &cfg, None).await;
+        assert!(out.content.contains("needs a 1-based"), "{}", out.content);
+
+        let call = tool_call(LSP, json!({"action": "hover", "path": "hello.txt", "line": 0, "column": 3}));
+        let out = execute_with_lsp(&call, &ws, &cfg, None).await;
+        assert!(out.content.contains("needs a 1-based"), "{}", out.content);
+    }
+
+    /// The transcript label carries the position, since that is what makes
+    /// two navigation calls on the same file distinguishable.
+    #[test]
+    fn lsp_navigation_label_carries_position() {
+        let call = tool_call(
+            LSP,
+            json!({"action": "references", "path": "src/lib.rs", "line": 12, "column": 7}),
+        );
+        let action = describe_action(&call).expect("known action");
+        assert_eq!(action.label(), "references src/lib.rs:12:7");
+        assert!(is_read_only_action(&action));
+
+        let call = tool_call(LSP, json!({"path": "src/lib.rs"}));
+        let action = describe_action(&call).expect("known action");
+        assert_eq!(action.label(), "diagnostics src/lib.rs");
     }
 
     /// In a git work tree the index comes from `git ls-files`: tracked and

@@ -1,6 +1,7 @@
 # LSP integration
 
-Status: phase 1 implemented (diagnostics); phases 2–4 proposed  
+Status: phases 1–2 implemented (diagnostics, definition, references, hover);
+phases 3–4 proposed  
 Date: 2026-11-19  
 Scope: `HolboxAI/covexcode` runtime, inherited by the IDE through the bundled
 sidecar
@@ -104,10 +105,11 @@ extensions = ["ts", "tsx", "js", "jsx"]
 
 ## Phases
 
-1. **Config + manager + `lsp_diagnostics`** — handshake, didOpen, timeout,
-   crash handling, fake-server tests. No position conversion yet.
-2. **`definition` + `references` + `hover`** — UTF-16 conversion, query
-   timeouts, bounded rendering.
+1. **Config + manager + `lsp_diagnostics`** — implemented: handshake, didOpen,
+   timeout, crash handling, fake-server tests.
+2. **`definition` + `references` + `hover`** — implemented: UTF-16 conversion
+   at the boundary, 5-second query timeouts, bounded rendering, notifications
+   interleaved with replies handled without spinning.
 3. **Repo-map symbol source** — document symbols when configured; regex
    fallback unchanged.
 4. **IDE surface** — a diagnostics count/list in the chat tool card or a
@@ -116,9 +118,10 @@ extensions = ["ts", "tsx", "js", "jsx"]
 
 ## Testing
 
-- A fake LSP server in `tests/` (a small Node or Rust stdio program) that
-  answers `initialize`, `didOpen`, `definition`, `references`, `hover`, and
-  emits diagnostics; tests spawn it via config.
+- A fake LSP server embedded in `src/lsp.rs` tests (a small Python stdio
+  program) answers `initialize`, `didOpen`, `definition`, `references`,
+  `hover`, and emits diagnostics; tests spawn it through a real
+  `LspServerConfig`. They skip when no Python interpreter is available.
 - Timeout and crash tests: server that accepts but never answers; server that
   exits mid-request.
 - UTF-16 position tests with emoji and combining characters.
