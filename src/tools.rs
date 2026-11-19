@@ -45,9 +45,11 @@ use crate::llm::ToolCall;
 use crate::workspace::Workspace;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 pub const RUN_COMMAND: &str = "run_command";
 pub const READ_FILE: &str = "read_file";
@@ -3775,12 +3777,18 @@ pub async fn execute_truncated(
     match call.function.name.as_str() {
         RUN_COMMAND => execute_run_command(call, workspace, config).await,
         READ_FILE => execute_read_file(call, workspace, config).await,
-        WRITE_FILE => execute_write_file(call, workspace, truncated).await,
+        WRITE_FILE => {
+            invalidate_repo_index(workspace.root());
+            execute_write_file(call, workspace, truncated).await
+        }
         LIST_DIR => run_blocking(call, workspace, execute_list_dir).await,
         GLOB => run_blocking(call, workspace, execute_glob).await,
         GREP_SEARCH => run_blocking(call, workspace, execute_grep_search).await,
         REPO_MAP => run_blocking(call, workspace, execute_repo_map).await,
-        EDIT_FILE => execute_edit_file(call, workspace, truncated),
+        EDIT_FILE => {
+            invalidate_repo_index(workspace.root());
+            execute_edit_file(call, workspace, truncated)
+        }
         GET_DESIGN_STARTER => execute_get_design_starter(call),
         CHECK_CONTRAST => execute_check_contrast(call),
         WEB_SEARCH => execute_web_search(call, config).await,
@@ -5700,6 +5708,118 @@ fn map_symbols(path: &Path) -> Vec<String> {
     symbols
 }
 
+/// One file in the cached workspace index. `modified` and `len` are the
+/// fingerprint: a file whose metadata is unchanged is not read again just to
+/// re-extract the same symbols.
+struct IndexedFile {
+    relative: String,
+    depth: usize,
+    symbols: Vec<String>,
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+/// Process-wide, bounded (eight workspaces). The tool runs on the blocking
+/// pool, so a plain mutex is enough; the lock is never held while walking or
+/// reading files.
+fn repo_indexes() -> &'static Mutex<HashMap<PathBuf, Arc<Vec<IndexedFile>>>> {
+    static INDEXES: OnceLock<Mutex<HashMap<PathBuf, Arc<Vec<IndexedFile>>>>> = OnceLock::new();
+    INDEXES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A write or edit just changed this workspace: the next map must not reuse
+/// symbols extracted from the old contents. Metadata alone is not enough on
+/// filesystems with coarse timestamps and same-size edits.
+fn invalidate_repo_index(root: &Path) {
+    repo_indexes()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(root);
+}
+
+/// The workspace file list with cached symbols. Unchanged files reuse the
+/// previous extraction; changed, new and deleted files fall out of the
+/// metadata comparison naturally.
+fn repository_index(workspace: &Workspace) -> Arc<Vec<IndexedFile>> {
+    let root = workspace.root();
+    let mut paths = Vec::new();
+    collect_grep_files(root, root, &mut paths);
+
+    let previous = repo_indexes()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(root);
+    let previous_by_name: HashMap<&str, &IndexedFile> = previous
+        .as_ref()
+        .map(|files| {
+            files
+                .iter()
+                .map(|file| (file.relative.as_str(), file))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut files = Vec::new();
+    for path in paths.into_iter().take(4000) {
+        let Ok(relative_path) = path.strip_prefix(root) else {
+            continue;
+        };
+        let relative = relative_path
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let Some(name) = relative.rsplit('/').next() else {
+            continue;
+        };
+        if name == "Cargo.lock"
+            || name == "package-lock.json"
+            || name == "yarn.lock"
+            || name == "pnpm-lock.yaml"
+            || name.ends_with(".min.js")
+            || name.ends_with(".min.css")
+        {
+            continue;
+        }
+        let metadata = std::fs::metadata(&path).ok();
+        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
+        let len = metadata.map(|meta| meta.len()).unwrap_or(0);
+        let symbols = match previous_by_name.get(relative.as_str()) {
+            Some(previous) if previous.modified == modified && previous.len == len => {
+                previous.symbols.clone()
+            }
+            _ => map_symbols(&path),
+        };
+        files.push(IndexedFile {
+            depth: relative.matches('/').count(),
+            relative,
+            symbols,
+            modified,
+            len,
+        });
+    }
+
+    let files = Arc::new(files);
+    let mut cache = repo_indexes()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if cache.len() >= 8 {
+        cache.clear();
+    }
+    cache.insert(root.to_path_buf(), files.clone());
+    files
+}
+
+fn repo_path_matches(relative: &str, subtree: Option<&str>) -> bool {
+    match subtree {
+        None => true,
+        Some(subtree) => {
+            relative == subtree
+                || relative
+                    .strip_prefix(subtree)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }
+    }
+}
+
 /// Read-only ranked map: paths by relevance, plus top-level symbols for the
 /// source files. It never sends file bodies -- `read_file` does that.
 fn execute_repo_map(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
@@ -5738,33 +5858,28 @@ fn execute_repo_map(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
         .map(str::to_string)
         .collect();
 
-    let mut files = Vec::new();
-    collect_grep_files(&root, workspace.root(), &mut files);
-    let scanned = files.len();
+    let subtree = root
+        .strip_prefix(workspace.root())
+        .ok()
+        .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+        .filter(|path| !path.is_empty());
+    let index = repository_index(workspace);
+    let scanned = index
+        .iter()
+        .filter(|file| repo_path_matches(&file.relative, subtree.as_deref()))
+        .count();
     let mut entries: Vec<MapEntry> = Vec::new();
-    for path in files.into_iter().take(4000) {
-        let Ok(relative_path) = path.strip_prefix(workspace.root()) else {
-            continue;
-        };
-        let relative = relative_path
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/");
+    for file in index
+        .iter()
+        .filter(|file| repo_path_matches(&file.relative, subtree.as_deref()))
+    {
+        let relative = &file.relative;
         let Some(name) = relative.rsplit('/').next() else {
             continue;
         };
-        if name == "Cargo.lock"
-            || name == "package-lock.json"
-            || name == "yarn.lock"
-            || name == "pnpm-lock.yaml"
-            || name.ends_with(".min.js")
-            || name.ends_with(".min.css")
-        {
-            continue;
-        }
-        let depth = relative.matches('/').count();
         let lower = relative.to_lowercase();
-        let symbols = map_symbols(&path);
-        let mut score = 20usize.saturating_sub(depth);
+        let symbols = &file.symbols;
+        let mut score = 20usize.saturating_sub(file.depth);
         if is_important_map_name(name) {
             score += 8;
         }
@@ -5786,10 +5901,10 @@ fn execute_repo_map(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
             }
         }
         entries.push(MapEntry {
-            relative,
-            depth,
+            relative: relative.clone(),
+            depth: file.depth,
             score,
-            symbols,
+            symbols: symbols.clone(),
         });
     }
     entries.sort_by(|a, b| {
@@ -7175,6 +7290,23 @@ mod tests {
         assert!(parser_at < main_at, "the query match ranks first:\n{}", out.content);
         assert!(!out.content.contains("hidden.rs"), "build output is skipped");
         assert!(!out.content.contains("package-lock"), "lockfiles are skipped");
+
+        // Incremental: an edited file is re-read, a deleted file disappears.
+        std::fs::write(
+            root.join("src/parser.rs"),
+            "pub fn reparsed_target() {}\n// longer than before\n",
+        )
+        .unwrap();
+        std::fs::remove_file(root.join("src/main.rs")).unwrap();
+        let second = execute(
+            &tool_call(REPO_MAP, json!({"query": "reparsed", "max_files": 20})),
+            &ws,
+            &ToolsConfig::default(),
+        )
+        .await;
+        assert!(second.content.contains("reparsed_target"), "{}", second.content);
+        assert!(!second.content.contains("parse_config"), "{}", second.content);
+        assert!(!second.content.contains("main.rs"), "{}", second.content);
     }
 
     /// End to end, through the real tools: create a file, edit an existing one
