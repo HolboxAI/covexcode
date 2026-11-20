@@ -150,7 +150,8 @@ Landed on `main`:
   answers definition, references and hover at a 1-based position (converted to
   UTF-16 at the boundary); `repo_map` asks an already-warm server for document
   symbols on its top files and keeps its regex symbols otherwise; the IDE
-  renders diagnostics as clickable `path:line:column` rows on the tool call.
+  renders diagnostics, definitions and references as clickable
+  `path:line:column` rows on the tool call.
   The client is lazy, bounded by timeouts, and restarts a crashed server on
   the next call.
 
