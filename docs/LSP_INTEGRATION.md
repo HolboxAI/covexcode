@@ -106,8 +106,8 @@ extensions = ["ts", "tsx", "js", "jsx"]
   fails closed when it is absent, so older bundled agents never show a broken
   card.
 - `covexcode-ide`: `acpClient.ts` carries the `lsp` flag, `lspDiagnostics.ts`
-  parses the tool's plain-text rows, and `extension.ts` renders the card and
-  registers `covexcode.openDiagnostic`.
+  parses the tool's plain-text diagnostics and location rows, and
+  `extension.ts` renders the cards and registers `covexcode.openDiagnostic`.
 - `repo_map`: the top three files ask an **already-running** server for
   `textDocument/documentSymbol`; the regex index still ranks the files and is
   the fallback everywhere else. A cold or busy server is skipped rather than
@@ -126,10 +126,13 @@ extensions = ["ts", "tsx", "js", "jsx"]
    on by the map.
 4. **IDE surface** — implemented in `covexcode-ide`: a completed `lsp`
    diagnostics tool call renders a severity summary and up to ten
-   `path:line:column` links; each link opens the file at the position via
-   `covexcode.openDiagnostic`. Gated on `agentCapabilities.covexcode.lsp`,
-   deduped per turn, and the server-provided message is appended as text
-   rather than parsed as Markdown.
+   `path:line:column` links; definition and references results render their
+   rows the same way (`Definition`, `N references`). Each link opens the file
+   at the position via `covexcode.openDiagnostic`. Gated on
+   `agentCapabilities.covexcode.lsp`, deduped per turn, and the
+   server-provided message is appended as text rather than parsed as
+   Markdown. Hover is left in the tool row: arbitrary server markup has no
+   safe compact rendering.
 
 ## Testing
 
