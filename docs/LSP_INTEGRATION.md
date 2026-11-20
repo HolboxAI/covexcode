@@ -1,7 +1,7 @@
 # LSP integration
 
-Status: phases 1–3 implemented (diagnostics, definition, references, hover,
-and warm document symbols in `repo_map`); phase 4 proposed  
+Status: phases 1–4 implemented: diagnostics, definition, references, hover,
+warm document symbols in `repo_map`, and the IDE diagnostics card  
 Date: 2026-11-19  
 Scope: `HolboxAI/covexcode` runtime, inherited by the IDE through the bundled
 sidecar
@@ -97,8 +97,12 @@ extensions = ["ts", "tsx", "js", "jsx"]
 - `config.rs`: `LspConfig` + `LspServerConfig` with defaults; config tests.
 - `headless.rs`: nothing special — the tool runs through the normal executor,
   so ACP/IDE gets it automatically.
-- `transport.rs`: advertise `agentCapabilities.covexcode.lsp = true`; the IDE
-  can gate a future diagnostics view on it.
+- `transport.rs`: advertises `agentCapabilities.covexcode.lsp = true`. The IDE
+  fails closed when it is absent, so older bundled agents never show a broken
+  card.
+- `covexcode-ide`: `acpClient.ts` carries the `lsp` flag, `lspDiagnostics.ts`
+  parses the tool's plain-text rows, and `extension.ts` renders the card and
+  registers `covexcode.openDiagnostic`.
 - `repo_map`: the top three files ask an **already-running** server for
   `textDocument/documentSymbol`; the regex index still ranks the files and is
   the fallback everywhere else. A cold or busy server is skipped rather than
@@ -115,9 +119,12 @@ extensions = ["ts", "tsx", "js", "jsx"]
    `documentSymbol` for the top-ranked files; the regex index remains the
    ranking source and fallback, and a cold server is never spawned or waited
    on by the map.
-4. **IDE surface** — a diagnostics count/list in the chat tool card or a
-   dedicated view, gated on the capability flag. The IDE needs no new ACP
-   transport work: the tool result already streams as a normal tool call.
+4. **IDE surface** — implemented in `covexcode-ide`: a completed `lsp`
+   diagnostics tool call renders a severity summary and up to ten
+   `path:line:column` links; each link opens the file at the position via
+   `covexcode.openDiagnostic`. Gated on `agentCapabilities.covexcode.lsp`,
+   deduped per turn, and the server-provided message is appended as text
+   rather than parsed as Markdown.
 
 ## Testing
 
