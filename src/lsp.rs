@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(2);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DIAGNOSTICS: usize = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +42,29 @@ pub struct DiagnosticsReport {
     pub timed_out: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryKind {
+    Definition,
+    References,
+    Hover,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Location {
+    /// Workspace-relative when the server points inside the workspace,
+    /// otherwise the absolute path the server returned.
+    pub path: String,
+    /// 1-based, converted from the server's zero-based UTF-16 position.
+    pub line: u64,
+    pub column: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueryReport {
+    Locations(Vec<Location>),
+    Hover(Option<String>),
+}
+
 type Key = (PathBuf, String);
 
 /// Process-wide manager shared by tool calls. Bounded to eight workspaces so
@@ -56,6 +80,41 @@ impl LspManager {
         }
     }
 
+    fn client_for(
+        &self,
+        server_name: &str,
+        server: &LspServerConfig,
+        workspace_root: &Path,
+    ) -> Result<(Key, Arc<Mutex<Client>>), String> {
+        let key = (workspace_root.to_path_buf(), server_name.to_string());
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(client) = clients.get(&key) {
+            return Ok((key, client.clone()));
+        }
+        if clients.len() >= 8 {
+            clients.clear();
+        }
+        let client = Arc::new(Mutex::new(Client::spawn(server, workspace_root)?));
+        clients.insert(key.clone(), client.clone());
+        Ok((key, client))
+    }
+
+    fn forget(&self, key: &Key, client: &Arc<Mutex<Client>>) {
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if clients
+            .get(key)
+            .is_some_and(|existing| Arc::ptr_eq(existing, client))
+        {
+            clients.remove(key);
+        }
+    }
+
     fn diagnostics(
         &self,
         server_name: &str,
@@ -63,23 +122,7 @@ impl LspManager {
         workspace_root: &Path,
         path: &Path,
     ) -> Result<DiagnosticsReport, String> {
-        let key = (workspace_root.to_path_buf(), server_name.to_string());
-        let client = {
-            let mut clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if let Some(client) = clients.get(&key) {
-                client.clone()
-            } else {
-                if clients.len() >= 8 {
-                    clients.clear();
-                }
-                let client = Arc::new(Mutex::new(Client::spawn(server, workspace_root)?));
-                clients.insert(key.clone(), client.clone());
-                client
-            }
-        };
+        let (key, client) = self.client_for(server_name, server, workspace_root)?;
         let result = {
             let mut client = client
                 .lock()
@@ -87,18 +130,30 @@ impl LspManager {
             client.diagnostics(path)
         };
         if result.is_err() {
-            // A dead or broken server must not poison the key forever. The
-            // next call retries with a fresh process.
-            let mut clients = self
-                .clients
+            self.forget(&key, &client);
+        }
+        result
+    }
+
+    fn query(
+        &self,
+        kind: QueryKind,
+        server_name: &str,
+        server: &LspServerConfig,
+        workspace_root: &Path,
+        path: &Path,
+        line: u64,
+        column: u64,
+    ) -> Result<QueryReport, String> {
+        let (key, client) = self.client_for(server_name, server, workspace_root)?;
+        let result = {
+            let mut client = client
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if clients
-                .get(&key)
-                .is_some_and(|existing| Arc::ptr_eq(existing, &client))
-            {
-                clients.remove(&key);
-            }
+            client.query(kind, path, line, column, workspace_root)
+        };
+        if result.is_err() {
+            self.forget(&key, &client);
         }
         result
     }
@@ -126,6 +181,19 @@ pub fn diagnostics(
     path: &Path,
 ) -> Result<DiagnosticsReport, String> {
     manager().diagnostics(server_name, server, workspace_root, path)
+}
+
+/// Definition, references or hover at a 1-based line/column.
+pub fn query(
+    kind: QueryKind,
+    server_name: &str,
+    server: &LspServerConfig,
+    workspace_root: &Path,
+    path: &Path,
+    line: u64,
+    column: u64,
+) -> Result<QueryReport, String> {
+    manager().query(kind, server_name, server, workspace_root, path, line, column)
 }
 
 struct Client {
@@ -200,10 +268,50 @@ impl Client {
     }
 
     fn diagnostics(&mut self, path: &Path) -> Result<DiagnosticsReport, String> {
+        let (uri, _text) = self.ensure_open(path)?;
+        let deadline = Instant::now() + DIAGNOSTICS_TIMEOUT;
+        // Anything that is not this file's diagnostics is set aside for the
+        // next caller. It must not go straight back into `stash`: this loop
+        // would pick it up again and spin instead of waiting for the server.
+        let mut deferred = Vec::new();
+        let report = loop {
+            let message = match self.next_message(deadline) {
+                Ok(Some(message)) => message,
+                Ok(None) | Err(RecvTimeoutError::Timeout) => {
+                    break Ok(DiagnosticsReport {
+                        diagnostics: Vec::new(),
+                        timed_out: true,
+                    })
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    break Err("language server exited".to_string())
+                }
+            };
+            if message.get("method").and_then(Value::as_str)
+                == Some("textDocument/publishDiagnostics")
+            {
+                let params = message.get("params").cloned().unwrap_or(Value::Null);
+                if params.get("uri").and_then(Value::as_str) == Some(uri.as_str()) {
+                    break Ok(DiagnosticsReport {
+                        diagnostics: parse_diagnostics(&params),
+                        timed_out: false,
+                    });
+                }
+            }
+            deferred.push(message);
+        };
+        // Restore arrival order; `next_message` reads the queue front first.
+        for message in deferred.into_iter().rev() {
+            self.stash.push_front(message);
+        }
+        report
+    }
+
+    fn ensure_open(&mut self, path: &Path) -> Result<(String, String), String> {
         let text = std::fs::read_to_string(path)
             .map_err(|error| format!("could not read '{}': {error}", path.display()))?;
         let uri = file_uri(path);
-        let version = match self.opened.get_mut(path) {
+        match self.opened.get_mut(path) {
             Some(version) => {
                 *version += 1;
                 let version = *version;
@@ -214,7 +322,6 @@ impl Client {
                         "contentChanges": [{ "text": text }],
                     }),
                 )?;
-                version
             }
             None => {
                 self.opened.insert(path.to_path_buf(), 1);
@@ -229,36 +336,46 @@ impl Client {
                         }
                     }),
                 )?;
-                1
             }
+        }
+        Ok((uri, text))
+    }
+
+    fn query(
+        &mut self,
+        kind: QueryKind,
+        path: &Path,
+        line: u64,
+        column: u64,
+        workspace_root: &Path,
+    ) -> Result<QueryReport, String> {
+        let (uri, text) = self.ensure_open(path)?;
+        let (line, character) = position(&text, line, column)?;
+        let position = json!({ "line": line, "character": character });
+        let (method, params) = match kind {
+            QueryKind::Definition => (
+                "textDocument/definition",
+                json!({ "textDocument": { "uri": uri }, "position": position }),
+            ),
+            QueryKind::References => (
+                "textDocument/references",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": position,
+                    "context": { "includeDeclaration": true },
+                }),
+            ),
+            QueryKind::Hover => (
+                "textDocument/hover",
+                json!({ "textDocument": { "uri": uri }, "position": position }),
+            ),
         };
-        let _ = version;
-        let deadline = Instant::now() + DIAGNOSTICS_TIMEOUT;
-        loop {
-            let message = match self.next_message(deadline) {
-                Ok(Some(message)) => message,
-                Ok(None) | Err(RecvTimeoutError::Timeout) => {
-                    return Ok(DiagnosticsReport {
-                        diagnostics: Vec::new(),
-                        timed_out: true,
-                    })
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err("language server exited".to_string())
-                }
-            };
-            if message.get("method").and_then(Value::as_str)
-                == Some("textDocument/publishDiagnostics")
-            {
-                let params = message.get("params").cloned().unwrap_or(Value::Null);
-                if params.get("uri").and_then(Value::as_str) == Some(uri.as_str()) {
-                    return Ok(DiagnosticsReport {
-                        diagnostics: parse_diagnostics(&params),
-                        timed_out: false,
-                    });
-                }
+        let result = self.request(method, params, QUERY_TIMEOUT)?;
+        match kind {
+            QueryKind::Definition | QueryKind::References => {
+                Ok(QueryReport::Locations(parse_locations(&result, workspace_root)))
             }
-            self.stash.push_back(message);
+            QueryKind::Hover => Ok(QueryReport::Hover(parse_hover(&result))),
         }
     }
 
@@ -272,24 +389,31 @@ impl Client {
         self.next_id += 1;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
         let deadline = Instant::now() + timeout;
-        loop {
+        // See `diagnostics`: messages that are not our reply are deferred until
+        // this request finishes rather than re-queued in front of ourselves.
+        let mut deferred = Vec::new();
+        let outcome = loop {
             let message = match self.next_message(deadline) {
                 Ok(Some(message)) => message,
                 Ok(None) | Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!("language server timed out on {method}"))
+                    break Err(format!("language server timed out on {method}"))
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err("language server exited".to_string())
+                    break Err("language server exited".to_string())
                 }
             };
             if message.get("id").and_then(Value::as_u64) == Some(id) {
                 if let Some(error) = message.get("error") {
-                    return Err(format!("language server {method} error: {error}"));
+                    break Err(format!("language server {method} error: {error}"));
                 }
-                return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+                break Ok(message.get("result").cloned().unwrap_or(Value::Null));
             }
-            self.stash.push_back(message);
+            deferred.push(message);
+        };
+        for message in deferred.into_iter().rev() {
+            self.stash.push_front(message);
         }
+        outcome
     }
 
     fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
@@ -358,6 +482,113 @@ fn read_header(reader: &mut BufReader<ChildStdout>) -> Option<usize> {
             length = value.trim().parse().ok();
         }
     }
+}
+
+/// Convert a 1-based character position into LSP's zero-based line and
+/// UTF-16 code-unit column. `char` counts are what a human and the tool schema
+/// use; the server counts UTF-16 units, which differ for emoji and some
+/// combining marks.
+fn position(text: &str, line: u64, column: u64) -> Result<(u64, u64), String> {
+    if line == 0 || column == 0 {
+        return Err("line and column are 1-based and must be at least 1".to_string());
+    }
+    let line_text = text
+        .lines()
+        .nth((line - 1) as usize)
+        .ok_or_else(|| format!("line {line} is outside the file"))?;
+    let offset = (column - 1) as usize;
+    let prefix: String = line_text.chars().take(offset).collect();
+    if prefix.chars().count() < offset {
+        return Err(format!("column {column} is outside line {line}"));
+    }
+    Ok(((line - 1), prefix.encode_utf16().count() as u64))
+}
+
+fn parse_locations(value: &Value, workspace_root: &Path) -> Vec<Location> {
+    let items: Vec<&Value> = match value {
+        Value::Array(items) => items.iter().collect(),
+        Value::Object(_) => vec![value],
+        _ => Vec::new(),
+    };
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let uri = item
+                .get("uri")
+                .or_else(|| item.get("targetUri"))
+                .and_then(Value::as_str)?;
+            let range = item
+                .get("range")
+                .or_else(|| item.get("targetSelectionRange"))
+                .or_else(|| item.get("targetRange"))?;
+            let start = range.get("start")?;
+            let line = start.get("line").and_then(Value::as_u64)? + 1;
+            let column = start.get("character").and_then(Value::as_u64)? + 1;
+            Some(Location {
+                path: uri_to_path(uri, workspace_root),
+                line,
+                column,
+            })
+        })
+        .take(50)
+        .collect()
+}
+
+fn parse_hover(value: &Value) -> Option<String> {
+    let contents = value.get("contents")?;
+    let text = match contents {
+        Value::String(text) => text.clone(),
+        Value::Object(object) => object.get("value").and_then(Value::as_str)?.to_string(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(text) => Some(text.clone()),
+                Value::Object(object) => object
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn uri_to_path(uri: &str, workspace_root: &Path) -> String {
+    let Some(rest) = uri.strip_prefix("file://") else {
+        return uri.to_string();
+    };
+    let decoded = percent_decode(rest);
+    // A `file:///C:/...` URI carries a leading slash the Windows path lacks.
+    #[cfg(windows)]
+    let decoded = decoded.trim_start_matches('/').to_string();
+    let path = PathBuf::from(decoded);
+    match path.strip_prefix(workspace_root) {
+        Ok(relative) => relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/"),
+        Err(_) => path.to_string_lossy().into_owned(),
+    }
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(&input[index + 1..index + 3], 16) {
+                out.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn parse_diagnostics(params: &Value) -> Vec<Diagnostic> {
@@ -505,6 +736,26 @@ while True:
                 "source": "fake-lsp"
             }]
         }})
+    elif method == "textDocument/definition":
+        # A notification before the reply: the client must set it aside rather
+        # than re-queue it ahead of the answer and spin.
+        send({"jsonrpc": "2.0", "method": "window/logMessage", "params": {
+            "type": 3, "message": "resolving definition"
+        }})
+        send({"jsonrpc": "2.0", "id": message["id"], "result": [{
+            "uri": message["params"]["textDocument"]["uri"],
+            "range": {"start": {"line": 4, "character": 1}, "end": {"line": 4, "character": 5}}
+        }]})
+    elif method == "textDocument/references":
+        uri = message["params"]["textDocument"]["uri"]
+        send({"jsonrpc": "2.0", "id": message["id"], "result": [
+            {"uri": uri, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}},
+            {"uri": uri, "range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 5}}}
+        ]})
+    elif method == "textDocument/hover":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {
+            "contents": {"kind": "markdown", "value": "```rust\\nfn target()\\n```"}
+        }})
 "#,
         )
         .unwrap();
@@ -540,6 +791,65 @@ while True:
         assert_eq!(diagnostic.message, "fake error");
         assert_eq!(diagnostic.source.as_deref(), Some("fake-lsp"));
         manager.clear();
+    }
+
+    #[test]
+    fn navigation_queries_return_relative_locations_and_hover() {
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = fake_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "fn main() {\n    target();\n}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let manager = LspManager::new();
+
+        let definition = manager
+            .query(QueryKind::Definition, "fake", &server, root, &file, 2, 5)
+            .expect("definition");
+        assert_eq!(
+            definition,
+            QueryReport::Locations(vec![Location {
+                path: "hello.rs".to_string(),
+                line: 5,
+                column: 2,
+            }])
+        );
+
+        let references = manager
+            .query(QueryKind::References, "fake", &server, root, &file, 2, 5)
+            .expect("references");
+        let QueryReport::Locations(references) = references else {
+            panic!("expected locations");
+        };
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].line, 1);
+        assert_eq!(references[1].line, 3);
+
+        let hover = manager
+            .query(QueryKind::Hover, "fake", &server, root, &file, 2, 5)
+            .expect("hover");
+        let QueryReport::Hover(Some(hover)) = hover else {
+            panic!("expected hover text");
+        };
+        assert!(hover.contains("fn target()"), "{hover}");
+        manager.clear();
+    }
+
+    #[test]
+    fn positions_are_converted_to_utf16_at_the_boundary() {
+        // 'a' is 1 UTF-16 unit, the emoji is 2; column 3 means "after both".
+        assert_eq!(position("a😀b\n", 1, 3).unwrap(), (0, 3));
+        assert_eq!(position("plain\nsecond\n", 2, 1).unwrap(), (1, 0));
+        assert!(position("only one line", 2, 1).is_err());
+        assert!(position("abc", 1, 5).is_err());
+        assert!(position("abc", 0, 1).is_err());
     }
 
     #[test]

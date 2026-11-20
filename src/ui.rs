@@ -4,7 +4,7 @@ use crate::deploy::{DeploySession, DeployStatus, Menu, Stage, StepState};
 use crate::diff::{Change, FileDiff};
 use crate::providers;
 use crate::theme;
-use crate::tools::Action;
+use crate::tools::{Action, LspAction};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -2073,14 +2073,28 @@ fn tool_approval_parts(
             )));
             (" Map this repository? ", "map", "skip")
         }
-        Action::Lsp { path } => {
+        Action::Lsp {
+            path,
+            action,
+            line,
+            column,
+        } => {
+            let position = match (line, column) {
+                (Some(line), Some(column)) => format!(":{line}:{column}"),
+                _ => String::new(),
+            };
             lines.push(Line::from(Span::styled(
-                path.clone(),
+                format!("{path}{position}"),
                 Style::default()
                     .fg(theme::p().text)
                     .add_modifier(Modifier::BOLD),
             )));
-            (" Run language-server diagnostics? ", "check", "skip")
+            match action {
+                LspAction::Diagnostics => (" Run language-server diagnostics? ", "check", "skip"),
+                LspAction::Definition => (" Jump to definition? ", "go", "skip"),
+                LspAction::References => (" Find references? ", "find", "skip"),
+                LspAction::Hover => (" Show hover information? ", "hover", "skip"),
+            }
         }
         // Not reachable today: a subagent is read-only by construction, so it
         // is auto-approved in both modes. Kept because the match is exhaustive
