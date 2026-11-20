@@ -858,6 +858,44 @@ while True:
         path
     }
 
+    /// A server that completes the handshake and then stays silent: the shape
+    /// of one still indexing. It never publishes diagnostics.
+    fn silent_server(dir: &Path) -> PathBuf {
+        let path = dir.join("silent_lsp.py");
+        std::fs::write(
+            &path,
+            r#"
+import json, sys
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers.get("content-length", 0))
+    return json.loads(sys.stdin.buffer.read(length))
+
+def send(message):
+    body = json.dumps(message).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    if message.get("method") == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+"#,
+        )
+        .unwrap();
+        path
+    }
+
     #[test]
     fn diagnostics_round_trip_through_a_real_stdio_server() {
         let Some(python) = python() else {
@@ -886,6 +924,39 @@ while True:
         assert_eq!(diagnostic.severity, "error");
         assert_eq!(diagnostic.message, "fake error");
         assert_eq!(diagnostic.source.as_deref(), Some("fake-lsp"));
+        manager.clear();
+    }
+
+    /// Silence is not cleanliness. A server that accepts the document but does
+    /// not publish diagnostics (still indexing) must report `timed_out`, so the
+    /// tool can say "unknown" instead of claiming there are no issues.
+    #[test]
+    fn a_silent_server_reports_timed_out_not_clean() {
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = silent_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let manager = LspManager::new();
+
+        let started = Instant::now();
+        let report = manager
+            .diagnostics("silent", &server, root, &file)
+            .expect("a timeout is a report, not an error");
+        assert!(report.timed_out);
+        assert!(report.diagnostics.is_empty());
+        assert!(
+            started.elapsed() >= DIAGNOSTICS_TIMEOUT,
+            "waited the full window"
+        );
         manager.clear();
     }
 
@@ -1037,6 +1108,125 @@ while True:
         assert!(out.content.contains("lsp_symbol"), "{}", out.content);
         assert!(!out.content.contains("regex_fn"), "{}", out.content);
         manager().clear();
+    }
+
+    /// Repeated calls must share one process: spawning `rust-analyzer` per
+    /// tool call would pay `initialize` (and often an index) every time.
+    #[test]
+    fn repeated_calls_reuse_one_server_process() {
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = fake_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let manager = LspManager::new();
+
+        manager
+            .query(QueryKind::Hover, "fake", &server, root, &file, 1, 1)
+            .expect("first query");
+        let first = {
+            let clients = manager
+                .clients
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert_eq!(clients.len(), 1, "one client for one workspace+server");
+            clients
+                .values()
+                .next()
+                .expect("spawned client")
+                .clone()
+        };
+        manager
+            .query(QueryKind::Hover, "fake", &server, root, &file, 1, 1)
+            .expect("second query");
+        let second = {
+            let clients = manager
+                .clients
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert_eq!(clients.len(), 1);
+            clients
+                .values()
+                .next()
+                .expect("spawned client")
+                .clone()
+        };
+        assert!(Arc::ptr_eq(&first, &second), "the same client was reused");
+        manager.clear();
+    }
+
+    /// The documented restart policy: a request that hits a dead process
+    /// fails and removes it, and the next call starts a fresh one instead of
+    /// reporting the same error forever.
+    #[test]
+    fn a_dead_server_is_replaced_on_the_next_call() {
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = fake_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let manager = LspManager::new();
+
+        manager
+            .query(QueryKind::Hover, "fake", &server, root, &file, 1, 1)
+            .expect("spawn the server");
+        // Kill the child under the client, the same shape as a crash.
+        {
+            let client = manager
+                .clients
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .values()
+                .next()
+                .expect("spawned client")
+                .clone();
+            client
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .child
+                .kill()
+                .expect("kill the fake server");
+        }
+
+        assert!(
+            manager
+                .query(QueryKind::Hover, "fake", &server, root, &file, 1, 1)
+                .is_err(),
+            "a dead server reports an error"
+        );
+        assert!(
+            manager
+                .clients
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "the failed client is forgotten"
+        );
+
+        let reply = manager
+            .query(QueryKind::Hover, "fake", &server, root, &file, 1, 1)
+            .expect("the next call starts a fresh server");
+        let QueryReport::Hover(Some(reply)) = reply else {
+            panic!("expected hover text");
+        };
+        assert!(reply.contains("fn target()"), "{reply}");
+        manager.clear();
     }
 
     #[test]

@@ -132,11 +132,14 @@ extensions = ["ts", "tsx", "js", "jsx"]
   program) answers `initialize`, `didOpen`, `definition`, `references`,
   `hover`, `documentSymbol`, and emits diagnostics; tests spawn it through a
   real `LspServerConfig`. They skip when no Python interpreter is available.
-- Timeout and crash tests: server that accepts but never answers; server that
-  exits mid-request.
+- Timeout: a server that accepts the document but never publishes diagnostics
+  reports `timed_out` after the wait window, never a clean empty list.
+- Crash/restart: a server that exits is reported rather than panicking; a
+  killed client is forgotten and the next call starts a fresh process.
 - UTF-16 position tests with emoji and combining characters.
 - Config tests for defaults and extension mapping.
-- Load test: repeated diagnostics calls reuse one server process.
+- Process reuse: repeated calls leave exactly one client entry and reuse the
+  same `Arc`, so a session does not pay `initialize` per tool call.
 
 ## Risks / decisions to settle before phase 1
 
