@@ -31,6 +31,12 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const SYMBOLS_TIMEOUT: Duration = Duration::from_millis(750);
 const MAX_DIAGNOSTICS: usize = 50;
 const MAX_SYMBOLS: usize = 8;
+/// A broken or hostile server must not turn a header into an unbounded
+/// allocation. Real servers send a few dozen bytes; 8 KiB is generous.
+const MAX_HEADER_BYTES: usize = 8 * 1024;
+/// No real LSP reply approaches this size. A larger declared length is
+/// refused rather than allocated.
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -505,6 +511,12 @@ fn spawn_reader(stdout: ChildStdout, tx: Sender<Value>) {
             let Some(length) = read_header(&mut reader) else {
                 return;
             };
+            if length > MAX_MESSAGE_BYTES {
+                // Do not allocate what the server claims. Dropping `tx` makes
+                // the waiting request report a closed server, and the manager
+                // starts a fresh one on the next call.
+                return;
+            }
             let mut body = vec![0u8; length];
             if reader.read_exact(&mut body).is_err() {
                 return;
@@ -520,21 +532,40 @@ fn spawn_reader(stdout: ChildStdout, tx: Sender<Value>) {
 
 fn read_header(reader: &mut BufReader<ChildStdout>) -> Option<usize> {
     let mut length = None;
+    let mut consumed = 0usize;
     loop {
-        let mut line = String::new();
-        let read = reader.read_line(&mut line).ok()?;
+        // Bound the read itself, not just the result: a server that never
+        // sends a newline must not grow `read_until`'s buffer without limit.
+        let remaining = MAX_HEADER_BYTES.checked_sub(consumed)?;
+        if remaining == 0 {
+            return None;
+        }
+        let mut line = Vec::new();
+        let read = reader
+            .by_ref()
+            .take(remaining as u64)
+            .read_until(b'\n', &mut line)
+            .ok()?;
         if read == 0 {
             return None;
         }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
+        consumed += read;
+        let terminated = line.last() == Some(&b'\n');
+        let trimmed = line.strip_suffix(b"\n").unwrap_or(&line);
+        let trimmed = trimmed.strip_suffix(b"\r").unwrap_or(trimmed);
         if trimmed.is_empty() {
             return length;
         }
         if let Some(value) = trimmed
-            .strip_prefix("Content-Length:")
-            .or_else(|| trimmed.strip_prefix("content-length:"))
+            .strip_prefix(b"Content-Length:")
+            .or_else(|| trimmed.strip_prefix(b"content-length:"))
         {
-            length = value.trim().parse().ok();
+            length = std::str::from_utf8(value).ok()?.trim().parse().ok();
+        }
+        if !terminated {
+            // The cap was hit mid-line: a malformed header, not a longer one
+            // worth buffering.
+            return None;
         }
     }
 }
@@ -896,6 +927,91 @@ while True:
         path
     }
 
+    /// Completes the handshake, then declares a message larger than any real
+    /// reply. The client must stop reading instead of allocating the claimed
+    /// length.
+    fn oversized_message_server(dir: &Path) -> PathBuf {
+        let path = dir.join("oversized_message_lsp.py");
+        std::fs::write(
+            &path,
+            r#"
+import json, sys
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers.get("content-length", 0))
+    return json.loads(sys.stdin.buffer.read(length))
+
+def send(message):
+    body = json.dumps(message).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif method == "textDocument/didOpen":
+        sys.stdout.buffer.write(b"Content-Length: 1152921504606846976\r\n\r\n")
+        sys.stdout.buffer.flush()
+"#,
+        )
+        .unwrap();
+        path
+    }
+
+    /// Sends a header line that never ends: the client must cap the buffered
+    /// header instead of growing it for as long as the server keeps writing.
+    fn endless_header_server(dir: &Path) -> PathBuf {
+        let path = dir.join("endless_header_lsp.py");
+        std::fs::write(
+            &path,
+            r#"
+import json, sys
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers.get("content-length", 0))
+    return json.loads(sys.stdin.buffer.read(length))
+
+def send(message):
+    body = json.dumps(message).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif method == "textDocument/didOpen":
+        sys.stdout.buffer.write(b"X-Junk: " + b"a" * 100000)
+        sys.stdout.buffer.flush()
+"#,
+        )
+        .unwrap();
+        path
+    }
+
     #[test]
     fn diagnostics_round_trip_through_a_real_stdio_server() {
         let Some(python) = python() else {
@@ -957,6 +1073,62 @@ while True:
             started.elapsed() >= DIAGNOSTICS_TIMEOUT,
             "waited the full window"
         );
+        manager.clear();
+    }
+
+    #[test]
+    fn an_oversized_declared_message_is_refused() {
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = oversized_message_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let manager = LspManager::new();
+
+        let error = manager
+            .diagnostics("oversized", &server, root, &file)
+            .expect_err("the reader must stop, not allocate");
+        assert!(error.contains("exited"), "{error}");
+        assert!(
+            manager
+                .clients
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "the broken client is forgotten"
+        );
+        manager.clear();
+    }
+
+    #[test]
+    fn an_endless_header_line_is_cut_off() {
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = endless_header_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let manager = LspManager::new();
+
+        let error = manager
+            .diagnostics("endless", &server, root, &file)
+            .expect_err("the reader must cap the header");
+        assert!(error.contains("exited"), "{error}");
         manager.clear();
     }
 

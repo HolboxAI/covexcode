@@ -78,6 +78,9 @@ extensions = ["ts", "tsx", "js", "jsx"]
 - Framing is the LSP base protocol: `Content-Length` headers over the child's
   stdin/stdout. A reader task correlates responses by JSON-RPC id and forwards
   `textDocument/publishDiagnostics` notifications into a per-URI watch channel.
+  Frames are bounded (64 MiB per message, 8 KiB of headers): a broken or
+  hostile server cannot make the client allocate an unbounded buffer from a
+  declaration.
 - Documents are opened once per file (`didOpen`, language id from the server
   mapping) and re-opened only if the file changed; writes already invalidate
   the repo index, so a version counter can be shared with that path.
@@ -134,6 +137,8 @@ extensions = ["ts", "tsx", "js", "jsx"]
   real `LspServerConfig`. They skip when no Python interpreter is available.
 - Timeout: a server that accepts the document but never publishes diagnostics
   reports `timed_out` after the wait window, never a clean empty list.
+- Framing bounds: an oversized declared message and an endless header line
+  both stop the reader cleanly instead of allocating.
 - Crash/restart: a server that exits is reported rather than panicking; a
   killed client is forgotten and the next call starts a fresh process.
 - UTF-16 position tests with emoji and combining characters.
