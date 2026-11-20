@@ -98,6 +98,8 @@ extensions = ["ts", "tsx", "js", "jsx"]
 - `tools.rs`: `LSP` constant, schema, `Action::Lsp`, execution dispatch,
   read-only/plan-mode/subagent allowlists.
 - `config.rs`: `LspConfig` + `LspServerConfig` with defaults; config tests.
+- `/doctor` reports whether LSP is off (and how to enable it), on without any
+  servers, or on with the configured server names; it never starts a server.
 - `headless.rs`: nothing special — the tool runs through the normal executor,
   so ACP/IDE gets it automatically.
 - `transport.rs`: advertises `agentCapabilities.covexcode.lsp = true`. The IDE
