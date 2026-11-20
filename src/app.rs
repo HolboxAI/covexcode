@@ -4435,6 +4435,23 @@ impl App {
             )
         };
 
+        // Optional and off by default, so a user who forgot it exists needs
+        // the doctor to say so rather than discovering it from the docs.
+        let lsp = if !self.config.lsp.enabled {
+            "off (set [lsp] enabled = true)".to_string()
+        } else if self.config.lsp.servers.is_empty() {
+            "on (no servers configured)".to_string()
+        } else {
+            let servers: Vec<&str> = self
+                .config
+                .lsp
+                .servers
+                .keys()
+                .map(String::as_str)
+                .collect();
+            format!("on ({})", servers.join(", "))
+        };
+
         let lines = vec![
             "covexcode doctor".to_string(),
             String::new(),
@@ -4458,6 +4475,7 @@ impl App {
             format!("  Endpoint:   {endpoint}"),
             format!("  API key:    {api_key}"),
             format!("  Workspace:  {workspace}"),
+            format!("  LSP:        {lsp}"),
             format!(
                 "  State dir:  {} ({})",
                 state_dir.display(),
@@ -7010,6 +7028,55 @@ mod tests {
             assert!(
                 doctor.content.contains("API key"),
                 "reports credential presence: {}",
+                doctor.content
+            );
+            assert!(
+                doctor.content.contains("LSP:") && doctor.content.contains("[lsp] enabled = true"),
+                "reports that LSP is off and how to turn it on: {}",
+                doctor.content
+            );
+        });
+    }
+
+    /// The doctor names the configured servers, so an enabled-but-empty setup
+    /// is distinguishable from one that is actually usable.
+    #[test]
+    fn doctor_reports_configured_language_servers() {
+        with_isolated_home(|| {
+            let mut a = app();
+            a.config.lsp.enabled = true;
+            a.config.lsp.servers.insert(
+                "rust".to_string(),
+                crate::config::LspServerConfig {
+                    command: "rust-analyzer".to_string(),
+                    args: Vec::new(),
+                    extensions: vec!["rs".to_string()],
+                },
+            );
+            a.run_command("/doctor");
+            let doctor = a
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .last()
+                .expect("/doctor prints a system readout");
+            assert!(
+                doctor.content.contains("LSP:        on (rust)"),
+                "{}",
+                doctor.content
+            );
+
+            a.config.lsp.servers.clear();
+            a.run_command("/doctor");
+            let doctor = a
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .last()
+                .expect("/doctor prints a system readout");
+            assert!(
+                doctor.content.contains("on (no servers configured)"),
+                "{}",
                 doctor.content
             );
         });
