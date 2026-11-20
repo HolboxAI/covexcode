@@ -3876,7 +3876,7 @@ fn gh_api_is_read_only(args: &[&str]) -> bool {
 async fn run_blocking(
     call: &ToolCall,
     workspace: &Workspace,
-    run: fn(&ToolCall, &Workspace) -> ToolOutcome,
+    run: impl FnOnce(&ToolCall, &Workspace) -> ToolOutcome + Send + 'static,
 ) -> ToolOutcome {
     let call = call.clone();
     let ws = workspace.clone();
@@ -3979,7 +3979,15 @@ pub async fn execute_truncated_with_lsp(
         LIST_DIR => run_blocking(call, workspace, execute_list_dir).await,
         GLOB => run_blocking(call, workspace, execute_glob).await,
         GREP_SEARCH => run_blocking(call, workspace, execute_grep_search).await,
-        REPO_MAP => run_blocking(call, workspace, execute_repo_map).await,
+        REPO_MAP => {
+            // Symbols from a language server the session has already warmed
+            // up; the regex index is built first and stays the fallback.
+            let lsp = lsp.cloned();
+            run_blocking(call, workspace, move |call, workspace| {
+                execute_repo_map(call, workspace, lsp.as_ref())
+            })
+            .await
+        }
         LSP => {
             let call_id = call.id.clone();
             let call = call.clone();
@@ -5849,6 +5857,11 @@ const SYMBOL_EXTENSIONS: &[&str] = &[
     "cpp", "hpp", "cc", "cs", "rb", "php", "sh", "bash", "zsh",
 ];
 
+/// How many top-ranked files may ask an already-running language server for
+/// symbols. Each call has its own short timeout, so keeping the count small
+/// bounds the map's extra latency.
+const LSP_SYMBOL_FILES: usize = 3;
+
 /// Names whose presence says "this is a real file, not just another leaf".
 fn is_important_map_name(name: &str) -> bool {
     matches!(
@@ -6282,9 +6295,45 @@ fn execute_lsp_query(
     }
 }
 
+/// Replace the regex symbols of the top-ranked files with document symbols
+/// from a server the session already started. The index's own symbols are
+/// still what ranked the files and remain the fallback for every other file.
+fn enrich_map_symbols(entries: &mut [MapEntry], workspace: &Workspace, lsp: Option<&LspConfig>) {
+    let Some(lsp) = lsp.filter(|lsp| lsp.enabled) else {
+        return;
+    };
+    for entry in entries.iter_mut().take(LSP_SYMBOL_FILES) {
+        let Some(extension) = Path::new(&entry.relative)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        else {
+            continue;
+        };
+        let Some((server_name, _server)) = lsp.server_for(extension) else {
+            continue;
+        };
+        if let Some(symbols) = crate::lsp::try_document_symbols(
+            server_name,
+            workspace.root(),
+            &workspace.root().join(&entry.relative),
+        ) {
+            entry.symbols = symbols;
+        }
+    }
+}
+
 /// Read-only ranked map: paths by relevance, plus top-level symbols for the
 /// source files. It never sends file bodies -- `read_file` does that.
-fn execute_repo_map(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
+///
+/// Symbols come from the regex index. When the session has already started a
+/// language server for the workspace, the top few files ask it for
+/// `documentSymbol` instead; a cold or busy server is skipped, never waited
+/// on, so the map stays fast.
+fn execute_repo_map(
+    call: &ToolCall,
+    workspace: &Workspace,
+    lsp: Option<&LspConfig>,
+) -> ToolOutcome {
     let args = serde_json::from_str::<RepoMapArgs>(&call.function.arguments).unwrap_or(RepoMapArgs {
         query: None,
         path: None,
@@ -6376,6 +6425,7 @@ fn execute_repo_map(call: &ToolCall, workspace: &Workspace) -> ToolOutcome {
             .then_with(|| a.relative.cmp(&b.relative))
     });
     entries.truncate(max_files);
+    enrich_map_symbols(&mut entries, workspace, lsp);
 
     let mut body = format!(
         "Repository map: {} file(s) scanned, showing {}.\n",

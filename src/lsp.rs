@@ -1,8 +1,10 @@
-//! A deliberately small LSP client for the `lsp` tool.
+//! A deliberately small LSP client for the `lsp` tool and `repo_map`.
 //!
 //! One server process per (workspace, configured server), started lazily on
-//! the first diagnostics call. Phase 1 supports `textDocument/publishDiagnostics`
-//! only; definition/references/hover are the next phase and share this client.
+//! the first diagnostics or navigation call. Supports
+//! `textDocument/publishDiagnostics`, definition, references, hover and
+//! documentSymbol; the last is only ever asked of an already-running server,
+//! so it can enrich `repo_map` without making a cold map wait for `initialize`.
 //!
 //! The design is synchronous on the calling blocking-pool thread: a reader
 //! thread owns stdout and forwards JSON-RPC values over a channel, so every
@@ -23,7 +25,12 @@ use std::time::{Duration, Instant};
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(2);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// A warm server answers document symbols in milliseconds. The short bound
+/// keeps `repo_map` fast when the server is busy or half-dead; the map falls
+/// back to its regex symbols on any failure.
+const SYMBOLS_TIMEOUT: Duration = Duration::from_millis(750);
 const MAX_DIAGNOSTICS: usize = 50;
+const MAX_SYMBOLS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -158,6 +165,30 @@ impl LspManager {
         result
     }
 
+    /// Document symbols for one file, but only when a server for this
+    /// workspace is already running. Never spawns or waits: `repo_map` calls
+    /// this for its top files and keeps its regex symbols when the answer is
+    /// `None`, so a cold or busy server cannot slow the map down.
+    fn try_document_symbols(
+        &self,
+        server_name: &str,
+        workspace_root: &Path,
+        path: &Path,
+    ) -> Option<Vec<String>> {
+        let key = (workspace_root.to_path_buf(), server_name.to_string());
+        let client = self
+            .clients
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key)?
+            .clone();
+        // Another query holds the client: skip this file rather than queueing
+        // behind it. The next map build can try again.
+        let mut client = client.try_lock().ok()?;
+        let symbols = client.document_symbols(path).ok()?;
+        (!symbols.is_empty()).then_some(symbols)
+    }
+
     #[cfg(test)]
     fn clear(&self) {
         self.clients
@@ -194,6 +225,17 @@ pub fn query(
     column: u64,
 ) -> Result<QueryReport, String> {
     manager().query(kind, server_name, server, workspace_root, path, line, column)
+}
+
+/// Document symbols from an already-running server; `None` when the server is
+/// not warm yet, is busy, or does not answer in time. `repo_map` treats
+/// `None` as "keep the regex symbols".
+pub fn try_document_symbols(
+    server_name: &str,
+    workspace_root: &Path,
+    path: &Path,
+) -> Option<Vec<String>> {
+    manager().try_document_symbols(server_name, workspace_root, path)
 }
 
 struct Client {
@@ -379,6 +421,19 @@ impl Client {
         }
     }
 
+    /// `textDocument/documentSymbol`, reduced to names. Both wire shapes are
+    /// handled: `SymbolInformation[]` is flat and `DocumentSymbol[]` nests
+    /// children.
+    fn document_symbols(&mut self, path: &Path) -> Result<Vec<String>, String> {
+        let (uri, _text) = self.ensure_open(path)?;
+        let result = self.request(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": uri } }),
+            SYMBOLS_TIMEOUT,
+        )?;
+        Ok(parse_symbol_names(&result))
+    }
+
     fn request(
         &mut self,
         method: &str,
@@ -554,6 +609,41 @@ fn parse_hover(value: &Value) -> Option<String> {
         _ => return None,
     };
     (!text.trim().is_empty()).then_some(text)
+}
+
+/// Names from `textDocument/documentSymbol`, bounded to [`MAX_SYMBOLS`].
+/// Accepts both wire shapes: flat `SymbolInformation[]` and hierarchical
+/// `DocumentSymbol[]` with `children`.
+fn parse_symbol_names(value: &Value) -> Vec<String> {
+    fn collect(items: &[Value], depth: usize, names: &mut Vec<String>) {
+        // A server controls this shape; an unbounded walk would be a stack
+        // hazard for no benefit. Eight levels is already deeper than the map
+        // ever shows.
+        if depth > 8 {
+            return;
+        }
+        for item in items {
+            if names.len() >= MAX_SYMBOLS {
+                return;
+            }
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                let name = name.trim();
+                if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+                    names.push(name.to_string());
+                }
+            }
+            if let Some(children) = item.get("children").and_then(Value::as_array) {
+                collect(children, depth + 1, names);
+            }
+        }
+    }
+    let items: &[Value] = match value {
+        Value::Array(items) => items,
+        _ => return Vec::new(),
+    };
+    let mut names = Vec::new();
+    collect(items, 0, &mut names);
+    names
 }
 
 fn uri_to_path(uri: &str, workspace_root: &Path) -> String {
@@ -756,6 +846,12 @@ while True:
         send({"jsonrpc": "2.0", "id": message["id"], "result": {
             "contents": {"kind": "markdown", "value": "```rust\\nfn target()\\n```"}
         }})
+    elif method == "textDocument/documentSymbol":
+        r = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+        send({"jsonrpc": "2.0", "id": message["id"], "result": [{
+            "name": "lsp_symbol", "kind": 12, "range": r, "selectionRange": r,
+            "children": [{"name": "nested_symbol", "kind": 12, "range": r, "selectionRange": r}]
+        }]})
 "#,
         )
         .unwrap();
@@ -840,6 +936,107 @@ while True:
         };
         assert!(hover.contains("fn target()"), "{hover}");
         manager.clear();
+    }
+
+    #[test]
+    fn document_symbol_names_accept_flat_and_nested_shapes() {
+        let flat = json!([{"name": "alpha"}, {"name": "alpha"}, {"name": "beta"}]);
+        assert_eq!(parse_symbol_names(&flat), vec!["alpha", "beta"]);
+
+        let nested = json!([{"name": "outer", "children": [{"name": "inner"}]}]);
+        assert_eq!(parse_symbol_names(&nested), vec!["outer", "inner"]);
+
+        assert!(parse_symbol_names(&json!(null)).is_empty());
+    }
+
+    /// `repo_map` only asks an already-warm server: a cold one must answer
+    /// `None` (keeping the regex symbols) rather than spawn or block.
+    #[test]
+    fn document_symbols_come_only_from_a_warm_server() {
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = fake_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let manager = LspManager::new();
+
+        assert!(manager
+            .try_document_symbols("fake", root, &file)
+            .is_none());
+
+        manager
+            .query(QueryKind::Hover, "fake", &server, root, &file, 1, 1)
+            .expect("warm the server");
+        assert_eq!(
+            manager.try_document_symbols("fake", root, &file),
+            Some(vec!["lsp_symbol".to_string(), "nested_symbol".to_string()])
+        );
+        manager.clear();
+    }
+
+    /// End to end: the top file's regex symbol is replaced by the warm
+    /// server's document symbols in the rendered map.
+    #[tokio::test]
+    async fn repo_map_uses_warm_document_symbols() {
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = fake_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "pub fn regex_fn() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let lsp = crate::config::LspConfig {
+            enabled: true,
+            servers: [("fake".to_string(), server.clone())].into(),
+        };
+        // Warm the process-global client under this root and server name,
+        // exactly as an earlier `lsp` tool call in the session would. The
+        // workspace's canonical root, not the temp-dir spelling, is the key
+        // both paths use.
+        let workspace = crate::workspace::Workspace::new(root).expect("workspace");
+        query(
+            QueryKind::Hover,
+            "fake",
+            &server,
+            workspace.root(),
+            &file,
+            1,
+            1,
+        )
+        .expect("warm");
+
+        let call = crate::llm::ToolCall {
+            id: "map".to_string(),
+            kind: "function".to_string(),
+            function: crate::llm::FunctionCall {
+                name: "repo_map".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let out = crate::tools::execute_with_lsp(
+            &call,
+            &workspace,
+            &crate::config::ToolsConfig::default(),
+            Some(&lsp),
+        )
+        .await;
+        assert!(out.content.contains("lsp_symbol"), "{}", out.content);
+        assert!(!out.content.contains("regex_fn"), "{}", out.content);
+        manager().clear();
     }
 
     #[test]
