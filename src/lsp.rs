@@ -1225,10 +1225,21 @@ while True:
         manager.clear();
     }
 
+    /// Tests that drive the process-global manager must not run concurrently:
+    /// one test's `clear()` would drop the warm client another just
+    /// established. The per-manager tests can stay parallel.
+    fn global_manager_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
     /// End to end: the top file's regex symbol is replaced by the warm
     /// server's document symbols in the rendered map.
     #[tokio::test]
     async fn repo_map_uses_warm_document_symbols() {
+        let _global = global_manager_guard();
         let Some(python) = python() else {
             return;
         };
@@ -1399,6 +1410,57 @@ while True:
         };
         assert!(reply.contains("fn target()"), "{reply}");
         manager.clear();
+    }
+
+    /// Two files checked in one `lsp` call: both reports are rendered, with
+    /// the `path:line:column severity: message` rows the IDE card parses.
+    #[tokio::test]
+    async fn multi_file_diagnostics_reports_every_file() {
+        let _global = global_manager_guard();
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = fake_server(root);
+        std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let lsp = crate::config::LspConfig {
+            enabled: true,
+            servers: [("fake".to_string(), server)].into(),
+        };
+        let workspace = crate::workspace::Workspace::new(root).expect("workspace");
+        let call = crate::llm::ToolCall {
+            id: "diag".to_string(),
+            kind: "function".to_string(),
+            function: crate::llm::FunctionCall {
+                name: crate::tools::LSP.to_string(),
+                arguments: json!({ "paths": ["a.rs", "b.rs"] }).to_string(),
+            },
+        };
+        let out = crate::tools::execute_with_lsp(
+            &call,
+            &workspace,
+            &crate::config::ToolsConfig::default(),
+            Some(&lsp),
+        )
+        .await;
+        assert!(out.display.contains("2 files"), "{}", out.display);
+        assert!(out.display.contains("2 issues"), "{}", out.display);
+        for file in ["a.rs", "b.rs"] {
+            assert!(
+                out.content
+                    .contains(&format!("{file}:2:3 error: fake error [fake-lsp]")),
+                "missing {file} diagnostic: {}",
+                out.content
+            );
+        }
+        manager().clear();
     }
 
     #[test]

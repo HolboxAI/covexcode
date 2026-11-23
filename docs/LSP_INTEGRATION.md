@@ -32,7 +32,8 @@ One tool, `lsp`, with an `action` enum, rather than four schemas:
 ```
 lsp {
   action: "diagnostics" | "definition" | "references" | "hover",
-  path: string,                 // workspace-relative
+  path?: string,                // workspace-relative; required for navigation
+  paths?: string[],             // diagnostics only: several files, max 10
   line?: integer,               // 1-based, required except diagnostics
   column?: integer,             // 1-based, required except diagnostics
 }
@@ -42,6 +43,11 @@ It is read-only, part of the pure-read fan-out, allowed in plan mode and in
 research subagents. Diagnostics return a bounded list (`severity`, `line`,
 `message`, `source`); references return `path:line:column` lines; hover returns
 plain text. Every response is clipped the same way `grep_search` is.
+
+Diagnostics also accepts `paths` (or `path` plus `paths`): up to ten files are
+checked in order, deduplicated, with a ten-second total budget. A broad edit
+can therefore be checked in one call without letting a slow server hold the
+turn; files past the budget are reported as skipped, not silently dropped.
 
 ## Configuration
 
