@@ -27,27 +27,33 @@ close the loop after a write without running a full build.
 
 ## Surface
 
-One tool, `lsp`, with an `action` enum, rather than four schemas:
+One tool, `lsp`, with an `action` enum, rather than five schemas:
 
 ```
 lsp {
-  action: "diagnostics" | "definition" | "references" | "hover",
-  path?: string,                // workspace-relative; required for navigation
+  action: "diagnostics" | "symbols" | "definition" | "references" | "hover",
+  path?: string,                // workspace-relative; required for symbols and navigation
   paths?: string[],             // diagnostics only: several files, max 10
-  line?: integer,               // 1-based, required except diagnostics
-  column?: integer,             // 1-based, required except diagnostics
+  line?: integer,               // 1-based, required for navigation
+  column?: integer,             // 1-based, required for navigation
 }
 ```
 
 It is read-only, part of the pure-read fan-out, allowed in plan mode and in
 research subagents. Diagnostics return a bounded list (`severity`, `line`,
-`message`, `source`); references return `path:line:column` lines; hover returns
-plain text. Every response is clipped the same way `grep_search` is.
+`message`, `source`); symbols return the file's outline (up to 50 names);
+references return `path:line:column` lines; hover returns plain text. Every
+response is clipped the same way `grep_search` is.
 
 Diagnostics also accepts `paths` (or `path` plus `paths`): up to ten files are
 checked in order, deduplicated, with a ten-second total budget. A broad edit
 can therefore be checked in one call without letting a slow server hold the
 turn; files past the budget are reported as skipped, not silently dropped.
+
+`symbols` is the explicit version of the enrichment `repo_map` performs: it may
+start a cold server and waits for the outline, whereas `repo_map` only asks an
+already-warm one. Both use `textDocument/documentSymbol` and handle flat and
+nested replies.
 
 ## Configuration
 
@@ -130,7 +136,8 @@ extensions = ["ts", "tsx", "js", "jsx"]
 3. **Repo-map symbol source** — implemented: warm servers answer
    `documentSymbol` for the top-ranked files; the regex index remains the
    ranking source and fallback, and a cold server is never spawned or waited
-   on by the map.
+   on by the map. The same client also backs the explicit `symbols` action,
+   which may start a cold server and waits for the outline.
 4. **IDE surface** — implemented in `covexcode-ide`: a completed `lsp`
    diagnostics tool call renders a severity summary and up to ten
    `path:line:column` links; definition and references results render their
@@ -152,6 +159,8 @@ extensions = ["ts", "tsx", "js", "jsx"]
   reports `timed_out` after the wait window, never a clean empty list.
 - Framing bounds: an oversized declared message and an endless header line
   both stop the reader cleanly instead of allocating.
+- Symbols: the `symbols` action returns a flat outline from the fake server,
+  including nested names, and enforces the 50-name limit.
 - Crash/restart: a server that exits is reported rather than panicking; a
   killed client is forgotten and the next call starts a fresh process.
 - UTF-16 position tests with emoji and combining characters.
