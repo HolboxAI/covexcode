@@ -152,7 +152,7 @@ Landed on `main`:
   UTF-16 at the boundary); `repo_map` asks an already-warm server for document
   symbols on its top files and keeps its regex symbols otherwise; the IDE
   renders diagnostics, definitions and references as clickable
-  `path:line:column` rows on the tool call.
+  `path:line:column` rows and shows hover in a safely sized code fence.
   The client is lazy, bounded by timeouts, and restarts a crashed server on
   the next call.
 
