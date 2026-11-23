@@ -31,6 +31,9 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const SYMBOLS_TIMEOUT: Duration = Duration::from_millis(750);
 const MAX_DIAGNOSTICS: usize = 50;
 const MAX_SYMBOLS: usize = 8;
+/// The `lsp` tool's `symbols` action shows a whole file's outline, so it
+/// takes far more than `repo_map`'s eight-name summary.
+const MAX_TOOL_SYMBOLS: usize = 50;
 /// A broken or hostile server must not turn a header into an unbounded
 /// allocation. Real servers send a few dozen bytes; 8 KiB is generous.
 const MAX_HEADER_BYTES: usize = 8 * 1024;
@@ -171,6 +174,30 @@ impl LspManager {
         result
     }
 
+    /// Document symbols for one file, starting the server if necessary. This
+    /// backs the `lsp` tool's `symbols` action; unlike
+    /// [`Self::try_document_symbols`], a cold server is expected here and gets
+    /// the full query timeout.
+    fn document_symbols(
+        &self,
+        server_name: &str,
+        server: &LspServerConfig,
+        workspace_root: &Path,
+        path: &Path,
+    ) -> Result<Vec<String>, String> {
+        let (key, client) = self.client_for(server_name, server, workspace_root)?;
+        let result = {
+            let mut client = client
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            client.document_symbols(path, MAX_TOOL_SYMBOLS, QUERY_TIMEOUT)
+        };
+        if result.is_err() {
+            self.forget(&key, &client);
+        }
+        result
+    }
+
     /// Document symbols for one file, but only when a server for this
     /// workspace is already running. Never spawns or waits: `repo_map` calls
     /// this for its top files and keeps its regex symbols when the answer is
@@ -191,7 +218,9 @@ impl LspManager {
         // Another query holds the client: skip this file rather than queueing
         // behind it. The next map build can try again.
         let mut client = client.try_lock().ok()?;
-        let symbols = client.document_symbols(path).ok()?;
+        let symbols = client
+            .document_symbols(path, MAX_SYMBOLS, SYMBOLS_TIMEOUT)
+            .ok()?;
         (!symbols.is_empty()).then_some(symbols)
     }
 
@@ -242,6 +271,18 @@ pub fn try_document_symbols(
     path: &Path,
 ) -> Option<Vec<String>> {
     manager().try_document_symbols(server_name, workspace_root, path)
+}
+
+/// Document symbols for one file through the configured server, starting it
+/// if needed. Unlike [`try_document_symbols`], this waits for a cold server
+/// and is what the `lsp` tool's `symbols` action calls.
+pub fn document_symbols(
+    server_name: &str,
+    server: &LspServerConfig,
+    workspace_root: &Path,
+    path: &Path,
+) -> Result<Vec<String>, String> {
+    manager().document_symbols(server_name, server, workspace_root, path)
 }
 
 struct Client {
@@ -430,14 +471,19 @@ impl Client {
     /// `textDocument/documentSymbol`, reduced to names. Both wire shapes are
     /// handled: `SymbolInformation[]` is flat and `DocumentSymbol[]` nests
     /// children.
-    fn document_symbols(&mut self, path: &Path) -> Result<Vec<String>, String> {
+    fn document_symbols(
+        &mut self,
+        path: &Path,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<String>, String> {
         let (uri, _text) = self.ensure_open(path)?;
         let result = self.request(
             "textDocument/documentSymbol",
             json!({ "textDocument": { "uri": uri } }),
-            SYMBOLS_TIMEOUT,
+            timeout,
         )?;
-        Ok(parse_symbol_names(&result))
+        Ok(parse_symbol_names(&result, limit))
     }
 
     fn request(
@@ -642,19 +688,19 @@ fn parse_hover(value: &Value) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-/// Names from `textDocument/documentSymbol`, bounded to [`MAX_SYMBOLS`].
-/// Accepts both wire shapes: flat `SymbolInformation[]` and hierarchical
-/// `DocumentSymbol[]` with `children`.
-fn parse_symbol_names(value: &Value) -> Vec<String> {
-    fn collect(items: &[Value], depth: usize, names: &mut Vec<String>) {
+/// Names from `textDocument/documentSymbol`, bounded to `limit`. Accepts both
+/// wire shapes: flat `SymbolInformation[]` and hierarchical `DocumentSymbol[]`
+/// with `children`.
+fn parse_symbol_names(value: &Value, limit: usize) -> Vec<String> {
+    fn collect(items: &[Value], depth: usize, limit: usize, names: &mut Vec<String>) {
         // A server controls this shape; an unbounded walk would be a stack
-        // hazard for no benefit. Eight levels is already deeper than the map
-        // ever shows.
+        // hazard for no benefit. Eight levels is already deeper than any
+        // outline this tool shows.
         if depth > 8 {
             return;
         }
         for item in items {
-            if names.len() >= MAX_SYMBOLS {
+            if names.len() >= limit {
                 return;
             }
             if let Some(name) = item.get("name").and_then(Value::as_str) {
@@ -664,7 +710,7 @@ fn parse_symbol_names(value: &Value) -> Vec<String> {
                 }
             }
             if let Some(children) = item.get("children").and_then(Value::as_array) {
-                collect(children, depth + 1, names);
+                collect(children, depth + 1, limit, names);
             }
         }
     }
@@ -673,7 +719,7 @@ fn parse_symbol_names(value: &Value) -> Vec<String> {
         _ => return Vec::new(),
     };
     let mut names = Vec::new();
-    collect(items, 0, &mut names);
+    collect(items, 0, limit, &mut names);
     names
 }
 
@@ -1184,12 +1230,29 @@ while True:
     #[test]
     fn document_symbol_names_accept_flat_and_nested_shapes() {
         let flat = json!([{"name": "alpha"}, {"name": "alpha"}, {"name": "beta"}]);
-        assert_eq!(parse_symbol_names(&flat), vec!["alpha", "beta"]);
+        assert_eq!(
+            parse_symbol_names(&flat, MAX_SYMBOLS),
+            vec!["alpha", "beta"]
+        );
 
         let nested = json!([{"name": "outer", "children": [{"name": "inner"}]}]);
-        assert_eq!(parse_symbol_names(&nested), vec!["outer", "inner"]);
+        assert_eq!(
+            parse_symbol_names(&nested, MAX_SYMBOLS),
+            vec!["outer", "inner"]
+        );
 
-        assert!(parse_symbol_names(&json!(null)).is_empty());
+        assert!(parse_symbol_names(&json!(null), MAX_SYMBOLS).is_empty());
+
+        let many = json!([
+            {"name": "one"},
+            {"name": "two"},
+            {"name": "three"}
+        ]);
+        assert_eq!(
+            parse_symbol_names(&many, 2),
+            vec!["one", "two"],
+            "the tool's outline limit is enforced"
+        );
     }
 
     /// `repo_map` only asks an already-warm server: a cold one must answer
@@ -1460,6 +1523,51 @@ while True:
                 out.content
             );
         }
+        manager().clear();
+    }
+
+    /// `symbols` is an explicit outline request: it may start a cold server
+    /// and returns the document's names, unlike the warm-only repo-map path.
+    #[tokio::test]
+    async fn symbols_action_returns_a_file_outline() {
+        let _global = global_manager_guard();
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = fake_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let lsp = crate::config::LspConfig {
+            enabled: true,
+            servers: [("fake".to_string(), server)].into(),
+        };
+        let workspace = crate::workspace::Workspace::new(root).expect("workspace");
+        let call = crate::llm::ToolCall {
+            id: "symbols".to_string(),
+            kind: "function".to_string(),
+            function: crate::llm::FunctionCall {
+                name: crate::tools::LSP.to_string(),
+                arguments: json!({ "action": "symbols", "path": "hello.rs" }).to_string(),
+            },
+        };
+        let out = crate::tools::execute_with_lsp(
+            &call,
+            &workspace,
+            &crate::config::ToolsConfig::default(),
+            Some(&lsp),
+        )
+        .await;
+        assert!(out.display.contains("symbols hello.rs — 2"), "{}", out.display);
+        assert!(out.content.contains("Symbols in hello.rs:"), "{}", out.content);
+        assert!(out.content.contains("lsp_symbol"), "{}", out.content);
+        assert!(out.content.contains("nested_symbol"), "{}", out.content);
         manager().clear();
     }
 

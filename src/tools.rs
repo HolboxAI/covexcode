@@ -1077,18 +1077,19 @@ pub fn schemas_for(
             "function": {
                 "name": LSP,
                 "description": "Ask the configured language server about files: diagnostics \
-                                 (compiler-grade errors and warnings), go-to-definition, \
-                                 find-references, or hover type/signature. Use diagnostics after \
-                                 editing, and navigation instead of guessing which symbol a call \
-                                 resolves to. Diagnostics can check several changed files at once \
-                                 with `paths`. Read-only. Requires an [lsp.servers.*] entry whose \
+                                 (compiler-grade errors and warnings), a file's symbols/outline, \
+                                 go-to-definition, find-references, or hover type/signature. Use \
+                                 diagnostics after editing, symbols to see a large file's shape, \
+                                 and navigation instead of guessing which symbol a call resolves \
+                                 to. Diagnostics can check several changed files at once with \
+                                 `paths`. Read-only. Requires an [lsp.servers.*] entry whose \
                                  extensions include the file's extension.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["diagnostics", "definition", "references", "hover"],
+                            "enum": ["diagnostics", "symbols", "definition", "references", "hover"],
                             "description": "What to ask for. Defaults to diagnostics."
                         },
                         "path": {
@@ -2709,6 +2710,8 @@ const DEFAULT_SEARCH_RESULTS: u32 = 5;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LspAction {
     Diagnostics,
+    /// A file's document outline; no position needed.
+    Symbols,
     Definition,
     References,
     Hover,
@@ -2717,6 +2720,9 @@ pub enum LspAction {
 impl LspAction {
     fn parse(s: Option<&str>) -> Self {
         match s.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("symbols") | Some("document_symbols") | Some("document-symbols") => {
+                LspAction::Symbols
+            }
             Some("definition") | Some("go_to_definition") | Some("go-to-definition") => {
                 LspAction::Definition
             }
@@ -2728,14 +2734,16 @@ impl LspAction {
         }
     }
 
-    /// Navigation actions point at a position; diagnostics needs only a file.
+    /// Navigation actions point at a position; diagnostics and symbols need
+    /// only a file.
     pub fn needs_position(self) -> bool {
-        !matches!(self, LspAction::Diagnostics)
+        !matches!(self, LspAction::Diagnostics | LspAction::Symbols)
     }
 
     pub fn name(self) -> &'static str {
         match self {
             LspAction::Diagnostics => "diagnostics",
+            LspAction::Symbols => "symbols",
             LspAction::Definition => "definition",
             LspAction::References => "references",
             LspAction::Hover => "hover",
@@ -2744,7 +2752,7 @@ impl LspAction {
 
     fn query_kind(self) -> Option<crate::lsp::QueryKind> {
         match self {
-            LspAction::Diagnostics => None,
+            LspAction::Diagnostics | LspAction::Symbols => None,
             LspAction::Definition => Some(crate::lsp::QueryKind::Definition),
             LspAction::References => Some(crate::lsp::QueryKind::References),
             LspAction::Hover => Some(crate::lsp::QueryKind::Hover),
@@ -3460,11 +3468,18 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
             } else {
                 requested.first().cloned()?
             };
+            // Only navigation carries a position; a stray line/column on a
+            // diagnostics or symbols call must not leak into the label.
+            let (line, column) = if action.needs_position() {
+                (args.line, args.column)
+            } else {
+                (None, None)
+            };
             Some(Action::Lsp {
                 path: display_path,
                 action,
-                line: args.line,
-                column: args.column,
+                line,
+                column,
             })
         }
         EDIT_FILE => {
@@ -6175,6 +6190,16 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
             ),
         );
     }
+    if lsp_action == LspAction::Symbols
+        && args.path.as_deref().map(str::trim).map_or(true, str::is_empty)
+    {
+        return outcome(
+            &call.id,
+            "symbols — missing path".to_string(),
+            "Error: the 'symbols' action needs a single `path`; `paths` is for diagnostics only."
+                .to_string(),
+        );
+    }
     let position = match (args.line, args.column) {
         (Some(line), Some(column)) if line >= 1 && column >= 1 => Some((line, column)),
         _ => None,
@@ -6226,6 +6251,16 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
             ),
         );
     };
+    if lsp_action == LspAction::Symbols {
+        return execute_lsp_symbols(
+            call,
+            requested,
+            server_name,
+            server,
+            workspace,
+            &path,
+        );
+    }
     if let Some(kind) = lsp_action.query_kind() {
         let (line, column) = position.expect("navigation actions were checked for a position");
         return execute_lsp_query(
@@ -6282,6 +6317,42 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
         Err(error) => outcome(
             &call.id,
             format!("diagnostics {requested} — error"),
+            format!("Error: {error}"),
+        ),
+    }
+}
+
+/// `symbols` -- one file's document outline. Unlike `repo_map`'s warm-only
+/// enrichment, an explicit call may start the server and waits for it.
+fn execute_lsp_symbols(
+    call: &ToolCall,
+    requested: &str,
+    server_name: &str,
+    server: &crate::config::LspServerConfig,
+    workspace: &Workspace,
+    path: &Path,
+) -> ToolOutcome {
+    match crate::lsp::document_symbols(server_name, server, workspace.root(), path) {
+        Ok(symbols) if symbols.is_empty() => outcome(
+            &call.id,
+            format!("symbols {requested} — none"),
+            format!("No symbols reported for '{requested}'."),
+        ),
+        Ok(symbols) => {
+            let mut body = format!("Symbols in {requested}:\n");
+            for symbol in &symbols {
+                body.push_str(symbol);
+                body.push('\n');
+            }
+            outcome(
+                &call.id,
+                format!("symbols {requested} — {}", symbols.len()),
+                clip(&body, 12_000),
+            )
+        }
+        Err(error) => outcome(
+            &call.id,
+            format!("symbols {requested} — error"),
             format!("Error: {error}"),
         ),
     }
@@ -8060,6 +8131,25 @@ mod tests {
         let action = describe_action(&call).expect("known action");
         assert_eq!(action.label(), "diagnostics 2 files");
         assert!(is_read_only_action(&action));
+    }
+
+    #[test]
+    fn lsp_symbols_label_has_no_position() {
+        let call = tool_call(
+            LSP,
+            json!({"action": "symbols", "path": "src/lib.rs", "line": 4, "column": 2}),
+        );
+        let action = describe_action(&call).expect("known action");
+        assert_eq!(action.label(), "symbols src/lib.rs");
+        assert!(is_read_only_action(&action));
+    }
+
+    #[tokio::test]
+    async fn lsp_symbols_needs_a_single_path() {
+        let (_dir, ws, cfg) = fixture();
+        let call = tool_call(LSP, json!({"action": "symbols", "paths": ["a.rs"]}));
+        let out = execute_with_lsp(&call, &ws, &cfg, None).await;
+        assert!(out.content.contains("needs a single `path`"), "{}", out.content);
     }
 
     #[tokio::test]

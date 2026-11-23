@@ -2091,6 +2091,7 @@ fn tool_approval_parts(
             )));
             match action {
                 LspAction::Diagnostics => (" Run language-server diagnostics? ", "check", "skip"),
+                LspAction::Symbols => (" List this file's symbols? ", "list", "skip"),
                 LspAction::Definition => (" Jump to definition? ", "go", "skip"),
                 LspAction::References => (" Find references? ", "find", "skip"),
                 LspAction::Hover => (" Show hover information? ", "hover", "skip"),
