@@ -1288,6 +1288,53 @@ while True:
         manager.clear();
     }
 
+    /// The warm-only path must never queue behind an in-flight query: a busy
+    /// client is skipped, which is what keeps `repo_map` from stalling.
+    #[test]
+    fn a_busy_client_is_skipped_not_awaited() {
+        let Some(python) = python() else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let script = fake_server(root);
+        let file = root.join("hello.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let server = LspServerConfig {
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            extensions: vec!["rs".to_string()],
+        };
+        let manager = LspManager::new();
+        manager
+            .query(QueryKind::Hover, "fake", &server, root, &file, 1, 1)
+            .expect("warm the server");
+
+        let client = manager
+            .clients
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .next()
+            .expect("spawned client")
+            .clone();
+        let held = client.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(
+            manager
+                .try_document_symbols("fake", root, &file)
+                .is_none(),
+            "a held client is skipped, not waited on"
+        );
+        drop(held);
+        assert!(
+            manager
+                .try_document_symbols("fake", root, &file)
+                .is_some(),
+            "the next call succeeds once the client is free"
+        );
+        manager.clear();
+    }
+
     /// Tests that drive the process-global manager must not run concurrently:
     /// one test's `clear()` would drop the warm client another just
     /// established. The per-manager tests can stay parallel.
