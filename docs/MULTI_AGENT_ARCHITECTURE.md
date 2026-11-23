@@ -146,7 +146,8 @@ Landed on `main`:
   ranked file layout with top-level symbols (query-aware, build output and
   lockfiles skipped), so an unfamiliar task can start from a map instead of
   blind globbing. LSP phases 1–4 are in: with `[lsp] enabled = true` and a
-  configured server, the `lsp` tool returns diagnostics for one file and
+  configured server, the `lsp` tool returns diagnostics for one file or a
+  bounded sweep of up to ten files, and
   answers definition, references and hover at a 1-based position (converted to
   UTF-16 at the boundary); `repo_map` asks an already-warm server for document
   symbols on its top files and keeps its regex symbols otherwise; the IDE

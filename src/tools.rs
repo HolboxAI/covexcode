@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 pub const RUN_COMMAND: &str = "run_command";
 pub const READ_FILE: &str = "read_file";
@@ -1076,11 +1076,12 @@ pub fn schemas_for(
             "type": "function",
             "function": {
                 "name": LSP,
-                "description": "Ask the configured language server about one file: diagnostics \
+                "description": "Ask the configured language server about files: diagnostics \
                                  (compiler-grade errors and warnings), go-to-definition, \
                                  find-references, or hover type/signature. Use diagnostics after \
                                  editing, and navigation instead of guessing which symbol a call \
-                                 resolves to. Read-only. Requires an [lsp.servers.*] entry whose \
+                                 resolves to. Diagnostics can check several changed files at once \
+                                 with `paths`. Read-only. Requires an [lsp.servers.*] entry whose \
                                  extensions include the file's extension.",
                 "parameters": {
                     "type": "object",
@@ -1092,7 +1093,12 @@ pub fn schemas_for(
                         },
                         "path": {
                             "type": "string",
-                            "description": "File to inspect, relative to the project root."
+                            "description": "File to inspect, relative to the project root. Required for navigation."
+                        },
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Diagnostics only: several files to check (at most 10), relative to the project root."
                         },
                         "line": {
                             "type": "integer",
@@ -1102,8 +1108,7 @@ pub fn schemas_for(
                             "type": "integer",
                             "description": "1-based character column for definition/references/hover."
                         }
-                    },
-                    "required": ["path"]
+                    }
                 }
             }
         }));
@@ -2382,7 +2387,10 @@ struct RepoMapArgs {
 struct LspArgs {
     #[serde(default)]
     action: Option<String>,
-    path: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
     #[serde(default)]
     line: Option<u64>,
     #[serde(default)]
@@ -3431,14 +3439,30 @@ pub fn describe_action(call: &ToolCall) -> Option<Action> {
             })
         }
         LSP => {
-            let args: LspArgs = serde_json::from_str(&call.function.arguments).ok()?;
-            let path = args.path.trim().to_string();
-            if path.is_empty() {
-                return None;
+            let args: LspArgs = serde_json::from_str::<LspArgs>(&call.function.arguments).ok()?;
+            let action = LspAction::parse(args.action.as_deref());
+            let mut requested: Vec<String> = Vec::new();
+            if let Some(path) = args
+                .path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            {
+                requested.push(path.to_string());
             }
+            for path in args.paths.iter().map(|path| path.trim()).filter(|path| !path.is_empty()) {
+                if !requested.iter().any(|existing| existing == path) {
+                    requested.push(path.to_string());
+                }
+            }
+            let display_path = if action == LspAction::Diagnostics && requested.len() > 1 {
+                format!("{} files", requested.len())
+            } else {
+                requested.first().cloned()?
+            };
             Some(Action::Lsp {
-                path,
-                action: LspAction::parse(args.action.as_deref()),
+                path: display_path,
+                action,
                 line: args.line,
                 column: args.column,
             })
@@ -5862,6 +5886,12 @@ const SYMBOL_EXTENSIONS: &[&str] = &[
 /// bounds the map's extra latency.
 const LSP_SYMBOL_FILES: usize = 3;
 
+/// How many files one `lsp` diagnostics call may check, and the wall-clock
+/// budget shared by all of them. Both keep the tool bounded when a server is
+/// slow or a broad edit touched many files.
+const MAX_DIAGNOSTICS_FILES: usize = 10;
+const DIAGNOSTICS_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Names whose presence says "this is a real file, not just another leaf".
 fn is_important_map_name(name: &str) -> bool {
     matches!(
@@ -6106,15 +6136,45 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
             ),
         );
     };
-    let requested = args.path.trim();
+    let lsp_action = LspAction::parse(args.action.as_deref());
+    // `path` and `paths` are both accepted for diagnostics; `path` comes
+    // first so a call that names its main file plus several siblings reads in
+    // that order. Duplicates collapse to one check.
+    let mut requested: Vec<String> = Vec::new();
+    if let Some(path) = args
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        requested.push(path.to_string());
+    }
+    for path in &args.paths {
+        let path = path.trim();
+        if !path.is_empty() && !requested.iter().any(|existing| existing == path) {
+            requested.push(path.to_string());
+        }
+    }
     if requested.is_empty() {
         return outcome(
             &call.id,
-            "lsp — empty path".to_string(),
-            "Error: path must not be empty.".to_string(),
+            "lsp — missing path".to_string(),
+            "Error: give `path` for one file or `paths` for several diagnostics.".to_string(),
         );
     }
-    let lsp_action = LspAction::parse(args.action.as_deref());
+    if lsp_action.needs_position()
+        && args.path.as_deref().map(str::trim).map_or(true, str::is_empty)
+    {
+        return outcome(
+            &call.id,
+            format!("{} — missing path", lsp_action.name()),
+            format!(
+                "Error: the '{}' action needs a single `path` plus a 1-based `line` and \
+                 `column`; `paths` is for diagnostics only.",
+                lsp_action.name()
+            ),
+        );
+    }
     let position = match (args.line, args.column) {
         (Some(line), Some(column)) if line >= 1 && column >= 1 => Some((line, column)),
         _ => None,
@@ -6122,7 +6182,7 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
     if lsp_action.needs_position() && position.is_none() {
         return outcome(
             &call.id,
-            format!("{} {requested} — missing position", lsp_action.name()),
+            format!("{} {} — missing position", lsp_action.name(), requested[0]),
             format!(
                 "Error: the '{}' action needs a 1-based `line` and `column` (both at least 1).",
                 lsp_action.name()
@@ -6132,12 +6192,16 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
     let Some(lsp) = lsp.filter(|lsp| lsp.enabled) else {
         return outcome(
             &call.id,
-            format!("{} {requested} — not enabled", lsp_action.name()),
+            format!("{} {} — not enabled", lsp_action.name(), requested[0]),
             "Error: language servers are not enabled. Set `[lsp] enabled = true` and configure \
              a server under `[lsp.servers]` in ~/.covexcode/config.toml."
                 .to_string(),
         );
     };
+    if lsp_action == LspAction::Diagnostics && requested.len() > 1 {
+        return execute_lsp_diagnostics_many(call, workspace, lsp, &requested);
+    }
+    let requested = requested[0].as_str();
     let path = match resolve_in_workspace(workspace, requested) {
         Ok(path) => path,
         Err(error) => {
@@ -6221,6 +6285,110 @@ fn execute_lsp(call: &ToolCall, workspace: &Workspace, lsp: Option<&LspConfig>) 
             format!("Error: {error}"),
         ),
     }
+}
+
+/// Diagnostics for several files in one call. Bounded in both count and
+/// wall-clock time: one tool call after a broad edit should not be able to
+/// keep the agent waiting on a slow server. Per-file failures are reported
+/// inline so one bad path cannot hide the rest.
+fn execute_lsp_diagnostics_many(
+    call: &ToolCall,
+    workspace: &Workspace,
+    lsp: &LspConfig,
+    requested: &[String],
+) -> ToolOutcome {
+    let deadline = Instant::now() + DIAGNOSTICS_BUDGET;
+    let mut body = String::new();
+    let mut issues = 0usize;
+    let mut files_with_issues = 0usize;
+    let mut timed_out = 0usize;
+    let mut skipped = 0usize;
+    let total = requested.len().min(MAX_DIAGNOSTICS_FILES);
+    for requested_path in requested.iter().take(MAX_DIAGNOSTICS_FILES) {
+        if Instant::now() >= deadline {
+            skipped += 1;
+            body.push_str(&format!("{requested_path}: skipped (time budget)\n"));
+            continue;
+        }
+        let path = match resolve_in_workspace(workspace, requested_path) {
+            Ok(path) => path,
+            Err(error) => {
+                body.push_str(&format!("{requested_path}: error — {error}\n"));
+                continue;
+            }
+        };
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default();
+        let Some((server_name, server)) = lsp.server_for(extension) else {
+            body.push_str(&format!(
+                "{requested_path}: no server configured for '.{extension}'\n"
+            ));
+            continue;
+        };
+        match crate::lsp::diagnostics(server_name, server, workspace.root(), &path) {
+            Ok(report) if report.timed_out => {
+                timed_out += 1;
+                body.push_str(&format!(
+                    "{requested_path}: diagnostics not available yet (timed out)\n"
+                ));
+            }
+            Ok(report) if report.diagnostics.is_empty() => {
+                body.push_str(&format!("{requested_path}: clean\n"));
+            }
+            Ok(report) => {
+                files_with_issues += 1;
+                issues += report.diagnostics.len();
+                for diagnostic in &report.diagnostics {
+                    let source = diagnostic
+                        .source
+                        .as_deref()
+                        .map(|source| format!(" [{source}]"))
+                        .unwrap_or_default();
+                    body.push_str(&format!(
+                        "{requested_path}:{}:{} {}: {}{source}\n",
+                        diagnostic.line,
+                        diagnostic.column,
+                        diagnostic.severity,
+                        diagnostic.message
+                    ));
+                }
+            }
+            Err(error) => {
+                body.push_str(&format!("{requested_path}: error — {error}\n"));
+            }
+        }
+    }
+
+    let mut display = format!(
+        "diagnostics {total} file{}",
+        if total == 1 { "" } else { "s" }
+    );
+    if issues > 0 {
+        display.push_str(&format!(
+            " — {issues} issue{} in {files_with_issues} file{}",
+            if issues == 1 { "" } else { "s" },
+            if files_with_issues == 1 { "" } else { "s" }
+        ));
+    } else if timed_out > 0 {
+        display.push_str(" — some timed out");
+    } else {
+        display.push_str(" — clean");
+    }
+    if skipped > 0 {
+        display.push_str(&format!(" ({skipped} skipped)"));
+    }
+    if requested.len() > total {
+        display.push_str(&format!(" — {} over the limit ignored", requested.len() - total));
+    }
+    let header = format!(
+        "Diagnostics for {total} file{} ({} issue{}, {timed_out} timed out):\n\n",
+        if total == 1 { "" } else { "s" },
+        issues,
+        if issues == 1 { "" } else { "s" }
+    );
+    outcome(&call.id, display, clip(&format!("{header}{body}"), 12_000))
 }
 
 /// One definition/references/hover round trip, formatted for the transcript.
@@ -7884,6 +8052,33 @@ mod tests {
         let call = tool_call(LSP, json!({"path": "src/lib.rs"}));
         let action = describe_action(&call).expect("known action");
         assert_eq!(action.label(), "diagnostics src/lib.rs");
+    }
+
+    #[test]
+    fn lsp_multi_file_label_names_the_count() {
+        let call = tool_call(LSP, json!({"paths": ["a.rs", "b.rs", "a.rs"]}));
+        let action = describe_action(&call).expect("known action");
+        assert_eq!(action.label(), "diagnostics 2 files");
+        assert!(is_read_only_action(&action));
+    }
+
+    #[tokio::test]
+    async fn lsp_multi_file_reports_disabled_configuration() {
+        let (_dir, ws, cfg) = fixture();
+        let call = tool_call(LSP, json!({"paths": ["a.rs", "b.rs"]}));
+        let out = execute_with_lsp(&call, &ws, &cfg, None).await;
+        assert!(out.content.contains("not enabled"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn lsp_navigation_rejects_paths_only() {
+        let (_dir, ws, cfg) = fixture();
+        let call = tool_call(
+            LSP,
+            json!({"action": "hover", "paths": ["a.rs"], "line": 1, "column": 1}),
+        );
+        let out = execute_with_lsp(&call, &ws, &cfg, None).await;
+        assert!(out.content.contains("diagnostics only"), "{}", out.content);
     }
 
     /// In a git work tree the index comes from `git ls-files`: tracked and
