@@ -118,8 +118,8 @@ extensions = ["ts", "tsx", "js", "jsx"]
   fails closed when it is absent, so older bundled agents never show a broken
   card.
 - `covexcode-ide`: `acpClient.ts` carries the `lsp` flag, `lspDiagnostics.ts`
-  parses the tool's plain-text diagnostics and location rows and prepares
-  safe hover fences, and `extension.ts` renders the cards and registers
+  parses diagnostics, locations and symbol outlines and prepares safe
+  hover/outline fences, and `extension.ts` renders the cards and registers
   `covexcode.openDiagnostic`.
 - `repo_map`: the top three files ask an **already-running** server for
   `textDocument/documentSymbol`; the regex index still ranks the files and is
@@ -147,7 +147,10 @@ extensions = ["ts", "tsx", "js", "jsx"]
    server-provided message is appended as text rather than parsed as
    Markdown. Hover renders in a code fence sized to be longer than any
    backtick run in the text (one outer markdown fence unwrapped first), so
-   server markup stays inert; long hovers are clipped.
+   server markup stays inert; long hovers are clipped. A `symbols` result
+   renders its count and outline in the same kind of fence; the parser
+   requires the agent's `Symbols in ...` header so "no symbols"/error prose
+   stays in the tool row.
 
 ## Testing
 
@@ -163,6 +166,8 @@ extensions = ["ts", "tsx", "js", "jsx"]
   including nested names, and enforces the 50-name limit.
 - Crash/restart: a server that exits is reported rather than panicking; a
   killed client is forgotten and the next call starts a fresh process.
+- Busy client: `repo_map`'s warm-only lookup returns `None` immediately while
+  another request holds the client, rather than queueing behind it.
 - UTF-16 position tests with emoji and combining characters.
 - Config tests for defaults and extension mapping.
 - Process reuse: repeated calls leave exactly one client entry and reuse the

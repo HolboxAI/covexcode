@@ -153,7 +153,8 @@ Landed on `main`:
   asks an already-warm server for document
   symbols on its top files and keeps its regex symbols otherwise; the IDE
   renders diagnostics, definitions and references as clickable
-  `path:line:column` rows and shows hover in a safely sized code fence.
+  `path:line:column` rows and shows hover and symbol outlines in safely sized
+  code fences.
   The client is lazy, bounded by timeouts, and restarts a crashed server on
   the next call.
 
