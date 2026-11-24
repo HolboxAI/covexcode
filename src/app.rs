@@ -168,6 +168,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/compact", "summarise the conversation to free up context"),
     ("/usage", "what today cost, and the history"),
     ("/quota", "what is left today, and your own limits"),
+    ("/event", "event token allowance; /event request asks for +2M"),
     ("/subagents", "what each subagent did, step by step"),
     ("/agents", "live panel of running and finished subagents"),
     (
@@ -899,6 +900,9 @@ pub struct App {
     /// `DeployAction::RunInteractive`, because two things cannot own one
     /// terminal.
     pub login_request: bool,
+    /// `/event` asked the runtime loop to read the managed proxy's allowance or
+    /// request +2M. `App` performs no network I/O of its own.
+    pub event_request: Option<crate::event_allowance::EventRequest>,
     /// `/feedback` asked to send a message. The runtime loop takes this, writes
     /// the local log, and spawns the POST (or, when opted out, skips the POST
     /// since the opt-out notice was already pushed). Same split as
@@ -1024,6 +1028,7 @@ impl App {
             turn_starts: Vec::new(),
             turn_prompts: Vec::new(),
             login_request: false,
+            event_request: None,
             feedback_request: None,
             clipboard_rx: None,
             #[cfg(test)]
@@ -1150,6 +1155,7 @@ impl App {
             "/compact" => self.start_compaction(),
             "/usage" => self.show_usage(),
             "/quota" => self.show_quota(),
+            cmd if cmd.starts_with("/event") => self.handle_event_command(cmd),
             "/subagents" => self.show_subagents(),
             "/agents" => self.overlay = Some(Overlay::AgentPanel { selected: 0 }),
             "/teammates" => self.show_teammates(),
@@ -1173,6 +1179,42 @@ impl App {
             "/feedback" => self.start_feedback(),
             "/help" => self.show_help(),
             other => unreachable!("COMMANDS names {other:?}, not dispatched here"),
+        }
+    }
+
+    /// `/event` and `/event request`: queue a request for the runtime loop.
+    fn handle_event_command(&mut self, cmd: &str) {
+        self.follow_tail = true;
+        let arg = cmd.strip_prefix("/event").unwrap_or("").trim();
+        let request = match arg {
+            "" => crate::event_allowance::EventRequest::Status,
+            "request" => crate::event_allowance::EventRequest::RequestMore,
+            _ => {
+                self.messages.push(Message::new(
+                    Role::System,
+                    "Usage: /event shows your event allowance; /event request asks support for 2M more.",
+                ));
+                return;
+            }
+        };
+        if self.is_busy() {
+            self.messages.push(Message::new(
+                Role::System,
+                "Wait for the current turn to finish, then run /event.",
+            ));
+            return;
+        }
+        self.event_request = Some(request);
+    }
+
+    /// The runtime loop finished the event call; print what it returned.
+    pub fn finish_event(&mut self, result: Result<String, String>) {
+        self.follow_tail = true;
+        match result {
+            Ok(text) => self.messages.push(Message::new(Role::System, text)),
+            Err(error) => self
+                .messages
+                .push(Message::new(Role::Error, format!("Event: {error}"))),
         }
     }
 
@@ -6989,6 +7031,38 @@ mod tests {
             .find(|m| m.role == Role::Error)
             .expect("an error");
         assert!(err.content.contains("device code expired"));
+    }
+
+    /// `/event` and `/event request` queue work for the runtime loop, and an
+    /// unknown argument teaches the two forms instead of doing nothing.
+    #[test]
+    fn event_commands_queue_status_and_request() {
+        with_isolated_home(|| {
+            let mut a = app();
+            a.handle_event_command("/event");
+            assert_eq!(
+                a.event_request,
+                Some(crate::event_allowance::EventRequest::Status)
+            );
+
+            a.event_request = None;
+            a.handle_event_command("/event request");
+            assert_eq!(
+                a.event_request,
+                Some(crate::event_allowance::EventRequest::RequestMore)
+            );
+
+            a.event_request = None;
+            a.handle_event_command("/event nope");
+            assert!(a.event_request.is_none());
+            assert!(
+                a.messages
+                    .iter()
+                    .any(|m| m.content.contains("Usage: /event")),
+                "{}",
+                a.messages.last().map(|m| m.content.as_str()).unwrap_or("")
+            );
+        });
     }
 
     /// `/help` and `/doctor` are reachable the same way every other command is

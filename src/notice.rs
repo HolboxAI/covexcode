@@ -45,6 +45,12 @@ pub mod markers {
     pub const INSUFFICIENT_QUOTA: &str = "insufficient_quota";
     pub const LIFETIME_SPEND_LIMIT: &str = "lifetime spend limit";
     pub const DAILY_SPEND_LIMIT: &str = "daily spend limit";
+
+    /// The managed proxy's one-day event cohort. The allowance and the window
+    /// are different remedies from "add credit", so they get their own kind.
+    pub const EVENT_ALLOWANCE: &str = "event allowance exhausted";
+    pub const EVENT_ENDED: &str = "event has ended";
+    pub const EVENT_NOT_STARTED: &str = "event has not started";
 }
 
 /// What kind of thing went wrong.
@@ -61,6 +67,8 @@ pub enum Kind {
     /// The account's prepaid credit (or the server-side daily cap) is spent.
     /// Distinct from `DailyLimit`, which is this machine's own `[quota]`.
     OutOfCredit,
+    /// A one-day event key's token allowance or window, from the proxy.
+    Event,
     /// Slow down.
     RateLimited,
     /// The endpoint could not be reached at all.
@@ -81,6 +89,7 @@ impl Kind {
             | Kind::ContextFull
             | Kind::Truncated
             | Kind::OutOfCredit
+            | Kind::Event
             | Kind::RateLimited => theme::p().warning,
             Kind::Auth | Kind::Offline | Kind::Provider | Kind::Other => theme::p().danger,
         }
@@ -101,6 +110,7 @@ impl Kind {
             Kind::Truncated => "✂",
             Kind::Auth => "⚿",
             Kind::OutOfCredit => "◈",
+            Kind::Event => "◷",
             Kind::RateLimited => "⏳",
             Kind::Offline => "⊘",
             Kind::Provider => "⚠",
@@ -116,6 +126,7 @@ impl Kind {
             Kind::Truncated => "Reply cut off",
             Kind::Auth => "Not authorised",
             Kind::OutOfCredit => "Out of credit",
+            Kind::Event => "Event allowance",
             Kind::RateLimited => "Rate limited",
             Kind::Offline => "Endpoint unreachable",
             Kind::Provider => "Provider error",
@@ -139,6 +150,7 @@ impl Kind {
             // The detail already carries the account URL, in the same text the
             // IDE receives; repeating it here would print it twice in the TUI.
             Kind::OutOfCredit => None,
+            Kind::Event => Some("/event to see the allowance · /event request asks for +2M"),
             Kind::RateLimited => Some("Wait a moment and send again"),
             Kind::Offline => Some("Check your connection, then /provider to confirm the endpoint"),
             Kind::Provider | Kind::Other => None,
@@ -155,6 +167,14 @@ pub fn classify(text: &str) -> Kind {
     use markers as m;
     let lower = text.to_lowercase();
 
+    // The event proxy also uses 429/insufficient_quota, but its remedies are
+    // `/event request` and the event window, not "add credit".
+    if lower.contains(m::EVENT_ALLOWANCE)
+        || lower.contains(m::EVENT_ENDED)
+        || lower.contains(m::EVENT_NOT_STARTED)
+    {
+        return Kind::Event;
+    }
     // Before the generic 429/rate-limit rule: the proxy uses 429 for a spent
     // account as well, and telling someone to "wait a moment" when they need
     // to add credit is the failure this kind exists to prevent.
@@ -241,6 +261,13 @@ mod tests {
                  Add credits at https://covexcode.com/account, then send the message again.",
                 Kind::OutOfCredit,
             ),
+            (
+                "Event allowance used.\n\nevent allowance exhausted — 10,000,000 of \
+                 10,000,000 tokens used.",
+                Kind::Event,
+            ),
+            ("event has ended — the event closed 17:00 IST.", Kind::Event),
+            ("event has not started — opens 10:00 IST.", Kind::Event),
         ];
         for (text, expected) in cases {
             assert_eq!(classify(text), *expected, "misclassified: {text}");
@@ -298,6 +325,7 @@ mod tests {
             Kind::ContextFull,
             Kind::Truncated,
             Kind::OutOfCredit,
+            Kind::Event,
             Kind::RateLimited,
         ] {
             assert_eq!(
@@ -319,6 +347,7 @@ mod tests {
             Kind::Truncated,
             Kind::Auth,
             Kind::OutOfCredit,
+            Kind::Event,
             Kind::RateLimited,
             Kind::Offline,
             Kind::Provider,
