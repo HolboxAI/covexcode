@@ -19,6 +19,7 @@ mod deploy;
 mod diff;
 mod domain;
 mod errors;
+mod event_allowance;
 mod feedback;
 mod file_locks;
 mod headless;
@@ -861,6 +862,16 @@ async fn run_app(
             };
             *terminal = reattach_terminal(modes)?;
             app.finish_login(result);
+        }
+
+        // `/event` is a short HTTP call to the managed proxy (status) or its
+        // +2M request route. It keeps the TUI up: unlike the login browser
+        // handoff, nothing else needs the terminal.
+        if let Some(request) = app.event_request.take() {
+            let endpoint = app.config.llm.endpoint.clone();
+            let api_key = app.config.llm.api_key.clone();
+            let result = crate::event_allowance::run(request, &endpoint, &api_key).await;
+            app.finish_event(result);
         }
 
         // The only place `finish_stream`/`fail_stream`/`cancel`'s queued
