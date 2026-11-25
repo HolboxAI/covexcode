@@ -654,6 +654,7 @@ pub fn retry(workspace: &Path, id: &str, config: &Config) -> Result<Started, Str
     })?;
 
     let call = ToolCall {
+        extra_content: None,
         id: format!("call_retry_{id}"),
         kind: "function".to_string(),
         function: FunctionCall {
@@ -702,6 +703,7 @@ mod tests {
 
     fn background_call(agent_type: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_bg".to_string(),
             kind: "function".to_string(),
             function: FunctionCall {

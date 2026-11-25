@@ -2293,6 +2293,7 @@ impl HeadlessSession {
             (&outcome, partial_path.as_ref())
         {
             let synthetic = ToolCall {
+                extra_content: None,
                 id: call.id.clone(),
                 kind: "function".to_string(),
                 function: llm::FunctionCall {
@@ -3617,6 +3618,7 @@ mod tests {
         let (background_tx, mut background_rx) = mpsc::unbounded_channel();
         session.set_background_updates(background_tx);
         let call = ToolCall {
+            extra_content: None,
             id: "call_bg".to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {

@@ -4766,6 +4766,7 @@ mod tests {
 
     fn command_call(id: &str, command: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: FunctionCall {
@@ -6890,6 +6891,7 @@ mod tests {
             app.workspace_root = "/tmp".to_string();
             app.state = AppState::Streaming;
             app.request_tools(vec![ToolCall {
+                extra_content: None,
                 id: "c1".to_string(),
                 kind: "function".to_string(),
                 function: FunctionCall {

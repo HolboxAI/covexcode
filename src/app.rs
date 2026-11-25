@@ -7287,6 +7287,7 @@ mod tests {
 
     fn deploy_tool_call(args: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_deploy".to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -7445,6 +7446,7 @@ mod tests {
         app.state = AppState::Streaming;
         app.request_tools(vec![
             ToolCall {
+                extra_content: None,
                 id: "call_read".to_string(),
                 kind: "function".to_string(),
                 function: crate::llm::FunctionCall {
@@ -8227,6 +8229,7 @@ mod tests {
             .push(Message::new(Role::User, "add a health check endpoint"));
         let mut asked = Message::new(Role::Assistant, "I'll look at the router first.");
         asked.tool_calls = vec![ToolCall {
+            extra_content: None,
             id: "call_1".to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -9715,6 +9718,7 @@ mod tests {
 
     fn command_call(id: &str, command: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -9726,6 +9730,7 @@ mod tests {
 
     fn tool_call_named(id: &str, name: &str, arguments: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -9753,6 +9758,7 @@ mod tests {
 
     fn read_file_call(id: &str, path: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -9764,6 +9770,7 @@ mod tests {
 
     fn write_file_call(id: &str, path: &str, content: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -9775,6 +9782,7 @@ mod tests {
 
     fn search_call(id: &str, query: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -10921,6 +10929,7 @@ mod tests {
     /// worth anything.
     fn agent_tool_call(id: &str, task: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -11949,6 +11958,7 @@ mod tests {
 
     fn edit_file_call(id: &str, path: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -11969,6 +11979,7 @@ mod tests {
 
     fn plan_call_with(id: &str, title: &str, steps: &[&str]) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -11986,6 +11997,7 @@ mod tests {
 
     fn progress_call(id: &str, step: usize, status: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -12001,6 +12013,7 @@ mod tests {
             .map(|(content, status)| serde_json::json!({ "content": content, "status": status }))
             .collect();
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -12496,6 +12509,7 @@ mod tests {
 
         a.state = AppState::Streaming;
         a.request_tools(vec![ToolCall {
+            extra_content: None,
             id: "call_2".to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {

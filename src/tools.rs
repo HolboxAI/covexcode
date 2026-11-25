@@ -7958,6 +7958,7 @@ mod tests {
 
     fn call(command: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_1".to_string(),
             kind: "function".to_string(),
             function: FunctionCall {
@@ -7969,6 +7970,7 @@ mod tests {
 
     fn background_call(command: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_bg".to_string(),
             kind: "function".to_string(),
             function: FunctionCall {
@@ -7982,6 +7984,7 @@ mod tests {
 
     fn tool_call(name: &str, args: Value) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_1".to_string(),
             kind: "function".to_string(),
             function: FunctionCall {
@@ -9444,6 +9447,7 @@ mod tests {
 
     fn read_call(path: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_1".to_string(),
             kind: "function".to_string(),
             function: FunctionCall {
@@ -9455,6 +9459,7 @@ mod tests {
 
     fn write_call(path: &str, content: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_1".to_string(),
             kind: "function".to_string(),
             function: FunctionCall {
@@ -12721,6 +12726,7 @@ mod tests {
 
     fn search_call(query: &str) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_1".to_string(),
             kind: "function".to_string(),
             function: FunctionCall {
@@ -12732,6 +12738,7 @@ mod tests {
 
     fn search_call_with_max(query: &str, max_results: u32) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_1".to_string(),
             kind: "function".to_string(),
             function: FunctionCall {

@@ -920,6 +920,7 @@ async fn resolve_conflict(
     };
 
     let merge_call = ToolCall {
+        extra_content: None,
         id: "call_merge".to_string(),
         kind: "function".to_string(),
         function: crate::llm::FunctionCall {
