@@ -212,6 +212,7 @@ mod tests {
 
     fn agent_call(args: serde_json::Value) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: "call_agent".to_string(),
             kind: "function".to_string(),
             function: llm::FunctionCall {
@@ -576,6 +577,7 @@ mod tests {
 
     fn call_with(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
         ToolCall {
+            extra_content: None,
             id: id.to_string(),
             kind: "function".to_string(),
             function: llm::FunctionCall {

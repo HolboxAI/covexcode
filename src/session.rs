@@ -546,6 +546,7 @@ mod tests {
 
     fn tool_call() -> crate::llm::ToolCall {
         crate::llm::ToolCall {
+            extra_content: None,
             id: "call_1".to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {

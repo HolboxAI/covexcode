@@ -406,6 +406,7 @@ fn approval_request(
         // The popup renders `action`, not the raw call; the engine already
         // holds the real one and executes it after this answer.
         call: ToolCall {
+            extra_content: None,
             id: tool_call_id,
             kind: "function".to_string(),
             function: FunctionCall {

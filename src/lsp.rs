@@ -1384,6 +1384,7 @@ while True:
         .expect("warm");
 
         let call = crate::llm::ToolCall {
+            extra_content: None,
             id: "map".to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -1546,6 +1547,7 @@ while True:
         };
         let workspace = crate::workspace::Workspace::new(root).expect("workspace");
         let call = crate::llm::ToolCall {
+            extra_content: None,
             id: "diag".to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
@@ -1597,6 +1599,7 @@ while True:
         };
         let workspace = crate::workspace::Workspace::new(root).expect("workspace");
         let call = crate::llm::ToolCall {
+            extra_content: None,
             id: "symbols".to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {

@@ -198,6 +198,13 @@ pub struct ToolCall {
     #[serde(rename = "type")]
     pub kind: String,
     pub function: FunctionCall,
+    /// Provider-specific data that must be replayed unchanged. Google's
+    /// thinking models put a thought signature here; dropping it makes the
+    /// next request fail with "function call is missing a thought_signature".
+    /// Opaque on purpose: other providers never set it, and it is skipped on
+    /// the wire when absent so their requests stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<serde_json::Value>,
 }
 
 impl Default for ToolCall {
@@ -206,6 +213,7 @@ impl Default for ToolCall {
             id: String::new(),
             kind: "function".to_string(),
             function: FunctionCall::default(),
+            extra_content: None,
         }
     }
 }
@@ -279,6 +287,10 @@ pub struct ToolCallDelta {
     pub kind: Option<String>,
     #[serde(default)]
     pub function: Option<FunctionDelta>,
+    /// Present on Google thinking models; must survive reassembly so it can be
+    /// replayed on the next request.
+    #[serde(default)]
+    pub extra_content: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1021,6 +1033,9 @@ fn accumulate_tool_call(pending: &mut Vec<ToolCall>, fragment: ToolCallDelta) {
             slot.function.arguments.push_str(&arguments);
         }
     }
+    if fragment.extra_content.is_some() {
+        slot.extra_content = fragment.extra_content;
+    }
 }
 
 /// Drop half-formed calls and give every survivor an id.
@@ -1646,6 +1661,7 @@ mod tests {
     fn calls_missing_an_id_or_arguments_are_repaired_and_nameless_ones_dropped() {
         let calls = finalize_tool_calls(vec![
             ToolCall {
+                extra_content: None,
                 id: String::new(),
                 kind: "function".to_string(),
                 function: FunctionCall {
@@ -1668,6 +1684,7 @@ mod tests {
             role: "assistant".to_string(),
             content: None,
             tool_calls: vec![ToolCall {
+                extra_content: None,
                 id: "call_1".to_string(),
                 kind: "function".to_string(),
                 function: FunctionCall {
@@ -1681,6 +1698,63 @@ mod tests {
         let json = serde_json::to_string(&message).unwrap();
         assert!(!json.contains("content"), "{json}");
         assert!(json.contains(r#""tool_calls""#), "{json}");
+    }
+
+    /// Google's thinking models attach an opaque signature to each tool call
+    /// and reject the next request if it is not replayed. It arrives as a
+    /// streamed fragment, so assembly must keep it.
+    #[test]
+    fn a_streamed_thought_signature_survives_tool_call_assembly() {
+        let mut pending = Vec::new();
+        for line in [
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":"},"extra_content":{"google":{"thought_signature":"sig-1"}}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.rs\"}"}}]}}]}"#,
+        ] {
+            if let SseLine::Delta(delta, _) = parse_sse_line(line) {
+                for fragment in delta.tool_calls {
+                    accumulate_tool_call(&mut pending, fragment);
+                }
+            }
+        }
+
+        let calls = finalize_tool_calls(pending);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.arguments, r#"{"path":"a.rs"}"#);
+        assert_eq!(
+            calls[0].extra_content,
+            Some(serde_json::json!({"google": {"thought_signature": "sig-1"}}))
+        );
+    }
+
+    /// The signature is opaque and provider-specific: replay it when present,
+    /// and keep every other provider's request byte-identical when absent.
+    #[test]
+    fn a_thought_signature_is_replayed_and_omitted_when_absent() {
+        let with = ToolCall {
+            extra_content: Some(serde_json::json!({
+                "google": {"thought_signature": "sig-1"}
+            })),
+            id: "call_1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "read_file".to_string(),
+                arguments: r#"{"path":"a.rs"}"#.to_string(),
+            },
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(
+            json.contains(r#""extra_content":{"google":{"thought_signature":"sig-1"}}"#),
+            "{json}"
+        );
+        let round: ToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, with);
+
+        let without = ToolCall {
+            extra_content: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&without).unwrap();
+        assert!(!json.contains("extra_content"), "{json}");
     }
 
     /// A message carrying an image serializes `content` as OpenAI's vision

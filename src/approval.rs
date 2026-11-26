@@ -471,6 +471,7 @@ mod tests {
 
     fn agent_call(agent_type: &str) -> crate::llm::ToolCall {
         crate::llm::ToolCall {
+            extra_content: None,
             id: "call_agent".to_string(),
             kind: "function".to_string(),
             function: crate::llm::FunctionCall {
